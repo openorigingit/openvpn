@@ -6,7 +6,7 @@
 # This profile intentionally lands VPN clients in a constrained DMZ and allows
 # only reverse proxy/application gateway access by default.
 
-flush table inet openvpn_ikev2
+destroy table inet openvpn_ikev2
 
 table inet openvpn_ikev2 {
     define wan_if = "eth0"
