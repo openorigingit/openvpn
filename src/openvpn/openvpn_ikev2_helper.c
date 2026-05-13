@@ -1251,6 +1251,15 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 ++existing->retransmits;
                 existing->updated = now;
                 ++counters->ike_sa_init_duplicate;
+                if (ikev2_helper_send_sa_init_response(listener, &peer, peer_len,
+                                                       &header, existing))
+                {
+                    ++counters->ike_sa_init_response_tx;
+                }
+                else
+                {
+                    ++counters->ike_sa_init_response_failed;
+                }
                 counters->ike_sa_active = sa_table->active;
                 return;
             }

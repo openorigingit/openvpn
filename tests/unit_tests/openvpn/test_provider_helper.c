@@ -1605,6 +1605,9 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     test_send_ikev2_datagram_from(response_fd, port, 0xfeedfacecafebeefull);
     usleep(10000);
     test_recv_ikev2_sa_init_response(response_fd, 0xfeedfacecafebeefull);
+    test_send_ikev2_datagram_from(response_fd, port, 0xfeedfacecafebeefull);
+    usleep(10000);
+    test_recv_ikev2_sa_init_response(response_fd, 0xfeedfacecafebeefull);
     close(response_fd);
 
     int datagram_fd = test_create_udp_sender(0);
@@ -1686,11 +1689,11 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
-    assert_true(supervisor.runtime_stats.datagrams_rx >= 17);
-    assert_true(supervisor.runtime_stats.datagrams_parsed >= 17);
+    assert_true(supervisor.runtime_stats.datagrams_rx >= 18);
+    assert_true(supervisor.runtime_stats.datagrams_parsed >= 18);
     assert_true(supervisor.runtime_stats.ike_sa_init_accepted >= 4);
     assert_true(supervisor.runtime_stats.ike_sa_init_state_failed >= 1);
-    assert_true(supervisor.runtime_stats.ike_sa_init_response_tx >= 4);
+    assert_true(supervisor.runtime_stats.ike_sa_init_response_tx >= 5);
     assert_int_equal(supervisor.runtime_stats.ike_sa_init_response_failed, 0);
     assert_true(supervisor.runtime_stats.ike_sa_init_duplicate >= 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_retransmit_dropped >= 1);
