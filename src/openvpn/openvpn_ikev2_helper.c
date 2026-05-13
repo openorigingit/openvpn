@@ -96,6 +96,7 @@
 #define IKEV2_HELPER_EAP_TYPE_TLS 13
 #define IKEV2_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED 0x80
 #define IKEV2_HELPER_EAP_TLS_FLAGS_ALLOWED 0xe0
+#define IKEV2_HELPER_POLL_TIMEOUT_MS 1000
 
 static volatile sig_atomic_t helper_stop;
 
@@ -2858,7 +2859,7 @@ ikev2_helper_loop(int fd)
             ++nfds;
         }
 
-        const int poll_status = poll(pfds, nfds, -1);
+        const int poll_status = poll(pfds, nfds, IKEV2_HELPER_POLL_TIMEOUT_MS);
         if (poll_status < 0)
         {
             if (errno == EINTR)
@@ -2870,6 +2871,8 @@ ikev2_helper_loop(int fd)
         }
         if (poll_status == 0)
         {
+            ikev2_helper_expire_ike_sas(&sa_table, &counters, time(NULL),
+                                        config.half_open_timeout_seconds);
             continue;
         }
         if (pfds[0].revents & (POLLERR | POLLNVAL))
@@ -3005,8 +3008,6 @@ ikev2_helper_loop(int fd)
                     ret = 7;
                     goto done;
                 }
-                ikev2_helper_expire_ike_sas(&sa_table, &counters, time(NULL),
-                                            config.half_open_timeout_seconds);
                 counters.ike_sa_active = sa_table.active;
                 if (!ikev2_helper_send_stats(fd, tx_sequence++, header.sequence,
                                              &counters))
