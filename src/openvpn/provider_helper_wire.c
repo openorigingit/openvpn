@@ -248,6 +248,14 @@ provider_helper_wire_read_u16(const uint8_t **pos)
     return ntohs(value);
 }
 
+static uint16_t
+provider_helper_wire_peek_u16(const uint8_t *pos)
+{
+    uint16_t value;
+    memcpy(&value, pos, sizeof(value));
+    return ntohs(value);
+}
+
 static uint32_t
 provider_helper_wire_read_u32(const uint8_t **pos)
 {
@@ -500,6 +508,9 @@ provider_helper_ikev2_parse_result_name(enum provider_helper_ikev2_parse_result 
         case PROVIDER_HELPER_IKEV2_PARSE_MISSING_REQUIRED_PAYLOAD:
             return "missing-required-payload";
 
+        case PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD:
+            return "unexpected-payload";
+
         default:
             return "unknown";
     }
@@ -624,28 +635,52 @@ provider_helper_ikev2_payload_supported(uint8_t payload_type)
 }
 
 static void
-provider_helper_ikev2_record_payload_type(
+provider_helper_ikev2_record_payload(
     struct provider_helper_ikev2_payload_summary *summary,
-    uint8_t payload_type)
+    uint8_t payload_type,
+    size_t pos,
+    uint16_t payload_len)
 {
     if (!summary)
     {
         return;
     }
 
+    const size_t body_offset = pos + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    const size_t body_len = payload_len
+                            - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+
     ++summary->payload_count;
     switch (payload_type)
     {
         case PROVIDER_HELPER_IKEV2_PAYLOAD_SA:
             summary->saw_sa = true;
+            ++summary->sa_count;
+            if (summary->sa_count == 1)
+            {
+                summary->sa_offset = body_offset;
+                summary->sa_len = body_len;
+            }
             break;
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_KE:
             summary->saw_ke = true;
+            ++summary->ke_count;
+            if (summary->ke_count == 1)
+            {
+                summary->ke_offset = body_offset;
+                summary->ke_len = body_len;
+            }
             break;
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE:
             summary->saw_nonce = true;
+            ++summary->nonce_count;
+            if (summary->nonce_count == 1)
+            {
+                summary->nonce_offset = body_offset;
+                summary->nonce_len = body_len;
+            }
             break;
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY:
@@ -781,13 +816,226 @@ provider_helper_ikev2_parse_payloads(
             }
         }
 
-        provider_helper_ikev2_record_payload_type(summary, payload_type);
+        provider_helper_ikev2_record_payload(summary, payload_type, pos,
+                                             payload_len);
         pos += payload_len;
         payload_type = next_payload;
     }
 
     return pos == payload_end ? PROVIDER_HELPER_IKEV2_PARSE_OK
                               : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+}
+
+static bool
+provider_helper_ikev2_body_inside(size_t packet_len, size_t body_offset,
+                                  size_t body_len)
+{
+    return body_offset <= packet_len && body_len <= packet_len - body_offset;
+}
+
+static enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_validate_transforms(const uint8_t *packet,
+                                          size_t start,
+                                          size_t end,
+                                          uint8_t transform_count)
+{
+    if (!transform_count)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    bool saw_last = false;
+    size_t pos = start;
+    uint32_t parsed = 0;
+    while (pos < end)
+    {
+        if (++parsed > PROVIDER_HELPER_IKEV2_MAX_TRANSFORMS)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_PAYLOAD_LIMIT;
+        }
+        if (end - pos < PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const uint8_t next_transform = packet[pos];
+        const uint16_t transform_len =
+            provider_helper_wire_peek_u16(packet + pos + 2);
+        const uint8_t transform_type = packet[pos + 4];
+        if (next_transform != PROVIDER_HELPER_IKEV2_PAYLOAD_NONE
+            && next_transform != PROVIDER_HELPER_IKEV2_TRANSFORM_MORE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+        if (transform_len < PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
+            || transform_len > end - pos || !transform_type)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        pos += transform_len;
+        if (next_transform == PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
+        {
+            saw_last = true;
+            if (pos != end)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+        }
+    }
+
+    return pos == end && saw_last && parsed == transform_count
+           ? PROVIDER_HELPER_IKEV2_PARSE_OK
+           : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+}
+
+static enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_validate_sa_payload(const uint8_t *packet,
+                                          size_t packet_len,
+                                          size_t body_offset,
+                                          size_t body_len)
+{
+    if (!provider_helper_ikev2_body_inside(packet_len, body_offset, body_len)
+        || body_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                      + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    bool saw_last = false;
+    uint8_t previous_proposal_number = 0;
+    size_t pos = body_offset;
+    const size_t end = body_offset + body_len;
+    uint32_t proposal_count = 0;
+    while (pos < end)
+    {
+        if (++proposal_count > PROVIDER_HELPER_IKEV2_MAX_PROPOSALS)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_PAYLOAD_LIMIT;
+        }
+        if (end - pos < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const uint8_t next_proposal = packet[pos];
+        const uint16_t proposal_len =
+            provider_helper_wire_peek_u16(packet + pos + 2);
+        const uint8_t proposal_number = packet[pos + 4];
+        const uint8_t protocol_id = packet[pos + 5];
+        const uint8_t spi_size = packet[pos + 6];
+        const uint8_t transform_count = packet[pos + 7];
+        if (next_proposal != PROVIDER_HELPER_IKEV2_PAYLOAD_NONE
+            && next_proposal != PROVIDER_HELPER_IKEV2_PROPOSAL_MORE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+        if (proposal_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                           + spi_size
+            || proposal_len > end - pos || !proposal_number
+            || (proposal_count == 1 && proposal_number != 1)
+            || proposal_number < previous_proposal_number
+            || protocol_id != PROVIDER_HELPER_IKEV2_PROTOCOL_IKE
+            || spi_size != 0 || !transform_count)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const size_t transform_start =
+            pos + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE + spi_size;
+        const size_t transform_end = pos + proposal_len;
+        const enum provider_helper_ikev2_parse_result result =
+            provider_helper_ikev2_validate_transforms(
+                packet, transform_start, transform_end, transform_count);
+        if (result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+        {
+            return result;
+        }
+
+        pos = transform_end;
+        previous_proposal_number = proposal_number;
+        if (next_proposal == PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
+        {
+            saw_last = true;
+            if (pos != end)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+        }
+    }
+
+    return pos == end && saw_last && proposal_count
+           ? PROVIDER_HELPER_IKEV2_PARSE_OK
+           : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+}
+
+static enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_validate_ke_payload(const uint8_t *packet,
+                                          size_t packet_len,
+                                          size_t body_offset,
+                                          size_t body_len)
+{
+    if (!provider_helper_ikev2_body_inside(packet_len, body_offset, body_len)
+        || body_len < PROVIDER_HELPER_IKEV2_KE_MIN_BYTES
+        || !provider_helper_wire_peek_u16(packet + body_offset)
+        || packet[body_offset + 2] || packet[body_offset + 3])
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    return PROVIDER_HELPER_IKEV2_PARSE_OK;
+}
+
+static enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_validate_nonce_payload(size_t packet_len,
+                                             size_t body_offset,
+                                             size_t body_len)
+{
+    if (!provider_helper_ikev2_body_inside(packet_len, body_offset, body_len)
+        || body_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+        || body_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    return PROVIDER_HELPER_IKEV2_PARSE_OK;
+}
+
+static enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_validate_sa_init_payloads(
+    const uint8_t *packet,
+    size_t packet_len,
+    const struct provider_helper_ikev2_payload_summary *summary)
+{
+    if (!summary || !summary->saw_sa || !summary->saw_ke
+        || !summary->saw_nonce)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_MISSING_REQUIRED_PAYLOAD;
+    }
+    if (summary->sa_count != 1 || summary->ke_count != 1
+        || summary->nonce_count != 1)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD;
+    }
+
+    enum provider_helper_ikev2_parse_result result =
+        provider_helper_ikev2_validate_sa_payload(packet, packet_len,
+                                                  summary->sa_offset,
+                                                  summary->sa_len);
+    if (result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+    {
+        return result;
+    }
+    result = provider_helper_ikev2_validate_ke_payload(packet, packet_len,
+                                                       summary->ke_offset,
+                                                       summary->ke_len);
+    if (result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+    {
+        return result;
+    }
+    return provider_helper_ikev2_validate_nonce_payload(packet_len,
+                                                        summary->nonce_offset,
+                                                        summary->nonce_len);
 }
 
 enum provider_helper_ikev2_parse_result
@@ -815,9 +1063,8 @@ provider_helper_ikev2_validate_ike_sa_init_request(
         return result;
     }
 
-    return out->saw_sa && out->saw_ke && out->saw_nonce
-           ? PROVIDER_HELPER_IKEV2_PARSE_OK
-           : PROVIDER_HELPER_IKEV2_PARSE_MISSING_REQUIRED_PAYLOAD;
+    return provider_helper_ikev2_validate_sa_init_payloads(packet, packet_len,
+                                                           out);
 }
 
 bool

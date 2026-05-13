@@ -277,6 +277,13 @@ test_provider_helper_xfrm_lease_roundtrip(void **state)
 }
 
 static void
+test_write_be16(uint8_t *dst, uint16_t value)
+{
+    dst[0] = (uint8_t)(value >> 8);
+    dst[1] = (uint8_t)value;
+}
+
+static void
 test_write_be32(uint8_t *dst, uint32_t value)
 {
     dst[0] = (uint8_t)(value >> 24);
@@ -326,6 +333,67 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
 
 static size_t
 test_make_ike_sa_init_packet(uint8_t *packet, size_t packet_size)
+{
+    const uint16_t sa_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                            + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                            + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE;
+    const uint16_t ke_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                            + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE + 8;
+    const uint16_t nonce_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                               + PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES;
+    const size_t packet_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                              + sa_len + ke_len + nonce_len;
+    assert_true(packet_size >= packet_len);
+    memset(packet, 0, packet_size);
+    test_make_ikev2_header(packet, false,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT,
+                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+                           0, (uint32_t)packet_len);
+
+    size_t pos = PROVIDER_HELPER_IKEV2_HEADER_SIZE;
+    pos = test_add_ikev2_payload(packet, pos, PROVIDER_HELPER_IKEV2_PAYLOAD_KE,
+                                 sa_len, 0);
+    const size_t proposal = PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                            + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    packet[proposal] = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+    test_write_be16(packet + proposal + 2,
+                    PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                    + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE);
+    packet[proposal + 4] = 1; /* Proposal number. */
+    packet[proposal + 5] = PROVIDER_HELPER_IKEV2_PROTOCOL_IKE;
+    packet[proposal + 6] = 0; /* Initial IKE proposals do not carry SPI here. */
+    packet[proposal + 7] = 1; /* One transform. */
+    const size_t transform =
+        proposal + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE;
+    packet[transform] = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+    test_write_be16(packet + transform + 2,
+                    PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE);
+    packet[transform + 4] = 1; /* Transform type: encryption algorithm. */
+    test_write_be16(packet + transform + 6, 20);
+
+    const size_t ke = pos + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    pos = test_add_ikev2_payload(packet, pos, PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE,
+                                 ke_len, 0);
+    test_write_be16(packet + ke, 19); /* ECP-256. */
+    for (size_t i = 0; i < 8; ++i)
+    {
+        packet[ke + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE + i] =
+            (uint8_t)(0xa0 + i);
+    }
+
+    const size_t nonce = pos + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    pos = test_add_ikev2_payload(packet, pos, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+                                 nonce_len, 0);
+    for (size_t i = 0; i < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES; ++i)
+    {
+        packet[nonce + i] = (uint8_t)(0x10 + i);
+    }
+    assert_int_equal(pos, packet_len);
+    return packet_len;
+}
+
+static size_t
+test_make_empty_ike_sa_init_packet(uint8_t *packet, size_t packet_size)
 {
     const size_t packet_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE
                               + (3 * PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE);
@@ -483,6 +551,16 @@ test_provider_helper_ikev2_payload_parser(void **state)
     assert_true(summary.saw_sa);
     assert_true(summary.saw_ke);
     assert_true(summary.saw_nonce);
+    assert_int_equal(summary.sa_count, 1);
+    assert_int_equal(summary.ke_count, 1);
+    assert_int_equal(summary.nonce_count, 1);
+    assert_int_equal(summary.sa_len,
+                     PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                     + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE);
+    assert_int_equal(summary.ke_len,
+                     PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE + 8);
+    assert_int_equal(summary.nonce_len,
+                     PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES);
     assert_int_equal(provider_helper_ikev2_validate_ike_sa_init_request(
                          packet, packet_len, &header, &summary),
                      PROVIDER_HELPER_IKEV2_PARSE_OK);
@@ -514,13 +592,55 @@ test_provider_helper_ikev2_payload_parser(void **state)
                          packet, packet_len, &header, &summary),
                      PROVIDER_HELPER_IKEV2_PARSE_MISSING_REQUIRED_PAYLOAD);
 
+    packet_len = test_make_empty_ike_sa_init_packet(packet, sizeof(packet));
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, packet_len, PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE,
+                         false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_parse_payloads(
+                         packet, packet_len, &header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_validate_ike_sa_init_request(
+                         packet, packet_len, &header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH);
+
+    packet_len = test_make_ike_sa_init_packet(packet, sizeof(packet));
+    const size_t sa_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                          + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                          + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE;
+    const size_t ke_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                          + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE + 8;
+    const size_t nonce_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                             + PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES;
+    const size_t nonce = PROVIDER_HELPER_IKEV2_HEADER_SIZE + sa_len + ke_len;
+    const size_t duplicate_nonce = packet_len;
+    packet[nonce] = PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE;
+    assert_true(sizeof(packet) >= packet_len + nonce_len);
+    test_add_ikev2_payload(packet, duplicate_nonce,
+                           PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+                           (uint16_t)nonce_len, 0);
+    memset(packet + duplicate_nonce + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE,
+           0x44, PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES);
+    packet_len += nonce_len;
+    test_write_be32(packet + 24, (uint32_t)packet_len);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, packet_len, PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE,
+                         false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_validate_ike_sa_init_request(
+                         packet, packet_len, &header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD);
+    assert_string_equal(provider_helper_ikev2_parse_result_name(
+                            PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD),
+                        "unexpected-payload");
+
     packet_len = test_make_ike_sa_init_packet(packet, sizeof(packet));
     assert_int_equal(provider_helper_ikev2_parse_header(
                          packet, packet_len, PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE,
                          false, &header),
                      PROVIDER_HELPER_IKEV2_PARSE_OK);
-    packet[PROVIDER_HELPER_IKEV2_HEADER_SIZE] = 200;
-    packet[PROVIDER_HELPER_IKEV2_HEADER_SIZE + 5] = 0x80;
+    header.next_payload = 200;
+    packet[PROVIDER_HELPER_IKEV2_HEADER_SIZE + 1] = 0x80;
     assert_int_equal(provider_helper_ikev2_parse_payloads(
                          packet, packet_len, &header, &summary),
                      PROVIDER_HELPER_IKEV2_PARSE_UNSUPPORTED_CRITICAL_PAYLOAD);
