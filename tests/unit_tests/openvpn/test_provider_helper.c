@@ -24,8 +24,10 @@
 #include <cmocka.h>
 
 #if defined(ENABLE_CRYPTO_OPENSSL)
+#include <openssl/ec.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <openssl/x509.h>
 #endif
 
 #include "provider_helper.h"
@@ -1014,33 +1016,103 @@ test_aes_gcm_encrypt(const uint8_t *key, size_t key_len,
     return ret;
 }
 
+static void
+test_make_der_certificate(uint8_t *der, size_t der_size, size_t *der_len)
+{
+    assert_non_null(der);
+    assert_non_null(der_len);
+
+    EVP_PKEY *pkey = NULL;
+    EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
+    X509 *cert = X509_new();
+    assert_non_null(pctx);
+    assert_non_null(cert);
+
+    assert_int_equal(EVP_PKEY_keygen_init(pctx), 1);
+    assert_int_equal(EVP_PKEY_CTX_set_ec_paramgen_curve_nid(
+                         pctx, NID_X9_62_prime256v1),
+                     1);
+    assert_int_equal(EVP_PKEY_keygen(pctx, &pkey), 1);
+    assert_non_null(pkey);
+
+    assert_int_equal(X509_set_version(cert, 2), 1);
+    assert_int_equal(ASN1_INTEGER_set(X509_get_serialNumber(cert), 0x1234), 1);
+    assert_non_null(X509_gmtime_adj(X509_getm_notBefore(cert), 0));
+    assert_non_null(X509_gmtime_adj(X509_getm_notAfter(cert), 3600));
+    assert_int_equal(X509_set_pubkey(cert, pkey), 1);
+
+    X509_NAME *name = X509_get_subject_name(cert);
+    assert_non_null(name);
+    assert_int_equal(X509_NAME_add_entry_by_txt(
+                         name, "CN", MBSTRING_ASC,
+                         (const unsigned char *)"Test IKEv2 CA", -1, -1, 0),
+                     1);
+    assert_int_equal(X509_set_issuer_name(cert, name), 1);
+    assert_true(X509_sign(cert, pkey, EVP_sha256()) > 0);
+
+    const int encoded_len = i2d_X509(cert, NULL);
+    assert_true(encoded_len > 0);
+    assert_true((size_t)encoded_len <= der_size);
+    unsigned char *pos = der;
+    assert_int_equal(i2d_X509(cert, &pos), encoded_len);
+    *der_len = (size_t)encoded_len;
+
+    X509_free(cert);
+    EVP_PKEY_free(pkey);
+    EVP_PKEY_CTX_free(pctx);
+}
+
 static size_t
 test_make_encrypted_ike_auth_packet(
     uint8_t *packet,
     size_t packet_size,
     uint64_t initiator_spi,
     const struct test_ikev2_sa_init_response_material *material,
-    bool malformed_inner)
+    bool malformed_inner,
+    const uint8_t *cert_der,
+    size_t cert_der_len)
 {
     uint8_t sk_ei[TEST_IKEV2_AES_GCM_KEYMAT_BYTES];
     assert_true(test_derive_ike_auth_keymat(initiator_spi, material, sk_ei,
                                             sizeof(sk_ei)));
 
-    uint8_t plaintext[16] = {
-        PROVIDER_HELPER_IKEV2_PAYLOAD_NONE, 0, 0, 9,
-        2, 0, 0, 0, 'a',
-        0, /* Pad Length. */
-    };
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    CLEAR(plaintext);
+    const uint8_t next_payload =
+        cert_der ? PROVIDER_HELPER_IKEV2_PAYLOAD_CERT
+                 : PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+    size_t plaintext_len = 0;
+    plaintext_len = test_add_ikev2_payload(plaintext, plaintext_len,
+                                           next_payload, 9, 0);
+    plaintext[4] = PROVIDER_HELPER_IKEV2_ID_FQDN;
+    plaintext[8] = 'a';
+    if (cert_der)
+    {
+        assert_true(cert_der_len > 0);
+        assert_true(cert_der_len + 5 <= UINT16_MAX);
+        assert_true(plaintext_len + cert_der_len + 6 <= sizeof(plaintext));
+        const uint16_t cert_payload_len = (uint16_t)(cert_der_len + 5);
+        plaintext_len = test_add_ikev2_payload(
+            plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+            cert_payload_len, 0);
+        const size_t cert_body = plaintext_len - cert_payload_len
+                                 + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+        plaintext[cert_body] = 4;
+        memcpy(plaintext + cert_body + 1, cert_der, cert_der_len);
+    }
+    plaintext[plaintext_len++] = 0; /* Pad Length. */
+
     uint8_t malformed_plaintext[8] = {
         PROVIDER_HELPER_IKEV2_PAYLOAD_NONE, 0, 0, 3,
         0, /* Pad Length. */
     };
     const uint8_t *selected_plaintext =
         malformed_inner ? malformed_plaintext : plaintext;
-    const size_t plaintext_len = malformed_inner ? 5 : 10;
+    const size_t selected_plaintext_len =
+        malformed_inner ? 5 : plaintext_len;
     const size_t sk_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
                           + TEST_IKEV2_AES_GCM_IV_BYTES
-                          + plaintext_len
+                          + selected_plaintext_len
                           + TEST_IKEV2_AES_GCM_TAG_BYTES;
     const size_t packet_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE + sk_len;
     assert_true(packet_size >= packet_len);
@@ -1077,11 +1149,12 @@ test_make_encrypted_ike_auth_packet(
            sizeof(iv));
 
     uint8_t *ciphertext = packet + pos;
-    uint8_t *tag = packet + pos + plaintext_len;
+    uint8_t *tag = packet + pos + selected_plaintext_len;
     assert_true(test_aes_gcm_encrypt(sk_ei, 32, nonce, sizeof(nonce), packet,
                                      PROVIDER_HELPER_IKEV2_HEADER_SIZE
                                      + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE,
-                                     selected_plaintext, plaintext_len,
+                                     selected_plaintext,
+                                     selected_plaintext_len,
                                      ciphertext, tag));
 
     secure_memzero(sk_ei, sizeof(sk_ei));
@@ -1138,11 +1211,14 @@ test_send_ikev2_encrypted_ike_auth_datagram_from(
     uint16_t port,
     uint64_t initiator_spi,
     const struct test_ikev2_sa_init_response_material *material,
-    bool malformed_inner)
+    bool malformed_inner,
+    const uint8_t *cert_der,
+    size_t cert_der_len)
 {
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     const size_t packet_len = test_make_encrypted_ike_auth_packet(
-        packet, sizeof(packet), initiator_spi, material, malformed_inner);
+        packet, sizeof(packet), initiator_spi, material, malformed_inner,
+        cert_der, cert_der_len);
 
     struct sockaddr_in addr;
     CLEAR(addr);
@@ -2145,6 +2221,7 @@ write_helper_auth_request_fd(int fd, uint64_t sequence, uint64_t correlation_id,
 struct test_provider_helper_auth_cb_state {
     unsigned int calls;
     uint64_t request_id;
+    struct provider_helper_auth_request request;
 };
 
 static bool
@@ -2159,6 +2236,7 @@ test_provider_helper_auth_cb(void *arg,
 
     ++state->calls;
     state->request_id = request->request_id;
+    state->request = *request;
     CLEAR(*response);
     response->request_id = request->request_id;
     response->decision = PROVIDER_HELPER_AUTH_DENY;
@@ -2246,6 +2324,10 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     struct provider_helper_supervisor supervisor;
     provider_helper_supervisor_init(&supervisor);
+    struct test_provider_helper_auth_cb_state cb_state;
+    CLEAR(cb_state);
+    provider_helper_supervisor_set_auth_callback(
+        &supervisor, test_provider_helper_auth_cb, &cb_state);
     supervisor.runtime_config.cookie_threshold = 3;
     supervisor.runtime_config.max_half_open_sas = 4;
     supervisor.runtime_config.max_half_open_sas_per_source = 2;
@@ -2322,14 +2404,20 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
                          response_fd, 0xfeedfacecafebeefull),
                      responder_spi);
 #if defined(ENABLE_CRYPTO_OPENSSL)
+    uint8_t cert_der[2048];
+    size_t cert_der_len = 0;
+    test_make_der_certificate(cert_der, sizeof(cert_der), &cert_der_len);
     test_send_ikev2_encrypted_ike_auth_datagram_from(
-        response_fd, port, 0xfeedfacecafebeefull, &sa_init_material, false);
+        response_fd, port, 0xfeedfacecafebeefull, &sa_init_material, false,
+        cert_der, cert_der_len);
     usleep(10000);
     test_send_ikev2_encrypted_ike_auth_datagram_from(
-        response_fd, port, 0xfeedfacecafebeefull, &sa_init_material, false);
+        response_fd, port, 0xfeedfacecafebeefull, &sa_init_material, false,
+        cert_der, cert_der_len);
     usleep(10000);
     test_send_ikev2_encrypted_ike_auth_datagram_from(
-        response_fd, port, 0xfeedfacecafebeefull, &sa_init_material, true);
+        response_fd, port, 0xfeedfacecafebeefull, &sa_init_material, true,
+        NULL, 0);
     usleep(10000);
 #endif
     test_send_ikev2_ike_auth_datagram_from(response_fd, port,
@@ -2370,6 +2458,16 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
         usleep(10000);
     }
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    assert_true(cb_state.calls >= 1);
+    assert_int_equal(cb_state.request.credential_fingerprint_len, 71);
+    assert_memory_equal(cb_state.request.credential_fingerprint, "sha256:",
+                        strlen("sha256:"));
+    assert_int_equal(cb_state.request.cert_serial_len, strlen("1234"));
+    assert_memory_equal(cb_state.request.cert_serial, "1234", strlen("1234"));
+    assert_true(cb_state.request.cert_issuer_len > 0);
+    assert_non_null(strstr(cb_state.request.cert_issuer, "Test IKEv2 CA"));
+#endif
 
     for (int attempt = 0;
          attempt < 20 && supervisor.runtime_stats.ike_sa_active < 3;

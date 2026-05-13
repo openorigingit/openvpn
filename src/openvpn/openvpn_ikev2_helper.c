@@ -30,6 +30,7 @@
 
 #if defined(ENABLE_CRYPTO_OPENSSL)
 #include <openssl/bn.h>
+#include <openssl/bio.h>
 #include <openssl/core_names.h>
 #include <openssl/ec.h>
 #include <openssl/evp.h>
@@ -37,12 +38,14 @@
 #include <openssl/obj_mac.h>
 #include <openssl/opensslv.h>
 #include <openssl/rand.h>
+#include <openssl/x509.h>
 #elif defined(ENABLE_CRYPTO_MBEDTLS)
 #include <mbedtls/ecdh.h>
 #include <mbedtls/ecp.h>
 #include <mbedtls/gcm.h>
 #include <mbedtls/md.h>
 #include <mbedtls/version.h>
+#include <mbedtls/x509_crt.h>
 #if MBEDTLS_VERSION_NUMBER >= 0x03020100
 #include <psa/crypto.h>
 #endif
@@ -80,6 +83,8 @@
 #define IKEV2_HELPER_PRF_PLUS_SEED_MAX_BYTES \
     (2 * PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES + 2 * sizeof(uint64_t))
 #define IKEV2_HELPER_CLAIMED_PRINCIPAL_SIZE 256
+#define IKEV2_HELPER_CERT_ENCODING_X509_SIGNATURE 4
+#define IKEV2_HELPER_SHA256_DIGEST_BYTES 32
 
 static volatile sig_atomic_t helper_stop;
 
@@ -124,6 +129,12 @@ struct ikev2_helper_ike_sa {
     size_t claimed_principal_len;
     uint32_t claimed_principal_id_type;
     char claimed_principal[IKEV2_HELPER_CLAIMED_PRINCIPAL_SIZE];
+    size_t credential_fingerprint_len;
+    char credential_fingerprint[PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE];
+    size_t cert_serial_len;
+    char cert_serial[PROVIDER_HELPER_AUTH_SERIAL_SIZE];
+    size_t cert_issuer_len;
+    char cert_issuer[PROVIDER_HELPER_AUTH_ISSUER_SIZE];
     uint64_t pending_auth_request_id;
     time_t created;
     time_t updated;
@@ -1341,6 +1352,16 @@ ikev2_helper_record_ike_auth_inner_payload(
             summary->saw_idr = true;
             break;
 
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_CERT:
+            summary->saw_cert = true;
+            ++summary->cert_count;
+            if (summary->cert_count == 1)
+            {
+                summary->cert_offset = body_offset;
+                summary->cert_len = body_len;
+            }
+            break;
+
         case PROVIDER_HELPER_IKEV2_PAYLOAD_AUTH:
             summary->saw_auth = true;
             break;
@@ -1436,6 +1457,253 @@ static bool
 ikev2_helper_principal_byte_allowed(uint8_t c)
 {
     return c >= 0x21 && c <= 0x7e;
+}
+
+static bool
+ikev2_helper_metadata_byte_allowed(uint8_t c, bool allow_space)
+{
+    return allow_space ? c >= 0x20 && c <= 0x7e : c >= 0x21 && c <= 0x7e;
+}
+
+static bool
+ikev2_helper_copy_metadata_field(char *dst, size_t dst_size, size_t *dst_len,
+                                 const char *src, size_t src_len,
+                                 bool allow_space)
+{
+    if (!dst || !dst_size || !dst_len || !src || !src_len
+        || src_len >= dst_size)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < src_len; ++i)
+    {
+        if (!ikev2_helper_metadata_byte_allowed((uint8_t)src[i], allow_space))
+        {
+            return false;
+        }
+    }
+
+    memcpy(dst, src, src_len);
+    dst[src_len] = '\0';
+    *dst_len = src_len;
+    return true;
+}
+
+static void
+ikev2_helper_clear_credential_metadata(struct ikev2_helper_ike_sa *sa)
+{
+    if (!sa)
+    {
+        return;
+    }
+
+    sa->credential_fingerprint_len = 0;
+    sa->cert_serial_len = 0;
+    sa->cert_issuer_len = 0;
+    ikev2_helper_secure_zero(sa->credential_fingerprint,
+                             sizeof(sa->credential_fingerprint));
+    ikev2_helper_secure_zero(sa->cert_serial, sizeof(sa->cert_serial));
+    ikev2_helper_secure_zero(sa->cert_issuer, sizeof(sa->cert_issuer));
+}
+
+static bool
+ikev2_helper_format_sha256_fingerprint(const uint8_t *digest,
+                                       size_t digest_len,
+                                       char *dst,
+                                       size_t dst_size,
+                                       size_t *dst_len)
+{
+    static const char hex[] = "0123456789abcdef";
+    const char prefix[] = "sha256:";
+
+    if (!digest || digest_len != IKEV2_HELPER_SHA256_DIGEST_BYTES
+        || !dst || !dst_size || !dst_len)
+    {
+        return false;
+    }
+
+    const size_t out_len = strlen(prefix) + digest_len * 2;
+    if (out_len >= dst_size)
+    {
+        return false;
+    }
+
+    memcpy(dst, prefix, strlen(prefix));
+    char *pos = dst + strlen(prefix);
+    for (size_t i = 0; i < digest_len; ++i)
+    {
+        *pos++ = hex[digest[i] >> 4];
+        *pos++ = hex[digest[i] & 0x0f];
+    }
+    *pos = '\0';
+    *dst_len = out_len;
+    return true;
+}
+
+#if defined(ENABLE_CRYPTO_OPENSSL)
+static bool
+ikev2_helper_extract_x509_metadata_openssl(
+    struct ikev2_helper_ike_sa *sa,
+    const uint8_t *cert_der,
+    size_t cert_der_len)
+{
+    if (!sa || !cert_der || !cert_der_len)
+    {
+        return false;
+    }
+
+    const unsigned char *parse = cert_der;
+    X509 *cert = d2i_X509(NULL, &parse, (long)cert_der_len);
+    if (!cert || parse != cert_der + cert_der_len)
+    {
+        X509_free(cert);
+        return false;
+    }
+
+    bool ret = false;
+    uint8_t digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_len = 0;
+    BIGNUM *serial_bn = NULL;
+    char *serial_hex = NULL;
+    BIO *issuer_bio = NULL;
+    char *issuer_data = NULL;
+    long issuer_len = 0;
+
+    serial_bn = ASN1_INTEGER_to_BN(X509_get0_serialNumber(cert), NULL);
+    serial_hex = serial_bn && !BN_is_negative(serial_bn)
+                     ? BN_bn2hex(serial_bn)
+                     : NULL;
+    issuer_bio = BIO_new(BIO_s_mem());
+    if (X509_digest(cert, EVP_sha256(), digest, &digest_len) == 1
+        && ikev2_helper_format_sha256_fingerprint(
+               digest, digest_len, sa->credential_fingerprint,
+               sizeof(sa->credential_fingerprint),
+               &sa->credential_fingerprint_len)
+        && serial_hex
+        && ikev2_helper_copy_metadata_field(
+               sa->cert_serial, sizeof(sa->cert_serial), &sa->cert_serial_len,
+               serial_hex, strlen(serial_hex), false)
+        && issuer_bio
+        && X509_NAME_print_ex(issuer_bio, X509_get_issuer_name(cert), 0,
+                              XN_FLAG_RFC2253) >= 0)
+    {
+        issuer_len = BIO_get_mem_data(issuer_bio, &issuer_data);
+        ret = issuer_len > 0
+              && ikev2_helper_copy_metadata_field(
+                     sa->cert_issuer, sizeof(sa->cert_issuer),
+                     &sa->cert_issuer_len, issuer_data, (size_t)issuer_len,
+                     true);
+    }
+
+    if (!ret)
+    {
+        ikev2_helper_clear_credential_metadata(sa);
+    }
+    BIO_free(issuer_bio);
+    OPENSSL_free(serial_hex);
+    BN_free(serial_bn);
+    X509_free(cert);
+    return ret;
+}
+#elif defined(ENABLE_CRYPTO_MBEDTLS)
+static bool
+ikev2_helper_extract_x509_metadata_mbedtls(
+    struct ikev2_helper_ike_sa *sa,
+    const uint8_t *cert_der,
+    size_t cert_der_len)
+{
+    if (!sa || !cert_der || !cert_der_len)
+    {
+        return false;
+    }
+
+    mbedtls_x509_crt cert;
+    mbedtls_x509_crt_init(&cert);
+    bool ret = false;
+    uint8_t digest[IKEV2_HELPER_SHA256_DIGEST_BYTES];
+    char serial[PROVIDER_HELPER_AUTH_SERIAL_SIZE];
+    char issuer[PROVIDER_HELPER_AUTH_ISSUER_SIZE];
+    CLEAR(serial);
+    CLEAR(issuer);
+
+    const mbedtls_md_info_t *sha256 =
+        mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (mbedtls_x509_crt_parse_der(&cert, cert_der, cert_der_len) == 0
+        && sha256 && mbedtls_md(sha256, cert_der, cert_der_len, digest) == 0
+        && mbedtls_x509_serial_gets(serial, sizeof(serial), &cert.serial) > 0
+        && mbedtls_x509_dn_gets(issuer, sizeof(issuer), &cert.issuer) > 0
+        && ikev2_helper_format_sha256_fingerprint(
+               digest, sizeof(digest), sa->credential_fingerprint,
+               sizeof(sa->credential_fingerprint),
+               &sa->credential_fingerprint_len)
+        && ikev2_helper_copy_metadata_field(
+               sa->cert_serial, sizeof(sa->cert_serial), &sa->cert_serial_len,
+               serial, strlen(serial), false)
+        && ikev2_helper_copy_metadata_field(
+               sa->cert_issuer, sizeof(sa->cert_issuer), &sa->cert_issuer_len,
+               issuer, strlen(issuer), true))
+    {
+        ret = true;
+    }
+
+    if (!ret)
+    {
+        ikev2_helper_clear_credential_metadata(sa);
+    }
+    mbedtls_x509_crt_free(&cert);
+    return ret;
+}
+#endif
+
+static bool
+ikev2_helper_extract_credential_metadata(
+    struct ikev2_helper_ike_sa *sa,
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    const struct provider_helper_ikev2_payload_summary *summary)
+{
+    if (!sa)
+    {
+        return false;
+    }
+
+    ikev2_helper_clear_credential_metadata(sa);
+    if (!summary)
+    {
+        return false;
+    }
+    if (!summary->saw_cert)
+    {
+        return true;
+    }
+    if (!plaintext || !ikev2_helper_body_inside(plaintext_len,
+                                                summary->cert_offset,
+                                                summary->cert_len)
+        || summary->cert_len <= 1)
+    {
+        return false;
+    }
+
+    const uint8_t *cert_payload = plaintext + summary->cert_offset;
+    if (cert_payload[0] != IKEV2_HELPER_CERT_ENCODING_X509_SIGNATURE)
+    {
+        return false;
+    }
+
+    const uint8_t *cert_der = cert_payload + 1;
+    const size_t cert_der_len = summary->cert_len - 1;
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    return ikev2_helper_extract_x509_metadata_openssl(sa, cert_der,
+                                                      cert_der_len);
+#elif defined(ENABLE_CRYPTO_MBEDTLS)
+    return ikev2_helper_extract_x509_metadata_mbedtls(sa, cert_der,
+                                                      cert_der_len);
+#else
+    (void)cert_der;
+    (void)cert_der_len;
+    return false;
+#endif
 }
 
 static bool
@@ -1903,6 +2171,7 @@ ikev2_helper_apply_auth_response(
             sa->claimed_principal_id_type = 0;
             ikev2_helper_secure_zero(sa->claimed_principal,
                                      sizeof(sa->claimed_principal));
+            ikev2_helper_clear_credential_metadata(sa);
             ++counters->ike_auth_denied;
         }
         else
@@ -1929,6 +2198,10 @@ ikev2_helper_queue_auth_request(
         || !sa || !sa->active || !sa->claimed_principal_ready
         || !sa->claimed_principal_len
         || sa->claimed_principal_len >= PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE
+        || sa->credential_fingerprint_len
+               >= PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE
+        || sa->cert_serial_len >= PROVIDER_HELPER_AUTH_SERIAL_SIZE
+        || sa->cert_issuer_len >= PROVIDER_HELPER_AUTH_ISSUER_SIZE
         || !sa->claimed_principal_id_type || sa->pending_auth_request_id)
     {
         return false;
@@ -1946,9 +2219,17 @@ ikev2_helper_queue_auth_request(
         .profile = PROVIDER_HELPER_AUTH_PROFILE_EAP_TLS,
         .ikev2_id_type = sa->claimed_principal_id_type,
         .claimed_principal_len = (uint32_t)sa->claimed_principal_len,
+        .credential_fingerprint_len =
+            (uint32_t)sa->credential_fingerprint_len,
+        .cert_serial_len = (uint32_t)sa->cert_serial_len,
+        .cert_issuer_len = (uint32_t)sa->cert_issuer_len,
     };
     memcpy(request.claimed_principal, sa->claimed_principal,
            sa->claimed_principal_len);
+    memcpy(request.credential_fingerprint, sa->credential_fingerprint,
+           sa->credential_fingerprint_len);
+    memcpy(request.cert_serial, sa->cert_serial, sa->cert_serial_len);
+    memcpy(request.cert_issuer, sa->cert_issuer, sa->cert_issuer_len);
 
     if (!ikev2_helper_send_auth_request(ipc_fd, tx_sequence, request.request_id,
                                         &request))
@@ -2373,6 +2654,14 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 return;
             }
             ++counters->ike_auth_idi_extracted;
+            if (!ikev2_helper_extract_credential_metadata(
+                    sa, plaintext, plaintext_len, &inner_summary))
+            {
+                ++counters->ike_auth_inner_malformed;
+                ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
             ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
 
             if (ikev2_helper_queue_auth_request(ipc_fd, tx_sequence,
