@@ -36,6 +36,7 @@
 
 #define IKEV2_HELPER_MAX_LISTENERS 4
 #define IKEV2_HELPER_MAX_XFRM_LEASES 8
+#define IKEV2_HELPER_MAX_IKE_SAS PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_SAS
 
 static volatile sig_atomic_t helper_stop;
 
@@ -44,8 +45,21 @@ struct ikev2_helper_listener {
     struct provider_helper_listener_fd descriptor;
 };
 
-struct ikev2_helper_anti_dos {
-    uint32_t half_open_sas;
+struct ikev2_helper_ike_sa {
+    bool active;
+    uint64_t initiator_spi;
+    uint64_t responder_spi;
+    uint32_t listener_id;
+    uint32_t message_id;
+    time_t created;
+    time_t updated;
+    struct sockaddr_storage peer;
+    socklen_t peer_len;
+};
+
+struct ikev2_helper_ike_sa_table {
+    struct ikev2_helper_ike_sa entries[IKEV2_HELPER_MAX_IKE_SAS];
+    uint32_t active;
 };
 
 static void
@@ -334,10 +348,109 @@ ikev2_helper_read_xfrm_lease(int fd, const struct provider_helper_msg_header *he
            && provider_helper_xfrm_lease_valid(lease, NULL, 0);
 }
 
+static bool
+ikev2_helper_peer_equal(const struct sockaddr_storage *a, socklen_t a_len,
+                        const struct sockaddr_storage *b, socklen_t b_len)
+{
+    (void)a_len;
+    (void)b_len;
+
+    if (!a || !b || a->ss_family != b->ss_family)
+    {
+        return false;
+    }
+
+    switch (a->ss_family)
+    {
+        case AF_INET:
+        {
+            const struct sockaddr_in *a4 = (const struct sockaddr_in *)a;
+            const struct sockaddr_in *b4 = (const struct sockaddr_in *)b;
+            return a4->sin_port == b4->sin_port
+                   && a4->sin_addr.s_addr == b4->sin_addr.s_addr;
+        }
+
+        case AF_INET6:
+        {
+            const struct sockaddr_in6 *a6 = (const struct sockaddr_in6 *)a;
+            const struct sockaddr_in6 *b6 = (const struct sockaddr_in6 *)b;
+            return a6->sin6_port == b6->sin6_port
+                   && a6->sin6_scope_id == b6->sin6_scope_id
+                   && memcmp(&a6->sin6_addr, &b6->sin6_addr,
+                             sizeof(a6->sin6_addr)) == 0;
+        }
+
+        default:
+            return false;
+    }
+}
+
+static struct ikev2_helper_ike_sa *
+ikev2_helper_find_ike_sa(struct ikev2_helper_ike_sa_table *table,
+                         const struct ikev2_helper_listener *listener,
+                         const struct provider_helper_ikev2_header *header,
+                         const struct sockaddr_storage *peer,
+                         socklen_t peer_len)
+{
+    if (!table || !listener || !header || !peer)
+    {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        if (sa->active
+            && sa->listener_id == listener->descriptor.listener_id
+            && sa->initiator_spi == header->initiator_spi
+            && ikev2_helper_peer_equal(&sa->peer, sa->peer_len, peer, peer_len))
+        {
+            return sa;
+        }
+    }
+
+    return NULL;
+}
+
+static bool
+ikev2_helper_add_ike_sa(struct ikev2_helper_ike_sa_table *table,
+                        const struct ikev2_helper_listener *listener,
+                        const struct provider_helper_ikev2_header *header,
+                        const struct sockaddr_storage *peer,
+                        socklen_t peer_len)
+{
+    if (!table || !listener || !header || !peer)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        if (!sa->active)
+        {
+            CLEAR(*sa);
+            sa->active = true;
+            sa->initiator_spi = header->initiator_spi;
+            sa->responder_spi = header->responder_spi;
+            sa->listener_id = listener->descriptor.listener_id;
+            sa->message_id = header->message_id;
+            sa->created = time(NULL);
+            sa->updated = sa->created;
+            sa->peer = *peer;
+            sa->peer_len = peer_len;
+            ++table->active;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static void
 ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                              const struct provider_helper_runtime_config *config,
-                             struct ikev2_helper_anti_dos *anti_dos,
+                             struct ikev2_helper_ike_sa_table *sa_table,
                              struct provider_helper_runtime_stats *counters)
 {
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE + 1];
@@ -383,19 +496,40 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 return;
             }
 
-            if (anti_dos->half_open_sas >= config->max_half_open_sas)
+            uint32_t max_half_open_sas = config->max_half_open_sas;
+            if (max_half_open_sas > SIZE(sa_table->entries))
+            {
+                max_half_open_sas = (uint32_t)SIZE(sa_table->entries);
+            }
+
+            struct ikev2_helper_ike_sa *existing =
+                ikev2_helper_find_ike_sa(sa_table, listener, &header, &peer, peer_len);
+            if (existing)
+            {
+                existing->updated = time(NULL);
+                ++counters->ike_sa_init_duplicate;
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
+
+            if (sa_table->active >= max_half_open_sas)
             {
                 ++counters->ike_sa_init_half_open_dropped;
             }
-            else if (anti_dos->half_open_sas >= config->cookie_threshold)
+            else if (sa_table->active >= config->cookie_threshold)
             {
                 ++counters->ike_sa_init_cookie_required;
             }
+            else if (!ikev2_helper_add_ike_sa(sa_table, listener, &header, &peer,
+                                              peer_len))
+            {
+                ++counters->ike_sa_table_full_dropped;
+            }
             else
             {
-                ++anti_dos->half_open_sas;
                 ++counters->ike_sa_init_accepted;
             }
+            counters->ike_sa_active = sa_table->active;
         }
     }
     else
@@ -415,11 +549,11 @@ ikev2_helper_loop(int fd)
     size_t listener_count = 0;
     size_t xfrm_lease_count = 0;
     struct provider_helper_runtime_stats counters;
-    struct ikev2_helper_anti_dos anti_dos;
+    struct ikev2_helper_ike_sa_table sa_table;
     struct provider_helper_runtime_config config;
     provider_helper_runtime_config_default(&config);
     CLEAR(counters);
-    CLEAR(anti_dos);
+    CLEAR(sa_table);
     CLEAR(listeners);
     for (size_t i = 0; i < SIZE(listeners); ++i)
     {
@@ -475,7 +609,7 @@ ikev2_helper_loop(int fd)
             }
             if (pfds[i].revents & POLLIN)
             {
-                ikev2_helper_handle_datagram(&listeners[i - 1], &config, &anti_dos,
+                ikev2_helper_handle_datagram(&listeners[i - 1], &config, &sa_table,
                                              &counters);
             }
         }
@@ -560,9 +694,13 @@ ikev2_helper_loop(int fd)
                 break;
 
             case PROVIDER_HELPER_MSG_STATS_REQUEST:
-                if (header.payload_len
-                    || !ikev2_helper_send_stats(fd, tx_sequence++, header.sequence,
-                                                &counters))
+                if (header.payload_len)
+                {
+                    return 7;
+                }
+                counters.ike_sa_active = sa_table.active;
+                if (!ikev2_helper_send_stats(fd, tx_sequence++, header.sequence,
+                                             &counters))
                 {
                     return 7;
                 }
