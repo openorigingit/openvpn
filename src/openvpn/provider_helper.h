@@ -53,6 +53,11 @@
 #define PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES 256
 #define PROVIDER_HELPER_IKEV2_COOKIE_MIN_BYTES 1
 #define PROVIDER_HELPER_IKEV2_COOKIE_MAX_BYTES 64
+#define PROVIDER_HELPER_IKEV2_COOKIE_VERSION 1
+#define PROVIDER_HELPER_IKEV2_COOKIE_EPOCH_SECONDS 30
+#define PROVIDER_HELPER_IKEV2_COOKIE_TAG_BYTES 16
+#define PROVIDER_HELPER_IKEV2_COOKIE_BYTES \
+    (1 + 4 + PROVIDER_HELPER_IKEV2_COOKIE_TAG_BYTES)
 
 #define PROVIDER_HELPER_CONFIG_FORCE_NATT (1u << 0)
 #define PROVIDER_HELPER_CONFIG_IPV4_ONLY  (1u << 1)
@@ -269,6 +274,13 @@ struct provider_helper_ikev2_payload_summary {
     size_t cookie_len;
 };
 
+typedef bool (*provider_helper_ikev2_cookie_mac_fn)(
+    void *ctx,
+    const uint8_t *input,
+    size_t input_len,
+    uint8_t *tag,
+    size_t tag_len);
+
 struct provider_helper_supervisor {
     enum provider_helper_state state;
     int ipc_fd;
@@ -375,6 +387,26 @@ bool provider_helper_ikev2_build_cookie_response(
     const uint8_t *cookie,
     size_t cookie_len,
     size_t *out_len);
+bool provider_helper_ikev2_build_cookie(
+    uint8_t *dst,
+    size_t dst_len,
+    size_t *out_len,
+    uint32_t listener_id,
+    const struct sockaddr_storage *peer,
+    uint64_t initiator_spi,
+    uint32_t epoch,
+    provider_helper_ikev2_cookie_mac_fn mac_fn,
+    void *mac_ctx);
+bool provider_helper_ikev2_verify_cookie(
+    const uint8_t *cookie,
+    size_t cookie_len,
+    uint32_t listener_id,
+    const struct sockaddr_storage *peer,
+    uint64_t initiator_spi,
+    uint32_t epoch,
+    uint32_t max_past_epochs,
+    provider_helper_ikev2_cookie_mac_fn mac_fn,
+    void *mac_ctx);
 bool provider_helper_negotiate_features(uint64_t supported_features,
                                         uint64_t remote_mandatory_features,
                                         uint64_t remote_optional_features,

@@ -490,6 +490,106 @@ test_send_ikev2_cookie_datagram_from(int fd, uint16_t port,
                      packet_len);
 }
 
+struct test_cookie_mac_ctx {
+    uint8_t seed;
+};
+
+static bool
+test_cookie_mac(void *ctx, const uint8_t *input, size_t input_len,
+                uint8_t *tag, size_t tag_len)
+{
+    if (!ctx || !input || !input_len || !tag
+        || tag_len != PROVIDER_HELPER_IKEV2_COOKIE_TAG_BYTES)
+    {
+        return false;
+    }
+
+    const struct test_cookie_mac_ctx *mac_ctx = ctx;
+    uint8_t acc = mac_ctx->seed;
+    for (size_t i = 0; i < input_len; ++i)
+    {
+        acc = (uint8_t)((acc * 33u) ^ input[i]);
+    }
+    for (size_t i = 0; i < tag_len; ++i)
+    {
+        tag[i] = (uint8_t)(acc ^ (uint8_t)i ^ input[i % input_len]);
+    }
+    return true;
+}
+
+static void
+test_provider_helper_ikev2_cookie_builder(void **state)
+{
+    (void)state;
+
+    struct test_cookie_mac_ctx mac_ctx = { .seed = 0x5a };
+    struct sockaddr_storage peer;
+    CLEAR(peer);
+    struct sockaddr_in *peer4 = (struct sockaddr_in *)&peer;
+    peer4->sin_family = AF_INET;
+    peer4->sin_addr.s_addr = htonl(0x0a000102u);
+
+    uint8_t cookie[PROVIDER_HELPER_IKEV2_COOKIE_BYTES];
+    size_t cookie_len = 0;
+    assert_true(provider_helper_ikev2_build_cookie(
+                    cookie, sizeof(cookie), &cookie_len, 7, &peer,
+                    0x1122334455667788ull, 1234, test_cookie_mac, &mac_ctx));
+    assert_int_equal(cookie_len, PROVIDER_HELPER_IKEV2_COOKIE_BYTES);
+    assert_int_equal(cookie[0], PROVIDER_HELPER_IKEV2_COOKIE_VERSION);
+    assert_int_equal((((uint32_t)cookie[1]) << 24)
+                     | (((uint32_t)cookie[2]) << 16)
+                     | (((uint32_t)cookie[3]) << 8)
+                     | cookie[4],
+                     1234);
+
+    assert_true(provider_helper_ikev2_verify_cookie(
+                    cookie, cookie_len, 7, &peer, 0x1122334455667788ull,
+                    1234, 1, test_cookie_mac, &mac_ctx));
+    assert_true(provider_helper_ikev2_verify_cookie(
+                    cookie, cookie_len, 7, &peer, 0x1122334455667788ull,
+                    1235, 1, test_cookie_mac, &mac_ctx));
+    assert_false(provider_helper_ikev2_verify_cookie(
+                     cookie, cookie_len, 7, &peer, 0x1122334455667788ull,
+                     1236, 1, test_cookie_mac, &mac_ctx));
+    assert_false(provider_helper_ikev2_verify_cookie(
+                     cookie, cookie_len, 7, &peer, 0x8877665544332211ull,
+                     1234, 1, test_cookie_mac, &mac_ctx));
+
+    struct sockaddr_storage other_peer = peer;
+    ((struct sockaddr_in *)&other_peer)->sin_addr.s_addr = htonl(0x0a000103u);
+    assert_false(provider_helper_ikev2_verify_cookie(
+                     cookie, cookie_len, 7, &other_peer,
+                     0x1122334455667788ull, 1234, 1, test_cookie_mac,
+                     &mac_ctx));
+
+    cookie[0] = 2;
+    assert_false(provider_helper_ikev2_verify_cookie(
+                     cookie, cookie_len, 7, &peer, 0x1122334455667788ull,
+                     1234, 1, test_cookie_mac, &mac_ctx));
+    cookie[0] = PROVIDER_HELPER_IKEV2_COOKIE_VERSION;
+    cookie[cookie_len - 1] ^= 0x80;
+    assert_false(provider_helper_ikev2_verify_cookie(
+                     cookie, cookie_len, 7, &peer, 0x1122334455667788ull,
+                     1234, 1, test_cookie_mac, &mac_ctx));
+
+    CLEAR(peer);
+    struct sockaddr_in6 *peer6 = (struct sockaddr_in6 *)&peer;
+    peer6->sin6_family = AF_INET6;
+    for (size_t i = 0; i < sizeof(peer6->sin6_addr.s6_addr); ++i)
+    {
+        peer6->sin6_addr.s6_addr[i] = (uint8_t)i;
+    }
+    assert_true(provider_helper_ikev2_build_cookie(
+                    cookie, sizeof(cookie), &cookie_len, 9, &peer,
+                    0x0102030405060708ull, 2000, test_cookie_mac, &mac_ctx));
+    assert_true(provider_helper_ikev2_verify_cookie(
+                    cookie, cookie_len, 9, &peer, 0x0102030405060708ull,
+                    2000, 0, test_cookie_mac, &mac_ctx));
+    assert_false(provider_helper_ikev2_build_cookie(
+                     cookie, sizeof(cookie), &cookie_len, 9, &peer,
+                     0x0102030405060708ull, 2000, NULL, &mac_ctx));
+}
+
 static void
 test_provider_helper_ikev2_parser(void **state)
 {
@@ -1009,12 +1109,11 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     int datagram_fd = test_create_udp_sender(0);
 
-    test_send_ikev2_datagram_from(datagram_fd, port, 0x1122334455667788ull);
-    usleep(10000);
-    test_send_ikev2_datagram_from(datagram_fd, port, 0x1122334455667788ull);
-    usleep(10000);
-    test_send_ikev2_datagram_from(datagram_fd, port, 0x1122334455667788ull);
-    usleep(10000);
+    for (int i = 0; i < 8; ++i)
+    {
+        test_send_ikev2_datagram_from(datagram_fd, port, 0x1122334455667788ull);
+        usleep(10000);
+    }
     test_send_ikev2_datagram_from(datagram_fd, port, 0x8877665544332211ull);
     usleep(10000);
     test_send_ikev2_datagram_from(datagram_fd, port, 0x1020304050607080ull);
@@ -1042,8 +1141,8 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 5);
-    assert_true(supervisor.runtime_stats.datagrams_rx >= 7);
-    assert_true(supervisor.runtime_stats.datagrams_parsed >= 7);
+    assert_true(supervisor.runtime_stats.datagrams_rx >= 12);
+    assert_true(supervisor.runtime_stats.datagrams_parsed >= 12);
     assert_true(supervisor.runtime_stats.ike_sa_init_accepted >= 2);
     assert_true(supervisor.runtime_stats.ike_sa_init_duplicate >= 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_retransmit_dropped >= 1);
@@ -1122,6 +1221,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_ikev2_parser),
         cmocka_unit_test(test_provider_helper_ikev2_payload_parser),
         cmocka_unit_test(test_provider_helper_ikev2_cookie_response),
+        cmocka_unit_test(test_provider_helper_ikev2_cookie_builder),
         cmocka_unit_test(test_provider_helper_processes_partial_header),
         cmocka_unit_test(test_provider_helper_spawn_noop),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_scaffold),

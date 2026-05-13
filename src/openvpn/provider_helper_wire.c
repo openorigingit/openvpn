@@ -1142,6 +1142,165 @@ provider_helper_ikev2_build_cookie_response(
     return true;
 }
 
+static bool
+provider_helper_ikev2_cookie_mac_input(uint8_t *dst,
+                                       size_t dst_len,
+                                       size_t *out_len,
+                                       uint32_t listener_id,
+                                       const struct sockaddr_storage *peer,
+                                       uint64_t initiator_spi,
+                                       uint32_t epoch)
+{
+    if (out_len)
+    {
+        *out_len = 0;
+    }
+    if (!dst || !dst_len || !out_len || !listener_id || !peer
+        || !initiator_spi)
+    {
+        return false;
+    }
+
+    const uint8_t *address = NULL;
+    size_t address_len = 0;
+    uint32_t family_id = 0;
+    switch (peer->ss_family)
+    {
+        case AF_INET:
+        {
+            const struct sockaddr_in *in = (const struct sockaddr_in *)peer;
+            address = (const uint8_t *)&in->sin_addr.s_addr;
+            address_len = sizeof(in->sin_addr.s_addr);
+            family_id = 4;
+            break;
+        }
+
+        case AF_INET6:
+        {
+            const struct sockaddr_in6 *in6 =
+                (const struct sockaddr_in6 *)peer;
+            address = (const uint8_t *)&in6->sin6_addr;
+            address_len = sizeof(in6->sin6_addr);
+            family_id = 6;
+            break;
+        }
+
+        default:
+            return false;
+    }
+
+    const size_t needed = 1 + 4 + 4 + 8 + 4 + address_len;
+    if (dst_len < needed)
+    {
+        return false;
+    }
+
+    uint8_t *pos = dst;
+    *pos++ = PROVIDER_HELPER_IKEV2_COOKIE_VERSION;
+    provider_helper_wire_write_u32(&pos, epoch);
+    provider_helper_wire_write_u32(&pos, listener_id);
+    provider_helper_wire_write_u64(&pos, initiator_spi);
+    provider_helper_wire_write_u32(&pos, family_id);
+    memcpy(pos, address, address_len);
+    pos += address_len;
+
+    *out_len = (size_t)(pos - dst);
+    return true;
+}
+
+static bool
+provider_helper_ct_equal(const uint8_t *a, const uint8_t *b, size_t len)
+{
+    uint8_t diff = 0;
+    for (size_t i = 0; i < len; ++i)
+    {
+        diff |= a[i] ^ b[i];
+    }
+    return diff == 0;
+}
+
+bool
+provider_helper_ikev2_build_cookie(
+    uint8_t *dst,
+    size_t dst_len,
+    size_t *out_len,
+    uint32_t listener_id,
+    const struct sockaddr_storage *peer,
+    uint64_t initiator_spi,
+    uint32_t epoch,
+    provider_helper_ikev2_cookie_mac_fn mac_fn,
+    void *mac_ctx)
+{
+    if (out_len)
+    {
+        *out_len = 0;
+    }
+    if (!dst || dst_len < PROVIDER_HELPER_IKEV2_COOKIE_BYTES || !mac_fn)
+    {
+        return false;
+    }
+
+    uint8_t mac_input[64];
+    size_t mac_input_len = 0;
+    if (!provider_helper_ikev2_cookie_mac_input(
+            mac_input, sizeof(mac_input), &mac_input_len, listener_id, peer,
+            initiator_spi, epoch))
+    {
+        return false;
+    }
+
+    memset(dst, 0, PROVIDER_HELPER_IKEV2_COOKIE_BYTES);
+    uint8_t *pos = dst;
+    *pos++ = PROVIDER_HELPER_IKEV2_COOKIE_VERSION;
+    provider_helper_wire_write_u32(&pos, epoch);
+    if (!mac_fn(mac_ctx, mac_input, mac_input_len, pos,
+                PROVIDER_HELPER_IKEV2_COOKIE_TAG_BYTES))
+    {
+        return false;
+    }
+
+    *out_len = PROVIDER_HELPER_IKEV2_COOKIE_BYTES;
+    return true;
+}
+
+bool
+provider_helper_ikev2_verify_cookie(
+    const uint8_t *cookie,
+    size_t cookie_len,
+    uint32_t listener_id,
+    const struct sockaddr_storage *peer,
+    uint64_t initiator_spi,
+    uint32_t epoch,
+    uint32_t max_past_epochs,
+    provider_helper_ikev2_cookie_mac_fn mac_fn,
+    void *mac_ctx)
+{
+    if (!cookie || cookie_len != PROVIDER_HELPER_IKEV2_COOKIE_BYTES
+        || cookie[0] != PROVIDER_HELPER_IKEV2_COOKIE_VERSION || !mac_fn)
+    {
+        return false;
+    }
+
+    const uint8_t *pos = cookie + 1;
+    const uint32_t cookie_epoch = provider_helper_wire_read_u32(&pos);
+    if (cookie_epoch > epoch || epoch - cookie_epoch > max_past_epochs)
+    {
+        return false;
+    }
+
+    uint8_t expected[PROVIDER_HELPER_IKEV2_COOKIE_BYTES];
+    size_t expected_len = 0;
+    if (!provider_helper_ikev2_build_cookie(
+            expected, sizeof(expected), &expected_len, listener_id, peer,
+            initiator_spi, cookie_epoch, mac_fn, mac_ctx)
+        || expected_len != cookie_len)
+    {
+        return false;
+    }
+
+    return provider_helper_ct_equal(cookie, expected, cookie_len);
+}
+
 bool
 provider_helper_ipc_encode_header(uint8_t *dst, size_t dst_len,
                                   const struct provider_helper_msg_header *header)
