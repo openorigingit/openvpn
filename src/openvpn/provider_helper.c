@@ -91,6 +91,7 @@ provider_helper_supervisor_init(struct provider_helper_supervisor *supervisor)
     supervisor->next_tx_sequence = 1;
     supervisor->max_message_size = PROVIDER_HELPER_IPC_MAX_MESSAGE;
     supervisor->last_state_change = now;
+    provider_helper_runtime_config_default(&supervisor->runtime_config);
 }
 
 static void
@@ -126,6 +127,56 @@ provider_helper_supervisor_free(struct provider_helper_supervisor *supervisor)
     provider_helper_supervisor_stop(supervisor);
     CLEAR(*supervisor);
     supervisor->ipc_fd = -1;
+}
+
+static bool
+provider_helper_write_all(int fd, const uint8_t *data, size_t len)
+{
+    while (len > 0)
+    {
+        const ssize_t written = write(fd, data, len);
+        if (written < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            return false;
+        }
+        if (written == 0)
+        {
+            return false;
+        }
+        data += written;
+        len -= (size_t)written;
+    }
+    return true;
+}
+
+static bool
+provider_helper_supervisor_send_config(struct provider_helper_supervisor *supervisor,
+                                       uint64_t correlation_id)
+{
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE
+                                  + PROVIDER_HELPER_RUNTIME_CONFIG_SIZE);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_CONFIGURE,
+        .sequence = supervisor->next_tx_sequence++,
+        .correlation_id = correlation_id,
+        .payload_len = PROVIDER_HELPER_RUNTIME_CONFIG_SIZE,
+    };
+
+    const bool encoded = provider_helper_ipc_write_header(&buf, &header)
+                         && provider_helper_ipc_write_runtime_config(
+                             &buf, &supervisor->runtime_config);
+    const bool written = encoded
+                         && provider_helper_write_all(supervisor->ipc_fd, BPTR(&buf),
+                                                      (size_t)BLEN(&buf));
+    free_buf(&buf);
+    return written;
 }
 
 #ifndef _WIN32
@@ -326,6 +377,23 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
     switch (header.type)
     {
         case PROVIDER_HELPER_MSG_HELLO:
+            if (supervisor->state != PROVIDER_HELPER_STATE_STARTING
+                || !provider_helper_supervisor_send_config(supervisor, header.sequence))
+            {
+                provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);
+                provider_helper_close_ipc(supervisor);
+                break;
+            }
+            provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_PREFLIGHT);
+            break;
+
+        case PROVIDER_HELPER_MSG_CONFIGURE_ACK:
+            if (supervisor->state != PROVIDER_HELPER_STATE_PREFLIGHT)
+            {
+                provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);
+                provider_helper_close_ipc(supervisor);
+                break;
+            }
             provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_READY);
             break;
 

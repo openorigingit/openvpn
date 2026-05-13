@@ -34,6 +34,84 @@
 
 #include "memdbg.h"
 
+void
+provider_helper_runtime_config_default(struct provider_helper_runtime_config *config)
+{
+    if (!config)
+    {
+        return;
+    }
+
+    CLEAR(*config);
+    config->flags = PROVIDER_HELPER_CONFIG_FORCE_NATT
+                    | PROVIDER_HELPER_CONFIG_IPV4_ONLY;
+    config->max_half_open_sas = PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_SAS;
+    config->cookie_threshold = PROVIDER_HELPER_DEFAULT_COOKIE_THRESHOLD;
+    config->max_packet_size = PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE;
+    config->max_cert_chain_bytes = PROVIDER_HELPER_DEFAULT_MAX_CERT_BYTES;
+    config->retransmit_limit = PROVIDER_HELPER_DEFAULT_RETRANSMIT_LIMIT;
+    config->worker_limit = PROVIDER_HELPER_DEFAULT_WORKER_LIMIT;
+}
+
+static void
+provider_helper_config_reason(char *reason, size_t reason_size, const char *text)
+{
+    if (reason && reason_size)
+    {
+        snprintf(reason, reason_size, "%s", text);
+    }
+}
+
+bool
+provider_helper_runtime_config_valid(const struct provider_helper_runtime_config *config,
+                                     char *reason,
+                                     size_t reason_size)
+{
+    if (!config)
+    {
+        provider_helper_config_reason(reason, reason_size, "missing runtime config");
+        return false;
+    }
+    if (config->max_half_open_sas == 0)
+    {
+        provider_helper_config_reason(reason, reason_size, "max_half_open_sas must be nonzero");
+        return false;
+    }
+    if (config->cookie_threshold == 0
+        || config->cookie_threshold > config->max_half_open_sas)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "cookie_threshold must be nonzero and <= max_half_open_sas");
+        return false;
+    }
+    if (config->max_packet_size < PROVIDER_HELPER_IPC_HEADER_SIZE
+        || config->max_packet_size > PROVIDER_HELPER_IPC_MAX_MESSAGE)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "max_packet_size outside supported bounds");
+        return false;
+    }
+    if (config->max_cert_chain_bytes > PROVIDER_HELPER_IPC_MAX_MESSAGE)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "max_cert_chain_bytes outside supported bounds");
+        return false;
+    }
+    if (config->retransmit_limit == 0)
+    {
+        provider_helper_config_reason(reason, reason_size, "retransmit_limit must be nonzero");
+        return false;
+    }
+    if (config->worker_limit == 0)
+    {
+        provider_helper_config_reason(reason, reason_size, "worker_limit must be nonzero");
+        return false;
+    }
+
+    provider_helper_config_reason(reason, reason_size, "ok");
+    return true;
+}
+
 static void
 provider_helper_wire_write_u16(uint8_t **pos, uint16_t value)
 {
@@ -83,6 +161,49 @@ provider_helper_wire_read_u64(const uint8_t **pos)
     memcpy(&value, *pos, sizeof(value));
     *pos += sizeof(value);
     return ntohll(value);
+}
+
+bool
+provider_helper_ipc_encode_runtime_config(uint8_t *dst, size_t dst_len,
+                                          const struct provider_helper_runtime_config *config)
+{
+    if (!dst || dst_len < PROVIDER_HELPER_RUNTIME_CONFIG_SIZE || !config)
+    {
+        return false;
+    }
+
+    uint8_t *pos = dst;
+    provider_helper_wire_write_u32(&pos, config->flags);
+    provider_helper_wire_write_u32(&pos, config->max_half_open_sas);
+    provider_helper_wire_write_u32(&pos, config->cookie_threshold);
+    provider_helper_wire_write_u32(&pos, config->max_packet_size);
+    provider_helper_wire_write_u32(&pos, config->max_cert_chain_bytes);
+    provider_helper_wire_write_u32(&pos, config->retransmit_limit);
+    provider_helper_wire_write_u32(&pos, config->worker_limit);
+
+    return (size_t)(pos - dst) == PROVIDER_HELPER_RUNTIME_CONFIG_SIZE;
+}
+
+bool
+provider_helper_ipc_decode_runtime_config(const uint8_t *src, size_t src_len,
+                                          struct provider_helper_runtime_config *config)
+{
+    if (!src || src_len != PROVIDER_HELPER_RUNTIME_CONFIG_SIZE || !config)
+    {
+        return false;
+    }
+
+    const uint8_t *pos = src;
+    CLEAR(*config);
+    config->flags = provider_helper_wire_read_u32(&pos);
+    config->max_half_open_sas = provider_helper_wire_read_u32(&pos);
+    config->cookie_threshold = provider_helper_wire_read_u32(&pos);
+    config->max_packet_size = provider_helper_wire_read_u32(&pos);
+    config->max_cert_chain_bytes = provider_helper_wire_read_u32(&pos);
+    config->retransmit_limit = provider_helper_wire_read_u32(&pos);
+    config->worker_limit = provider_helper_wire_read_u32(&pos);
+
+    return (size_t)(pos - src) == PROVIDER_HELPER_RUNTIME_CONFIG_SIZE;
 }
 
 bool

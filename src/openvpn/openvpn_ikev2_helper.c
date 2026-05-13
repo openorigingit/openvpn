@@ -160,11 +160,29 @@ ikev2_helper_read_header(int fd, struct provider_helper_msg_header *header,
                                              last_sequence) == PROVIDER_HELPER_IPC_OK;
 }
 
+static bool
+ikev2_helper_read_runtime_config(int fd, const struct provider_helper_msg_header *header,
+                                struct provider_helper_runtime_config *config)
+{
+    uint8_t payload[PROVIDER_HELPER_RUNTIME_CONFIG_SIZE];
+    if (!header || header->payload_len != sizeof(payload)
+        || !ikev2_helper_read_all(fd, payload, sizeof(payload)))
+    {
+        return false;
+    }
+
+    return provider_helper_ipc_decode_runtime_config(payload, sizeof(payload), config)
+           && provider_helper_runtime_config_valid(config, NULL, 0);
+}
+
 static int
 ikev2_helper_loop(int fd)
 {
     uint64_t tx_sequence = 1;
     uint64_t last_rx_sequence = 0;
+    bool configured = false;
+    struct provider_helper_runtime_config config;
+    provider_helper_runtime_config_default(&config);
 
     if (!ikev2_helper_send_header(fd, PROVIDER_HELPER_MSG_HELLO, tx_sequence++, 1))
     {
@@ -209,18 +227,32 @@ ikev2_helper_loop(int fd)
         {
             return helper_stop ? 0 : 5;
         }
-        if (header.payload_len)
-        {
-            return 6;
-        }
-
         switch (header.type)
         {
+            case PROVIDER_HELPER_MSG_CONFIGURE:
+                if (configured
+                    || !ikev2_helper_read_runtime_config(fd, &header, &config)
+                    || !ikev2_helper_send_header(fd, PROVIDER_HELPER_MSG_CONFIGURE_ACK,
+                                                 tx_sequence++, header.sequence))
+                {
+                    return 6;
+                }
+                configured = true;
+                break;
+
             case PROVIDER_HELPER_MSG_HELLO_REPLY:
             case PROVIDER_HELPER_MSG_PONG:
+                if (header.payload_len)
+                {
+                    return 6;
+                }
                 break;
 
             case PROVIDER_HELPER_MSG_PING:
+                if (header.payload_len)
+                {
+                    return 6;
+                }
                 if (!ikev2_helper_send_header(fd, PROVIDER_HELPER_MSG_PONG,
                                               tx_sequence++, header.correlation_id))
                 {

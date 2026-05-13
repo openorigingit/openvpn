@@ -74,6 +74,20 @@ provider_helper_ipc_write_header(struct buffer *buf,
            && buf_write(buf, header_buf, sizeof(header_buf));
 }
 
+bool
+provider_helper_ipc_write_runtime_config(struct buffer *buf,
+                                         const struct provider_helper_runtime_config *config)
+{
+    if (!buf || !config)
+    {
+        return false;
+    }
+
+    uint8_t payload[PROVIDER_HELPER_RUNTIME_CONFIG_SIZE];
+    return provider_helper_ipc_encode_runtime_config(payload, sizeof(payload), config)
+           && buf_write(buf, payload, sizeof(payload));
+}
+
 enum provider_helper_ipc_result
 provider_helper_ipc_read_header(struct buffer *buf,
                                 struct provider_helper_msg_header *header,
