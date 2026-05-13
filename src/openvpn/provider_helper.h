@@ -240,6 +240,9 @@ struct provider_helper_ikev2_payload_summary {
     bool saw_eap;
     bool saw_tsi;
     bool saw_tsr;
+    bool saw_cookie_notify;
+    size_t cookie_offset;
+    size_t cookie_len;
 };
 
 struct provider_helper_supervisor {

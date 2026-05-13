@@ -624,7 +624,7 @@ provider_helper_ikev2_payload_supported(uint8_t payload_type)
 }
 
 static void
-provider_helper_ikev2_record_payload(
+provider_helper_ikev2_record_payload_type(
     struct provider_helper_ikev2_payload_summary *summary,
     uint8_t payload_type)
 {
@@ -676,6 +676,44 @@ provider_helper_ikev2_record_payload(
             summary->saw_tsr = true;
             break;
     }
+}
+
+static enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_record_notify_payload(
+    struct provider_helper_ikev2_payload_summary *summary,
+    const uint8_t *packet,
+    size_t pos,
+    uint16_t payload_len)
+{
+    if (payload_len < PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+    if (!summary)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_OK;
+    }
+
+    const uint8_t protocol_id = packet[pos + 4];
+    const uint8_t spi_size = packet[pos + 5];
+    const uint16_t notify_type = ((uint16_t)packet[pos + 6] << 8)
+                                 | packet[pos + 7];
+    if (protocol_id == 0 && spi_size == 0
+        && notify_type == PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE)
+    {
+        const size_t cookie_len =
+            payload_len - PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE;
+        if (cookie_len < PROVIDER_HELPER_IKEV2_COOKIE_MIN_BYTES
+            || cookie_len > PROVIDER_HELPER_IKEV2_COOKIE_MAX_BYTES)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+        summary->saw_cookie_notify = true;
+        summary->cookie_offset = pos + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE;
+        summary->cookie_len = cookie_len;
+    }
+
+    return PROVIDER_HELPER_IKEV2_PARSE_OK;
 }
 
 enum provider_helper_ikev2_parse_result
@@ -732,8 +770,18 @@ provider_helper_ikev2_parse_payloads(
         {
             return PROVIDER_HELPER_IKEV2_PARSE_UNSUPPORTED_CRITICAL_PAYLOAD;
         }
+        if (payload_type == PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY)
+        {
+            const enum provider_helper_ikev2_parse_result result =
+                provider_helper_ikev2_record_notify_payload(
+                    summary, packet, pos, payload_len);
+            if (result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+            {
+                return result;
+            }
+        }
 
-        provider_helper_ikev2_record_payload(summary, payload_type);
+        provider_helper_ikev2_record_payload_type(summary, payload_type);
         pos += payload_len;
         payload_type = next_payload;
     }

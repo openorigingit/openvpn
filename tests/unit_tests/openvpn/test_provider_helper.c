@@ -568,6 +568,9 @@ test_provider_helper_ikev2_cookie_response(void **state)
                      PROVIDER_HELPER_IKEV2_PARSE_OK);
     assert_int_equal(summary.payload_count, 1);
     assert_true(summary.saw_notify);
+    assert_true(summary.saw_cookie_notify);
+    assert_int_equal(summary.cookie_len, sizeof(cookie));
+    assert_memory_equal(response + summary.cookie_offset, cookie, sizeof(cookie));
 
     const size_t notify = PROVIDER_HELPER_IKEV2_HEADER_SIZE;
     assert_int_equal(response[notify], PROVIDER_HELPER_IKEV2_PAYLOAD_NONE);
@@ -582,6 +585,11 @@ test_provider_helper_ikev2_cookie_response(void **state)
                      PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE);
     assert_memory_equal(response + notify + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE,
                         cookie, sizeof(cookie));
+
+    response[notify + 3] = PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE - 1;
+    assert_int_equal(provider_helper_ikev2_parse_payloads(
+                         response, response_len, &response_header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH);
 
     assert_false(provider_helper_ikev2_build_cookie_response(
                      response, sizeof(response), &header, cookie, 0, &response_len));
