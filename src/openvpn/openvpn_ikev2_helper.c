@@ -56,6 +56,7 @@
 #define IKEV2_HELPER_COOKIE_KEY_BYTES 32
 #define IKEV2_HELPER_COOKIE_MAX_PAST_EPOCHS 1
 #define IKEV2_HELPER_SPI_GENERATE_ATTEMPTS 16
+#define IKEV2_HELPER_RESPONDER_NONCE_BYTES 32
 
 static volatile sig_atomic_t helper_stop;
 
@@ -76,6 +77,8 @@ struct ikev2_helper_ike_sa {
     uint8_t initiator_ke[PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES];
     size_t initiator_nonce_len;
     uint8_t initiator_nonce[PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES];
+    size_t responder_nonce_len;
+    uint8_t responder_nonce[IKEV2_HELPER_RESPONDER_NONCE_BYTES];
     time_t created;
     time_t updated;
     struct provider_helper_ikev2_sa_selection selection;
@@ -724,6 +727,12 @@ ikev2_helper_store_ike_sa_init_material(
     sa->initiator_nonce_len = summary->nonce_len;
     memcpy(sa->initiator_nonce, packet + summary->nonce_offset,
            summary->nonce_len);
+    sa->responder_nonce_len = sizeof(sa->responder_nonce);
+    if (!ikev2_helper_random_bytes(sa->responder_nonce,
+                                   sa->responder_nonce_len))
+    {
+        return false;
+    }
     return true;
 }
 
