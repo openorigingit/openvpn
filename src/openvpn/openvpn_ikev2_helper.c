@@ -2281,13 +2281,7 @@ ikev2_helper_apply_auth_response(
 
         if (response->decision == PROVIDER_HELPER_AUTH_DENY)
         {
-            sa->pending_auth_request_id = 0;
-            sa->claimed_principal_ready = false;
-            sa->claimed_principal_len = 0;
-            sa->claimed_principal_id_type = 0;
-            ikev2_helper_secure_zero(sa->claimed_principal,
-                                     sizeof(sa->claimed_principal));
-            ikev2_helper_clear_credential_metadata(sa);
+            ikev2_helper_clear_ike_sa(table, sa);
             ++counters->ike_auth_denied;
         }
         else

@@ -2752,6 +2752,35 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 #endif
 
     for (int attempt = 0;
+         attempt < 20 && supervisor.runtime_stats.ike_sa_active < 2;
+         ++attempt)
+    {
+        const uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
+        write_helper_header_fd(supervisor.ipc_fd,
+                               PROVIDER_HELPER_MSG_STATS_REQUEST,
+                               supervisor.next_tx_sequence++, 89);
+        for (int i = 0;
+             i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+             ++i)
+        {
+            provider_helper_process_event(&supervisor);
+            usleep(10000);
+        }
+        assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+        assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+        if (supervisor.runtime_stats.ike_sa_active < 2)
+        {
+            usleep(25000);
+        }
+    }
+    assert_true(supervisor.runtime_stats.ike_sa_active >= 2);
+
+    int threshold_fd = test_create_udp_sender(0x7f000008u);
+    test_send_ikev2_datagram_from(threshold_fd, port, 0x33445566778899aauLL);
+    usleep(10000);
+    close(threshold_fd);
+
+    for (int attempt = 0;
          attempt < 20 && supervisor.runtime_stats.ike_sa_active < 3;
          ++attempt)
     {
