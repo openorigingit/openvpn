@@ -66,6 +66,14 @@
 #define IKEV2_HELPER_ECP_256_PRIVATE_BYTES 32
 #define IKEV2_HELPER_ECP_256_SHARED_SECRET_BYTES 32
 #define IKEV2_HELPER_PRF_SHA256_BYTES 32
+#define IKEV2_HELPER_AES_GCM_SALT_BYTES 4
+#define IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES \
+    (32 + IKEV2_HELPER_AES_GCM_SALT_BYTES)
+#define IKEV2_HELPER_IKE_KEYMAT_MAX_BYTES \
+    (3 * IKEV2_HELPER_PRF_SHA256_BYTES \
+     + 2 * IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES)
+#define IKEV2_HELPER_PRF_PLUS_SEED_MAX_BYTES \
+    (2 * PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES + 2 * sizeof(uint64_t))
 
 static volatile sig_atomic_t helper_stop;
 
@@ -96,6 +104,16 @@ struct ikev2_helper_ike_sa {
     uint8_t shared_secret[IKEV2_HELPER_ECP_256_SHARED_SECRET_BYTES];
     size_t skeyseed_len;
     uint8_t skeyseed[IKEV2_HELPER_PRF_SHA256_BYTES];
+    size_t sk_d_len;
+    uint8_t sk_d[IKEV2_HELPER_PRF_SHA256_BYTES];
+    size_t sk_ei_len;
+    uint8_t sk_ei[IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES];
+    size_t sk_er_len;
+    uint8_t sk_er[IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES];
+    size_t sk_pi_len;
+    uint8_t sk_pi[IKEV2_HELPER_PRF_SHA256_BYTES];
+    size_t sk_pr_len;
+    uint8_t sk_pr[IKEV2_HELPER_PRF_SHA256_BYTES];
     time_t created;
     time_t updated;
     struct provider_helper_ikev2_sa_selection selection;
@@ -536,6 +554,181 @@ ikev2_helper_derive_skeyseed(const uint8_t *initiator_nonce,
         ikev2_helper_secure_zero(skeyseed, skeyseed_len);
     }
     return ret;
+}
+
+static bool
+ikev2_helper_prf_plus_sha256(const uint8_t *key, size_t key_len,
+                             const uint8_t *seed, size_t seed_len,
+                             uint8_t *output, size_t output_len)
+{
+    if (!key || !key_len || !seed || !seed_len || !output || !output_len
+        || seed_len > IKEV2_HELPER_PRF_PLUS_SEED_MAX_BYTES
+        || output_len > 255 * IKEV2_HELPER_PRF_SHA256_BYTES)
+    {
+        return false;
+    }
+
+    uint8_t t[IKEV2_HELPER_PRF_SHA256_BYTES];
+    uint8_t input[IKEV2_HELPER_PRF_SHA256_BYTES
+                  + IKEV2_HELPER_PRF_PLUS_SEED_MAX_BYTES + 1];
+    size_t generated = 0;
+    size_t t_len = 0;
+    uint8_t counter = 1;
+    bool ret = false;
+
+    while (generated < output_len)
+    {
+        size_t input_len = 0;
+        if (t_len)
+        {
+            memcpy(input, t, t_len);
+            input_len += t_len;
+        }
+        memcpy(input + input_len, seed, seed_len);
+        input_len += seed_len;
+        input[input_len++] = counter;
+
+        if (!ikev2_helper_hmac_sha256(key, key_len, input, input_len, t,
+                                      sizeof(t)))
+        {
+            goto cleanup;
+        }
+
+        const size_t remaining = output_len - generated;
+        const size_t copy_len = remaining < sizeof(t) ? remaining : sizeof(t);
+        memcpy(output + generated, t, copy_len);
+        generated += copy_len;
+        t_len = sizeof(t);
+        ++counter;
+    }
+
+    ret = true;
+
+cleanup:
+    ikev2_helper_secure_zero(t, sizeof(t));
+    ikev2_helper_secure_zero(input, sizeof(input));
+    if (!ret)
+    {
+        ikev2_helper_secure_zero(output, output_len);
+    }
+    return ret;
+}
+
+static size_t
+ikev2_helper_aes_gcm_keymat_bytes(uint16_t key_bits)
+{
+    switch (key_bits)
+    {
+        case 128:
+            return 16 + IKEV2_HELPER_AES_GCM_SALT_BYTES;
+
+        case 256:
+            return 32 + IKEV2_HELPER_AES_GCM_SALT_BYTES;
+
+        default:
+            return 0;
+    }
+}
+
+static bool
+ikev2_helper_suite_has_ike_key_sizes(
+    const struct provider_helper_ikev2_sa_selection *selection,
+    size_t *sk_ei_len,
+    size_t *sk_er_len)
+{
+    if (!selection || !selection->selected
+        || selection->encr_id != PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16
+        || selection->prf_id != PROVIDER_HELPER_IKEV2_PRF_HMAC_SHA2_256
+        || selection->integ_id
+        || selection->dh_id != PROVIDER_HELPER_IKEV2_DH_ECP_256
+        || !sk_ei_len || !sk_er_len)
+    {
+        return false;
+    }
+
+    const size_t encr_keymat_len =
+        ikev2_helper_aes_gcm_keymat_bytes(selection->encr_key_bits);
+    if (!encr_keymat_len
+        || encr_keymat_len > IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES)
+    {
+        return false;
+    }
+
+    *sk_ei_len = encr_keymat_len;
+    *sk_er_len = encr_keymat_len;
+    return true;
+}
+
+static bool
+ikev2_helper_derive_ike_sa_keys(struct ikev2_helper_ike_sa *sa)
+{
+    if (!sa
+        || sa->initiator_nonce_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+        || sa->initiator_nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES
+        || sa->responder_nonce_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+        || sa->responder_nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES
+        || sa->skeyseed_len != IKEV2_HELPER_PRF_SHA256_BYTES)
+    {
+        return false;
+    }
+
+    size_t sk_ei_len = 0;
+    size_t sk_er_len = 0;
+    if (!ikev2_helper_suite_has_ike_key_sizes(&sa->selection, &sk_ei_len,
+                                              &sk_er_len))
+    {
+        return false;
+    }
+
+    uint8_t seed[IKEV2_HELPER_PRF_PLUS_SEED_MAX_BYTES];
+    size_t seed_len = 0;
+    memcpy(seed, sa->initiator_nonce, sa->initiator_nonce_len);
+    seed_len += sa->initiator_nonce_len;
+    memcpy(seed + seed_len, sa->responder_nonce, sa->responder_nonce_len);
+    seed_len += sa->responder_nonce_len;
+
+    const uint64_t initiator_spi = htonll(sa->initiator_spi);
+    const uint64_t responder_spi = htonll(sa->responder_spi);
+    memcpy(seed + seed_len, &initiator_spi, sizeof(initiator_spi));
+    seed_len += sizeof(initiator_spi);
+    memcpy(seed + seed_len, &responder_spi, sizeof(responder_spi));
+    seed_len += sizeof(responder_spi);
+
+    uint8_t keymat[IKEV2_HELPER_IKE_KEYMAT_MAX_BYTES];
+    const size_t keymat_len = IKEV2_HELPER_PRF_SHA256_BYTES
+                              + sk_ei_len + sk_er_len
+                              + 2 * IKEV2_HELPER_PRF_SHA256_BYTES;
+    if (keymat_len > sizeof(keymat)
+        || !ikev2_helper_prf_plus_sha256(sa->skeyseed, sa->skeyseed_len,
+                                         seed, seed_len, keymat,
+                                         keymat_len))
+    {
+        ikev2_helper_secure_zero(seed, sizeof(seed));
+        ikev2_helper_secure_zero(keymat, sizeof(keymat));
+        return false;
+    }
+
+    const uint8_t *pos = keymat;
+    sa->sk_d_len = IKEV2_HELPER_PRF_SHA256_BYTES;
+    memcpy(sa->sk_d, pos, sa->sk_d_len);
+    pos += sa->sk_d_len;
+
+    /* SK_ai/SK_ar are zero-length for the current AEAD-only MVP suite. */
+    sa->sk_ei_len = sk_ei_len;
+    memcpy(sa->sk_ei, pos, sa->sk_ei_len);
+    pos += sa->sk_ei_len;
+    sa->sk_er_len = sk_er_len;
+    memcpy(sa->sk_er, pos, sa->sk_er_len);
+    pos += sa->sk_er_len;
+    sa->sk_pi_len = IKEV2_HELPER_PRF_SHA256_BYTES;
+    memcpy(sa->sk_pi, pos, sa->sk_pi_len);
+    pos += sa->sk_pi_len;
+    sa->sk_pr_len = IKEV2_HELPER_PRF_SHA256_BYTES;
+    memcpy(sa->sk_pr, pos, sa->sk_pr_len);
+
+    ikev2_helper_secure_zero(seed, sizeof(seed));
+    ikev2_helper_secure_zero(keymat, sizeof(keymat));
+    return true;
 }
 
 static bool
@@ -1106,6 +1299,10 @@ ikev2_helper_store_ike_sa_init_material(
             sa->responder_nonce, sa->responder_nonce_len,
             sa->shared_secret, sa->shared_secret_len,
             sa->skeyseed, sa->skeyseed_len))
+    {
+        return false;
+    }
+    if (!ikev2_helper_derive_ike_sa_keys(sa))
     {
         return false;
     }
