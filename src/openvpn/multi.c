@@ -42,6 +42,8 @@
 #include "vlan.h"
 #include "auth_token.h"
 #include "route.h"
+#include "platform.h"
+#include "provider_policy.h"
 #include <inttypes.h>
 #include <string.h>
 
@@ -261,6 +263,40 @@ int_compare_function(const void *key1, const void *key2)
     return (unsigned long)key1 == (unsigned long)key2;
 }
 #endif
+
+static void
+multi_start_ikev2_helper(struct context *t)
+{
+    struct multi_context *m = t->multi;
+    const char *helper_path = t->options.ikev2_helper_path;
+
+    if (!helper_path)
+    {
+        return;
+    }
+
+#ifdef _WIN32
+    msg(M_FATAL, "--experimental-ikev2-helper is not supported on Windows");
+#else
+    struct provider_policy_preflight preflight;
+    if (!provider_policy_preflight(&t->options, t->plugins, &preflight))
+    {
+        msg(M_FATAL, "IKEv2 helper preflight failed: %s", preflight.reason);
+    }
+
+    if (platform_access(helper_path, X_OK) != 0)
+    {
+        msg(M_FATAL | M_ERRNO, "IKEv2 helper is not executable: %s", helper_path);
+    }
+
+    char *const argv[] = { (char *)helper_path, NULL };
+    if (!provider_helper_supervisor_spawn(&m->provider_helper, helper_path, argv))
+    {
+        msg(M_FATAL, "IKEv2 helper startup failed: %s", helper_path);
+    }
+    msg(M_INFO, "IKEv2 helper starting: %s", helper_path);
+#endif
+}
 
 /*
  * Main initialization function, init multi_context object.
@@ -4209,6 +4245,7 @@ tunnel_server(struct context *top)
 
     /* finished with initialization */
     initialization_sequence_completed(top, ISC_SERVER); /* --mode server --proto tcp-server */
+    multi_start_ikev2_helper(top);
 
 #ifdef ENABLE_ASYNC_PUSH
     multi.top.c2.inotify_fd = inotify_init();

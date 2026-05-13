@@ -429,6 +429,9 @@ static const char usage_message[] =
     "--server-ipv6 network/bits : Configure IPv6 server mode.\n"
     "--server-bridge [IP netmask pool-start-IP pool-end-IP] : Helper option to\n"
     "                    easily configure ethernet bridging server mode.\n"
+    "--experimental-ikev2-helper path : Start experimental IKEv2 helper.\n"
+    "                  OpenVPN remains the policy owner; unsupported policy\n"
+    "                  hooks fail preflight before helper startup.\n"
     "--push \"option\" : Push a config file option back to the peer for remote\n"
     "                  execution.  Peer must specify --pull in its config file.\n"
     "--push-reset    : Don't inherit global push list for specific\n"
@@ -1793,6 +1796,8 @@ show_settings(const struct options *o)
         print_client_nat_list(o->client_nat, D_SHOW_PARMS);
     }
 
+    SHOW_STR(ikev2_helper_path);
+
     show_dns_options(&o->dns_options);
 
 #ifdef ENABLE_MANAGEMENT
@@ -2501,6 +2506,12 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
         {
             msg(M_USAGE, "--mode server requires --tls-server");
         }
+#ifdef _WIN32
+        if (options->ikev2_helper_path)
+        {
+            msg(M_USAGE, "--experimental-ikev2-helper is not supported on Windows");
+        }
+#endif
         MUST_BE_FALSE(ce->remote, "remote");
         MUST_BE_FALSE(!ce->bind_local, "nobind");
         MUST_BE_FALSE(ce->http_proxy_options, "http-proxy");
@@ -2618,6 +2629,7 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
         MUST_BE_UNDEF(client_disconnect_script, "client-disconnect");
         MUST_BE_UNDEF(client_config_dir, "client-config-dir");
         MUST_BE_UNDEF(ccd_exclusive, "ccd-exclusive");
+        MUST_BE_UNDEF(ikev2_helper_path, "experimental-ikev2-helper");
         MUST_BE_UNDEF(enable_c2c, "client-to-client");
         MUST_BE_UNDEF(duplicate_cn, "duplicate-cn");
         MUST_BE_UNDEF(cf_max, "connect-freq");
@@ -7255,6 +7267,11 @@ add_option(struct options *options, char *p[], bool is_inline, const char *file,
     {
         VERIFY_PERMISSION(OPT_P_GENERAL);
         options->server_bridge_proxy_dhcp = true;
+    }
+    else if (streq(p[0], "experimental-ikev2-helper") && p[1] && !p[2])
+    {
+        VERIFY_PERMISSION(OPT_P_GENERAL);
+        options->ikev2_helper_path = p[1];
     }
     else if (streq(p[0], "push") && p[1] && !p[2])
     {

@@ -474,6 +474,8 @@ struct options
 #define SF_NO_PUSH_ROUTE_GATEWAY (1 << 2)
     unsigned int server_flags;
 
+    const char *ikev2_helper_path;
+
     bool server_bridge_proxy_dhcp;
 
     bool server_bridge_defined;
