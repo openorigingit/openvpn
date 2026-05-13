@@ -23,6 +23,11 @@
 #include <setjmp.h>
 #include <cmocka.h>
 
+#if defined(ENABLE_CRYPTO_OPENSSL)
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#endif
+
 #include "provider_helper.h"
 #include "test_common.h"
 
@@ -432,6 +437,13 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
      + TEST_IKEV2_DH_TRANSFORM_LEN)
 #define TEST_IKEV2_SA_PAYLOAD_LEN \
     (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + TEST_IKEV2_SA_PROPOSAL_LEN)
+#define TEST_IKEV2_PRF_SHA256_BYTES 32
+#define TEST_IKEV2_AES_GCM_SALT_BYTES 4
+#define TEST_IKEV2_AES_GCM_IV_BYTES 8
+#define TEST_IKEV2_AES_GCM_TAG_BYTES 16
+#define TEST_IKEV2_AES_GCM_KEYMAT_BYTES (32 + TEST_IKEV2_AES_GCM_SALT_BYTES)
+#define TEST_IKEV2_IKE_KEYMAT_BYTES \
+    (3 * TEST_IKEV2_PRF_SHA256_BYTES + 2 * TEST_IKEV2_AES_GCM_KEYMAT_BYTES)
 
 static const uint8_t test_ikev2_ecp256_generator[
     PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES] = {
@@ -634,6 +646,254 @@ test_make_ike_auth_packet(uint8_t *packet, size_t packet_size,
     return packet_len;
 }
 
+struct test_ikev2_sa_init_response_material {
+    uint64_t responder_spi;
+    uint8_t responder_ke[PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES];
+    size_t responder_ke_len;
+    uint8_t responder_nonce[PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES];
+    size_t responder_nonce_len;
+};
+
+#if defined(ENABLE_CRYPTO_OPENSSL)
+static bool
+test_hmac_sha256(const uint8_t *key, size_t key_len,
+                 const uint8_t *input, size_t input_len,
+                 uint8_t *tag, size_t tag_len)
+{
+    if (!key || !key_len || !input || !input_len || !tag
+        || tag_len > TEST_IKEV2_PRF_SHA256_BYTES)
+    {
+        return false;
+    }
+
+    uint8_t full[TEST_IKEV2_PRF_SHA256_BYTES];
+    unsigned int full_len = 0;
+    const bool ret = HMAC(EVP_sha256(), key, (int)key_len, input, input_len,
+                          full, &full_len) != NULL
+                     && full_len >= tag_len;
+    if (ret)
+    {
+        memcpy(tag, full, tag_len);
+    }
+    secure_memzero(full, sizeof(full));
+    return ret;
+}
+
+static bool
+test_prf_plus_sha256(const uint8_t *key, size_t key_len,
+                     const uint8_t *seed, size_t seed_len,
+                     uint8_t *output, size_t output_len)
+{
+    uint8_t t[TEST_IKEV2_PRF_SHA256_BYTES];
+    uint8_t input[TEST_IKEV2_PRF_SHA256_BYTES
+                  + 2 * PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES
+                  + 2 * sizeof(uint64_t) + 1];
+    size_t generated = 0;
+    size_t t_len = 0;
+    uint8_t counter = 1;
+    bool ret = false;
+
+    if (!key || !key_len || !seed || !seed_len || !output || !output_len
+        || seed_len > sizeof(input) - sizeof(t) - 1)
+    {
+        return false;
+    }
+
+    while (generated < output_len)
+    {
+        size_t input_len = 0;
+        if (t_len)
+        {
+            memcpy(input, t, t_len);
+            input_len += t_len;
+        }
+        memcpy(input + input_len, seed, seed_len);
+        input_len += seed_len;
+        input[input_len++] = counter++;
+
+        if (!test_hmac_sha256(key, key_len, input, input_len, t, sizeof(t)))
+        {
+            goto cleanup;
+        }
+        const size_t remaining = output_len - generated;
+        const size_t copy_len = remaining < sizeof(t) ? remaining : sizeof(t);
+        memcpy(output + generated, t, copy_len);
+        generated += copy_len;
+        t_len = sizeof(t);
+    }
+
+    ret = true;
+
+cleanup:
+    secure_memzero(t, sizeof(t));
+    secure_memzero(input, sizeof(input));
+    if (!ret)
+    {
+        secure_memzero(output, output_len);
+    }
+    return ret;
+}
+
+static bool
+test_derive_ike_auth_keymat(
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    uint8_t *sk_ei,
+    size_t sk_ei_len)
+{
+    if (!material || material->responder_ke_len
+                     != PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES
+        || material->responder_nonce_len != TEST_IKEV2_PRF_SHA256_BYTES
+        || !sk_ei || sk_ei_len != TEST_IKEV2_AES_GCM_KEYMAT_BYTES)
+    {
+        return false;
+    }
+
+    uint8_t initiator_nonce[PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES];
+    for (size_t i = 0; i < sizeof(initiator_nonce); ++i)
+    {
+        initiator_nonce[i] = (uint8_t)(0x10 + i);
+    }
+
+    uint8_t nonce_key[PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+                      + TEST_IKEV2_PRF_SHA256_BYTES];
+    memcpy(nonce_key, initiator_nonce, sizeof(initiator_nonce));
+    memcpy(nonce_key + sizeof(initiator_nonce), material->responder_nonce,
+           material->responder_nonce_len);
+
+    uint8_t skeyseed[TEST_IKEV2_PRF_SHA256_BYTES];
+    if (!test_hmac_sha256(nonce_key, sizeof(nonce_key), material->responder_ke,
+                          TEST_IKEV2_PRF_SHA256_BYTES, skeyseed,
+                          sizeof(skeyseed)))
+    {
+        secure_memzero(nonce_key, sizeof(nonce_key));
+        return false;
+    }
+    uint8_t seed[PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+                 + TEST_IKEV2_PRF_SHA256_BYTES + 2 * sizeof(uint64_t)];
+    size_t seed_len = 0;
+    memcpy(seed, initiator_nonce, sizeof(initiator_nonce));
+    seed_len += sizeof(initiator_nonce);
+    memcpy(seed + seed_len, material->responder_nonce,
+           material->responder_nonce_len);
+    seed_len += material->responder_nonce_len;
+    test_write_be64(seed + seed_len, initiator_spi);
+    seed_len += sizeof(uint64_t);
+    test_write_be64(seed + seed_len, material->responder_spi);
+    seed_len += sizeof(uint64_t);
+
+    uint8_t keymat[TEST_IKEV2_IKE_KEYMAT_BYTES];
+    const bool ret = test_prf_plus_sha256(skeyseed, sizeof(skeyseed), seed,
+                                          seed_len, keymat, sizeof(keymat));
+    if (ret)
+    {
+        memcpy(sk_ei, keymat + TEST_IKEV2_PRF_SHA256_BYTES, sk_ei_len);
+    }
+
+    secure_memzero(initiator_nonce, sizeof(initiator_nonce));
+    secure_memzero(nonce_key, sizeof(nonce_key));
+    secure_memzero(skeyseed, sizeof(skeyseed));
+    secure_memzero(seed, sizeof(seed));
+    secure_memzero(keymat, sizeof(keymat));
+    return ret;
+}
+
+static bool
+test_aes_gcm_encrypt(const uint8_t *key, size_t key_len,
+                     const uint8_t *nonce, size_t nonce_len,
+                     const uint8_t *aad, size_t aad_len,
+                     const uint8_t *plaintext, size_t plaintext_len,
+                     uint8_t *ciphertext, uint8_t *tag)
+{
+    if (!key || key_len != 32 || !nonce || nonce_len != 12
+        || !aad || aad_len > INT_MAX || !plaintext || plaintext_len > INT_MAX
+        || !ciphertext || !tag)
+    {
+        return false;
+    }
+
+    const EVP_CIPHER *cipher = EVP_aes_256_gcm();
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    int out_len = 0;
+    int final_len = 0;
+    const bool ret =
+        ctx
+        && EVP_EncryptInit_ex(ctx, cipher, NULL, NULL, NULL) == 1
+        && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, (int)nonce_len,
+                               NULL) == 1
+        && EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) == 1
+        && EVP_EncryptUpdate(ctx, NULL, &out_len, aad, (int)aad_len) == 1
+        && EVP_EncryptUpdate(ctx, ciphertext, &out_len, plaintext,
+                             (int)plaintext_len) == 1
+        && EVP_EncryptFinal_ex(ctx, ciphertext + out_len, &final_len) == 1
+        && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG,
+                               TEST_IKEV2_AES_GCM_TAG_BYTES, tag) == 1;
+    EVP_CIPHER_CTX_free(ctx);
+    return ret;
+}
+
+static size_t
+test_make_encrypted_ike_auth_packet(
+    uint8_t *packet,
+    size_t packet_size,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material)
+{
+    uint8_t sk_ei[TEST_IKEV2_AES_GCM_KEYMAT_BYTES];
+    assert_true(test_derive_ike_auth_keymat(initiator_spi, material, sk_ei,
+                                            sizeof(sk_ei)));
+
+    uint8_t plaintext[16] = {
+        PROVIDER_HELPER_IKEV2_PAYLOAD_NONE, 0, 0, 9,
+        2, 0, 0, 0, 'a',
+        0, /* Pad Length. */
+    };
+    const size_t plaintext_len = 10;
+    const uint16_t sk_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                            + TEST_IKEV2_AES_GCM_IV_BYTES
+                            + plaintext_len
+                            + TEST_IKEV2_AES_GCM_TAG_BYTES;
+    const size_t packet_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE + sk_len;
+    assert_true(packet_size >= packet_len);
+
+    memset(packet, 0, packet_size);
+    test_make_ikev2_header(packet, false,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+                           material->responder_spi, (uint32_t)packet_len);
+    test_write_be64(packet, initiator_spi);
+    packet[16] = PROVIDER_HELPER_IKEV2_PAYLOAD_SK;
+    test_write_be32(packet + 20, 1);
+    size_t pos = PROVIDER_HELPER_IKEV2_HEADER_SIZE;
+    test_add_ikev2_payload(packet, pos, PROVIDER_HELPER_IKEV2_PAYLOAD_IDI,
+                           sk_len, 0);
+    pos += PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+
+    const uint8_t iv[TEST_IKEV2_AES_GCM_IV_BYTES] = {
+        0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+    };
+    memcpy(packet + pos, iv, sizeof(iv));
+    pos += sizeof(iv);
+
+    uint8_t nonce[TEST_IKEV2_AES_GCM_SALT_BYTES + TEST_IKEV2_AES_GCM_IV_BYTES];
+    memcpy(nonce, sk_ei + 32, TEST_IKEV2_AES_GCM_SALT_BYTES);
+    memcpy(nonce + TEST_IKEV2_AES_GCM_SALT_BYTES, iv, sizeof(iv));
+
+    uint8_t *ciphertext = packet + pos;
+    uint8_t *tag = packet + pos + plaintext_len;
+    assert_true(test_aes_gcm_encrypt(sk_ei, 32, nonce, sizeof(nonce), packet,
+                                     PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                                     + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE,
+                                     plaintext, plaintext_len, ciphertext,
+                                     tag));
+
+    secure_memzero(sk_ei, sizeof(sk_ei));
+    secure_memzero(plaintext, sizeof(plaintext));
+    secure_memzero(nonce, sizeof(nonce));
+    return packet_len;
+}
+#endif
+
 static void
 test_send_ikev2_datagram_from(int fd, uint16_t port, uint64_t initiator_spi)
 {
@@ -672,6 +932,30 @@ test_send_ikev2_ike_auth_datagram_from(int fd, uint16_t port,
                             (struct sockaddr *)&addr, sizeof(addr)),
                      packet_len);
 }
+
+#if defined(ENABLE_CRYPTO_OPENSSL)
+static void
+test_send_ikev2_encrypted_ike_auth_datagram_from(
+    int fd,
+    uint16_t port,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material)
+{
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t packet_len = test_make_encrypted_ike_auth_packet(
+        packet, sizeof(packet), initiator_spi, material);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    assert_int_equal(sendto(fd, packet, packet_len, 0,
+                            (struct sockaddr *)&addr, sizeof(addr)),
+                     packet_len);
+}
+#endif
 
 static void
 test_send_ikev2_unsupported_prf_datagram_from(int fd, uint16_t port,
@@ -811,7 +1095,10 @@ test_recv_ikev2_cookie_response(int fd, uint8_t *cookie, size_t cookie_size)
 }
 
 static uint64_t
-test_recv_ikev2_sa_init_response(int fd, uint64_t initiator_spi)
+test_recv_ikev2_sa_init_response_material(
+    int fd,
+    uint64_t initiator_spi,
+    struct test_ikev2_sa_init_response_material *material)
 {
     uint8_t response[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     struct sockaddr_in from;
@@ -858,7 +1145,29 @@ test_recv_ikev2_sa_init_response(int fd, uint64_t initiator_spi)
                                + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE + i] != 0;
     }
     assert_true(nonzero_ke);
+
+    if (material)
+    {
+        CLEAR(*material);
+        material->responder_spi = header.responder_spi;
+        material->responder_ke_len = PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES;
+        memcpy(material->responder_ke,
+               response + summary.ke_offset
+               + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE,
+               material->responder_ke_len);
+        material->responder_nonce_len = summary.nonce_len;
+        assert_true(material->responder_nonce_len
+                    <= sizeof(material->responder_nonce));
+        memcpy(material->responder_nonce, response + summary.nonce_offset,
+               material->responder_nonce_len);
+    }
     return header.responder_spi;
+}
+
+static uint64_t
+test_recv_ikev2_sa_init_response(int fd, uint64_t initiator_spi)
+{
+    return test_recv_ikev2_sa_init_response_material(fd, initiator_spi, NULL);
 }
 
 struct test_cookie_mac_ctx {
@@ -1690,13 +1999,20 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     int response_fd = test_create_udp_sender(0x7f000004u);
     test_send_ikev2_datagram_from(response_fd, port, 0xfeedfacecafebeefull);
     usleep(10000);
+    struct test_ikev2_sa_init_response_material sa_init_material;
     const uint64_t responder_spi =
-        test_recv_ikev2_sa_init_response(response_fd, 0xfeedfacecafebeefull);
+        test_recv_ikev2_sa_init_response_material(
+            response_fd, 0xfeedfacecafebeefull, &sa_init_material);
     test_send_ikev2_datagram_from(response_fd, port, 0xfeedfacecafebeefull);
     usleep(10000);
     assert_int_equal(test_recv_ikev2_sa_init_response(
                          response_fd, 0xfeedfacecafebeefull),
                      responder_spi);
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    test_send_ikev2_encrypted_ike_auth_datagram_from(
+        response_fd, port, 0xfeedfacecafebeefull, &sa_init_material);
+    usleep(10000);
+#endif
     test_send_ikev2_ike_auth_datagram_from(response_fd, port,
                                            0xfeedfacecafebeefull, responder_spi);
     usleep(10000);
@@ -1814,8 +2130,13 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_true(supervisor.runtime_stats.ike_auth_rx >= 2);
     assert_true(supervisor.runtime_stats.ike_auth_no_state >= 1);
     assert_true(supervisor.runtime_stats.ike_auth_decrypt_failed >= 1);
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    assert_true(supervisor.runtime_stats.ike_auth_decrypted >= 1);
+    assert_true(supervisor.runtime_stats.ike_auth_unsupported >= 1);
+#else
     assert_int_equal(supervisor.runtime_stats.ike_auth_decrypted, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 0);
+#endif
     assert_int_equal(supervisor.runtime_stats.ike_auth_malformed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 4);
 

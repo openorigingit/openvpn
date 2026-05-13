@@ -938,6 +938,15 @@ provider_helper_ikev2_parse_payloads(
         provider_helper_ikev2_record_payload(summary, payload_type, pos,
                                              payload_len);
         pos += payload_len;
+        if (payload_type == PROVIDER_HELPER_IKEV2_PAYLOAD_SK
+            || payload_type == PROVIDER_HELPER_IKEV2_PAYLOAD_SKF)
+        {
+            if (pos != payload_end)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+            break;
+        }
         payload_type = next_payload;
     }
 
