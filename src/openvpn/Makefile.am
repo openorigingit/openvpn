@@ -118,6 +118,7 @@ openvpn_SOURCES = \
 	provider_helper.c provider_helper.h \
 	provider_policy.c provider_policy.h \
 	provider_session.c provider_session.h \
+	provider_xfrm.c provider_xfrm.h \
 	proto.c proto.h \
 	proxy.c proxy.h \
 	ps.c ps.h \
