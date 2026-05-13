@@ -1,0 +1,72 @@
+#!/usr/sbin/nft -f
+#
+# OpenVPN IKEv2 public-cloud host firewall template.
+#
+# Replace every define before use. Load this before OpenVPN opens UDP 500/4500.
+# This profile intentionally lands VPN clients in a constrained DMZ and allows
+# only reverse proxy/application gateway access by default.
+
+flush table inet openvpn_ikev2
+
+table inet openvpn_ikev2 {
+    define wan_if = "eth0"
+    define vpn_if = "xfrm0"
+    define admin_cidrs_v4 = { 198.51.100.10/32 }
+    define ike_client_cidrs_v4 = { 0.0.0.0/0 }
+    define vpn_inner_v4 = 10.88.0.0/24
+    define app_gateway_v4 = 10.88.0.1
+    define app_gateway_tcp_ports = { 443 }
+    define ssh_port = 22
+
+    set metadata_v4 {
+        type ipv4_addr
+        flags interval
+        elements = { 169.254.169.254/32 }
+    }
+
+    set blocked_host_ranges_v4 {
+        type ipv4_addr
+        flags interval
+        elements = {
+            127.0.0.0/8,
+            169.254.0.0/16,
+            172.16.0.0/12,
+            192.168.0.0/16
+        }
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        ct state established,related accept
+        iifname "lo" accept
+
+        ip saddr $admin_cidrs_v4 tcp dport $ssh_port accept
+        iifname $wan_if ip saddr $ike_client_cidrs_v4 udp dport { 500, 4500 } accept
+
+        ip protocol esp drop
+        ip6 nexthdr esp drop
+        counter drop
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+
+        ct state established,related accept
+
+        iifname $vpn_if ip saddr $vpn_inner_v4 ip daddr @metadata_v4 counter drop
+        iifname $vpn_if ip saddr $vpn_inner_v4 ip daddr @blocked_host_ranges_v4 counter drop
+
+        iifname $vpn_if ip saddr $vpn_inner_v4 ip daddr $app_gateway_v4 tcp dport $app_gateway_tcp_ports accept
+
+        iifname $vpn_if ip6 nexthdr { tcp, udp, icmpv6 } counter drop
+        iifname $vpn_if counter drop
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+
+        ip daddr @metadata_v4 counter drop
+        ip6 daddr fd00:ec2::254 counter drop
+    }
+}
