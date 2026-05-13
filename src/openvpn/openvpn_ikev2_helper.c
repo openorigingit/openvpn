@@ -35,6 +35,7 @@
 #ifndef _WIN32
 
 #define IKEV2_HELPER_MAX_LISTENERS 4
+#define IKEV2_HELPER_MAX_XFRM_LEASES 8
 
 static volatile sig_atomic_t helper_stop;
 
@@ -318,6 +319,21 @@ ikev2_helper_read_listener_fd(int fd, const struct provider_helper_msg_header *h
     return true;
 }
 
+static bool
+ikev2_helper_read_xfrm_lease(int fd, const struct provider_helper_msg_header *header,
+                             struct provider_helper_xfrm_lease *lease)
+{
+    uint8_t payload[PROVIDER_HELPER_XFRM_LEASE_SIZE];
+    if (!header || header->payload_len != sizeof(payload)
+        || !ikev2_helper_read_all(fd, payload, sizeof(payload)))
+    {
+        return false;
+    }
+
+    return provider_helper_ipc_decode_xfrm_lease(payload, sizeof(payload), lease)
+           && provider_helper_xfrm_lease_valid(lease, NULL, 0);
+}
+
 static void
 ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                              const struct provider_helper_runtime_config *config,
@@ -386,7 +402,9 @@ ikev2_helper_loop(int fd)
     uint64_t last_rx_sequence = 0;
     bool configured = false;
     struct ikev2_helper_listener listeners[IKEV2_HELPER_MAX_LISTENERS];
+    struct provider_helper_xfrm_lease xfrm_leases[IKEV2_HELPER_MAX_XFRM_LEASES];
     size_t listener_count = 0;
+    size_t xfrm_lease_count = 0;
     struct provider_helper_runtime_stats counters;
     struct ikev2_helper_anti_dos anti_dos;
     struct provider_helper_runtime_config config;
@@ -398,6 +416,7 @@ ikev2_helper_loop(int fd)
     {
         listeners[i].fd = -1;
     }
+    CLEAR(xfrm_leases);
 
     if (!ikev2_helper_send_header(fd, PROVIDER_HELPER_MSG_HELLO, tx_sequence++, 1))
     {
@@ -493,6 +512,21 @@ ikev2_helper_loop(int fd)
                 listeners[listener_count].fd = listener_fd;
                 listeners[listener_count].descriptor = listener;
                 ++listener_count;
+                break;
+            }
+
+            case PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL:
+            {
+                struct provider_helper_xfrm_lease lease;
+                if (!configured || xfrm_lease_count >= SIZE(xfrm_leases)
+                    || !ikev2_helper_read_xfrm_lease(fd, &header, &lease)
+                    || !ikev2_helper_send_header(
+                        fd, PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL_ACK,
+                        tx_sequence++, header.sequence))
+                {
+                    return 6;
+                }
+                xfrm_leases[xfrm_lease_count++] = lease;
                 break;
             }
 

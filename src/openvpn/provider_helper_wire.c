@@ -155,6 +155,48 @@ provider_helper_listener_fd_valid(const struct provider_helper_listener_fd *list
     return true;
 }
 
+bool
+provider_helper_xfrm_lease_valid(const struct provider_helper_xfrm_lease *lease,
+                                 char *reason,
+                                 size_t reason_size)
+{
+    const uint32_t allowed_flags = PROVIDER_HELPER_XFRM_LEASE_IPV4
+                                   | PROVIDER_HELPER_XFRM_LEASE_IPV6;
+
+    if (!lease)
+    {
+        provider_helper_config_reason(reason, reason_size, "missing XFRM lease");
+        return false;
+    }
+    if (!lease->lease_id || !lease->provider_session_id || !lease->policy_revision)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "XFRM lease identity fields must be nonzero");
+        return false;
+    }
+    if (!lease->mark_mask || !lease->reqid)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "XFRM lease mark mask and reqid must be nonzero");
+        return false;
+    }
+    if (lease->address_family != AF_INET && lease->address_family != AF_INET6)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "unsupported XFRM lease address family");
+        return false;
+    }
+    if (!lease->flags || (lease->flags & ~allowed_flags))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "unsupported XFRM lease flags");
+        return false;
+    }
+
+    provider_helper_config_reason(reason, reason_size, "ok");
+    return true;
+}
+
 static void
 provider_helper_wire_write_u16(uint8_t **pos, uint16_t value)
 {
@@ -331,6 +373,53 @@ provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
     stats->ike_sa_init_half_open_dropped = provider_helper_wire_read_u64(&pos);
 
     return (size_t)(pos - src) == PROVIDER_HELPER_RUNTIME_STATS_SIZE;
+}
+
+bool
+provider_helper_ipc_encode_xfrm_lease(uint8_t *dst, size_t dst_len,
+                                      const struct provider_helper_xfrm_lease *lease)
+{
+    if (!dst || dst_len < PROVIDER_HELPER_XFRM_LEASE_SIZE || !lease)
+    {
+        return false;
+    }
+
+    uint8_t *pos = dst;
+    provider_helper_wire_write_u64(&pos, lease->lease_id);
+    provider_helper_wire_write_u64(&pos, lease->provider_session_id);
+    provider_helper_wire_write_u64(&pos, lease->policy_revision);
+    provider_helper_wire_write_u32(&pos, lease->mark_value);
+    provider_helper_wire_write_u32(&pos, lease->mark_mask);
+    provider_helper_wire_write_u32(&pos, lease->if_id);
+    provider_helper_wire_write_u32(&pos, lease->reqid);
+    provider_helper_wire_write_u32(&pos, lease->address_family);
+    provider_helper_wire_write_u32(&pos, lease->flags);
+
+    return (size_t)(pos - dst) == PROVIDER_HELPER_XFRM_LEASE_SIZE;
+}
+
+bool
+provider_helper_ipc_decode_xfrm_lease(const uint8_t *src, size_t src_len,
+                                      struct provider_helper_xfrm_lease *lease)
+{
+    if (!src || src_len != PROVIDER_HELPER_XFRM_LEASE_SIZE || !lease)
+    {
+        return false;
+    }
+
+    const uint8_t *pos = src;
+    CLEAR(*lease);
+    lease->lease_id = provider_helper_wire_read_u64(&pos);
+    lease->provider_session_id = provider_helper_wire_read_u64(&pos);
+    lease->policy_revision = provider_helper_wire_read_u64(&pos);
+    lease->mark_value = provider_helper_wire_read_u32(&pos);
+    lease->mark_mask = provider_helper_wire_read_u32(&pos);
+    lease->if_id = provider_helper_wire_read_u32(&pos);
+    lease->reqid = provider_helper_wire_read_u32(&pos);
+    lease->address_family = provider_helper_wire_read_u32(&pos);
+    lease->flags = provider_helper_wire_read_u32(&pos);
+
+    return (size_t)(pos - src) == PROVIDER_HELPER_XFRM_LEASE_SIZE;
 }
 
 const char *

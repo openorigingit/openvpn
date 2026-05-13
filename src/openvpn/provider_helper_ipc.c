@@ -116,6 +116,20 @@ provider_helper_ipc_write_runtime_stats(struct buffer *buf,
            && buf_write(buf, payload, sizeof(payload));
 }
 
+bool
+provider_helper_ipc_write_xfrm_lease(struct buffer *buf,
+                                     const struct provider_helper_xfrm_lease *lease)
+{
+    if (!buf || !lease)
+    {
+        return false;
+    }
+
+    uint8_t payload[PROVIDER_HELPER_XFRM_LEASE_SIZE];
+    return provider_helper_ipc_encode_xfrm_lease(payload, sizeof(payload), lease)
+           && buf_write(buf, payload, sizeof(payload));
+}
+
 enum provider_helper_ipc_result
 provider_helper_ipc_read_header(struct buffer *buf,
                                 struct provider_helper_msg_header *header,

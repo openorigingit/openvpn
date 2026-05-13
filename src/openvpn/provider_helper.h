@@ -36,6 +36,7 @@
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 28
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
 #define PROVIDER_HELPER_RUNTIME_STATS_SIZE  56
+#define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
 #define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE 4
 
@@ -44,6 +45,9 @@
 
 #define PROVIDER_HELPER_LISTENER_FD_IKE   (1u << 0)
 #define PROVIDER_HELPER_LISTENER_FD_NATT  (1u << 1)
+
+#define PROVIDER_HELPER_XFRM_LEASE_IPV4   (1u << 0)
+#define PROVIDER_HELPER_XFRM_LEASE_IPV6   (1u << 1)
 
 #define PROVIDER_HELPER_IKEV2_MAJOR_VERSION 2
 #define PROVIDER_HELPER_IKEV2_MINOR_VERSION 0
@@ -83,6 +87,8 @@ enum provider_helper_msg_type {
     PROVIDER_HELPER_MSG_LISTENER_FD_ACK,
     PROVIDER_HELPER_MSG_STATS_REQUEST,
     PROVIDER_HELPER_MSG_STATS,
+    PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL,
+    PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL_ACK,
 };
 
 enum provider_helper_ipc_result {
@@ -154,6 +160,18 @@ struct provider_helper_runtime_stats {
     uint64_t ike_sa_init_half_open_dropped;
 };
 
+struct provider_helper_xfrm_lease {
+    uint64_t lease_id;
+    uint64_t provider_session_id;
+    uint64_t policy_revision;
+    uint32_t mark_value;
+    uint32_t mark_mask;
+    uint32_t if_id;
+    uint32_t reqid;
+    uint32_t address_family;
+    uint32_t flags;
+};
+
 struct provider_helper_ikev2_header {
     uint64_t initiator_spi;
     uint64_t responder_spi;
@@ -207,6 +225,9 @@ bool provider_helper_runtime_config_valid(const struct provider_helper_runtime_c
 bool provider_helper_listener_fd_valid(const struct provider_helper_listener_fd *listener,
                                        char *reason,
                                        size_t reason_size);
+bool provider_helper_xfrm_lease_valid(const struct provider_helper_xfrm_lease *lease,
+                                      char *reason,
+                                      size_t reason_size);
 
 bool provider_helper_ipc_write_header(struct buffer *buf,
                                       const struct provider_helper_msg_header *header);
@@ -228,6 +249,8 @@ bool provider_helper_ipc_write_listener_fd(struct buffer *buf,
                                            const struct provider_helper_listener_fd *listener);
 bool provider_helper_ipc_write_runtime_stats(struct buffer *buf,
                                              const struct provider_helper_runtime_stats *stats);
+bool provider_helper_ipc_write_xfrm_lease(struct buffer *buf,
+                                          const struct provider_helper_xfrm_lease *lease);
 bool provider_helper_ipc_encode_runtime_config(uint8_t *dst, size_t dst_len,
                                                const struct provider_helper_runtime_config *config);
 bool provider_helper_ipc_decode_runtime_config(const uint8_t *src, size_t src_len,
@@ -240,6 +263,10 @@ bool provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
                                               const struct provider_helper_runtime_stats *stats);
 bool provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
                                               struct provider_helper_runtime_stats *stats);
+bool provider_helper_ipc_encode_xfrm_lease(uint8_t *dst, size_t dst_len,
+                                           const struct provider_helper_xfrm_lease *lease);
+bool provider_helper_ipc_decode_xfrm_lease(const uint8_t *src, size_t src_len,
+                                           struct provider_helper_xfrm_lease *lease);
 enum provider_helper_ikev2_parse_result
 provider_helper_ikev2_parse_header(const uint8_t *packet,
                                    size_t packet_len,
@@ -260,6 +287,10 @@ bool provider_helper_supervisor_send_listener_fd(
     struct provider_helper_supervisor *supervisor,
     int fd,
     const struct provider_helper_listener_fd *listener,
+    uint64_t correlation_id);
+bool provider_helper_supervisor_send_xfrm_lease(
+    struct provider_helper_supervisor *supervisor,
+    const struct provider_helper_xfrm_lease *lease,
     uint64_t correlation_id);
 #endif
 void provider_helper_supervisor_stop(struct provider_helper_supervisor *supervisor);
