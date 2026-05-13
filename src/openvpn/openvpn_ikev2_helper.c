@@ -2754,6 +2754,10 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 return;
             }
             ++counters->ike_auth_inner_parsed;
+            if (inner_summary.saw_eap)
+            {
+                ++counters->ike_auth_eap_tls_rx;
+            }
             if (sa->pending_auth_request_id)
             {
                 ++counters->ike_auth_request_pending_dropped;
@@ -2773,10 +2777,18 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
             if (!ikev2_helper_extract_credential_metadata(
                     sa, plaintext, plaintext_len, &inner_summary))
             {
+                if (inner_summary.saw_cert)
+                {
+                    ++counters->ike_auth_cert_invalid;
+                }
                 ++counters->ike_auth_inner_malformed;
                 ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                 counters->ike_sa_active = sa_table->active;
                 return;
+            }
+            if (sa->credential_fingerprint_len)
+            {
+                ++counters->ike_auth_cert_extracted;
             }
             ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
 

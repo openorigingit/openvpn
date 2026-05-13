@@ -35,7 +35,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 36
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  344
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  368
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
 #define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
@@ -311,6 +311,9 @@ struct provider_helper_runtime_stats {
     uint64_t ike_auth_inner_malformed;
     uint64_t ike_auth_idi_extracted;
     uint64_t ike_auth_idi_invalid;
+    uint64_t ike_auth_eap_tls_rx;
+    uint64_t ike_auth_cert_extracted;
+    uint64_t ike_auth_cert_invalid;
     uint64_t ike_auth_request_tx;
     uint64_t ike_auth_request_pending_dropped;
     uint64_t ike_auth_request_failed;
