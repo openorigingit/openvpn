@@ -303,6 +303,8 @@ provider_helper_testdriver_SOURCES = test_provider_helper.c \
 	mock_msg.c mock_msg.h test_common.h \
 	mock_get_random.c \
 	$(top_srcdir)/src/openvpn/provider_helper.c \
+	$(top_srcdir)/src/openvpn/provider_helper_ipc.c \
+	$(top_srcdir)/src/openvpn/provider_helper_wire.c \
 	$(top_srcdir)/src/openvpn/buffer.c \
 	$(top_srcdir)/src/openvpn/otime.c \
 	$(top_srcdir)/src/openvpn/fdmisc.c \
@@ -316,7 +318,8 @@ provider_helper_noop_LDFLAGS = @TEST_LDFLAGS@
 provider_helper_noop_SOURCES = test_provider_helper_noop.c \
 	mock_msg.c mock_msg.h test_common.h \
 	mock_get_random.c \
-	$(top_srcdir)/src/openvpn/provider_helper.c \
+	$(top_srcdir)/src/openvpn/provider_helper_ipc.c \
+	$(top_srcdir)/src/openvpn/provider_helper_wire.c \
 	$(top_srcdir)/src/openvpn/buffer.c \
 	$(top_srcdir)/src/openvpn/otime.c \
 	$(top_srcdir)/src/openvpn/fdmisc.c \

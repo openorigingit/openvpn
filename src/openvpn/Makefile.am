@@ -41,6 +41,10 @@ endif
 
 sbin_PROGRAMS = openvpn
 
+if !WIN32
+noinst_PROGRAMS = openvpn-ikev2-helper
+endif
+
 openvpn_SOURCES = \
 	argv.c argv.h \
 	auth_token.c auth_token.h \
@@ -116,6 +120,8 @@ openvpn_SOURCES = \
 	plugin.c plugin.h \
 	pool.c pool.h \
 	provider_helper.c provider_helper.h \
+	provider_helper_ipc.c \
+	provider_helper_wire.c \
 	provider_policy.c provider_policy.h \
 	provider_session.c provider_session.h \
 	provider_xfrm.c provider_xfrm.h \
@@ -172,4 +178,15 @@ openvpn_LDADD = \
 if WIN32
 openvpn_SOURCES += openvpn_win32_resources.rc wfp_block.c wfp_block.h
 openvpn_LDADD += -lgdi32 -lws2_32 -lwininet -lcrypt32 -liphlpapi -lwinmm -lfwpuclnt -lrpcrt4 -lncrypt -lsetupapi -lbcrypt
+endif
+
+if !WIN32
+openvpn_ikev2_helper_CFLAGS = $(AM_CFLAGS)
+openvpn_ikev2_helper_SOURCES = \
+	openvpn_ikev2_helper.c \
+	provider_helper.h \
+	provider_helper_wire.c
+openvpn_ikev2_helper_LDADD = \
+	$(top_builddir)/src/compat/libcompat.la \
+	$(SOCKETS_LIBS)
 endif

@@ -27,6 +27,7 @@
 #include "test_common.h"
 
 static const char *noop_helper_path;
+static const char *ikev2_helper_path;
 
 static struct provider_helper_msg_header
 test_header(uint64_t sequence, uint32_t payload_len)
@@ -163,6 +164,11 @@ test_provider_helper_spawn_noop(void **state)
 {
     (void)state;
 
+    if (!noop_helper_path)
+    {
+        skip();
+    }
+
     struct provider_helper_supervisor supervisor;
     provider_helper_supervisor_init(&supervisor);
 
@@ -183,17 +189,94 @@ test_provider_helper_spawn_noop(void **state)
     assert_int_equal(supervisor.ipc_fd, -1);
 }
 
+static void
+write_helper_header_fd(int fd, uint32_t type, uint64_t sequence,
+                       uint64_t correlation_id)
+{
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = type,
+        .sequence = sequence,
+        .correlation_id = correlation_id,
+    };
+
+    assert_true(provider_helper_ipc_write_header(&buf, &header));
+    assert_int_equal(write(fd, BPTR(&buf), (size_t)BLEN(&buf)), BLEN(&buf));
+    free_buf(&buf);
+}
+
+static void
+test_provider_helper_spawn_ikev2_scaffold(void **state)
+{
+    (void)state;
+
+    if (!ikev2_helper_path)
+    {
+        skip();
+    }
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+
+    char *const argv[] = { (char *)ikev2_helper_path, NULL };
+    assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path, argv));
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STARTING);
+
+    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 1);
+
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_PING, 1, 77);
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 2; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 2);
+
+    provider_helper_supervisor_stop(&supervisor);
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
+    assert_int_equal(supervisor.ipc_fd, -1);
+}
+
+static const char *
+find_executable(const char *const *paths)
+{
+    for (size_t i = 0; paths[i]; ++i)
+    {
+        if (access(paths[i], X_OK) == 0)
+        {
+            return paths[i];
+        }
+    }
+    return NULL;
+}
+
 int
 main(void)
 {
-    if (access("./provider_helper_noop", X_OK) == 0)
-    {
-        noop_helper_path = "./provider_helper_noop";
-    }
-    else
-    {
-        noop_helper_path = "tests/unit_tests/openvpn/provider_helper_noop";
-    }
+    const char *const noop_paths[] = {
+        "./provider_helper_noop",
+        "tests/unit_tests/openvpn/provider_helper_noop",
+        NULL
+    };
+    const char *const ikev2_paths[] = {
+        "../../../src/openvpn/openvpn-ikev2-helper",
+        "src/openvpn/openvpn-ikev2-helper",
+        NULL
+    };
+    noop_helper_path = find_executable(noop_paths);
+    ikev2_helper_path = find_executable(ikev2_paths);
 
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_provider_helper_framing_roundtrip),
@@ -201,6 +284,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_feature_negotiation),
         cmocka_unit_test(test_provider_helper_processes_partial_header),
         cmocka_unit_test(test_provider_helper_spawn_noop),
+        cmocka_unit_test(test_provider_helper_spawn_ikev2_scaffold),
     };
 
     return cmocka_run_group_tests_name("provider_helper", tests, NULL, NULL);

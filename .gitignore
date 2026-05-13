@@ -62,6 +62,7 @@ t_client_ips.rc
 tests/unit_tests/**/*_testdriver
 
 src/openvpn/openvpn
+src/openvpn/openvpn-ikev2-helper
 include/openvpn-plugin.h
 config-version.h
 nbproject

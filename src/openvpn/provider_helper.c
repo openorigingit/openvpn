@@ -32,7 +32,6 @@
 
 #include "error.h"
 #include "fdmisc.h"
-#include "integer.h"
 #include "otime.h"
 
 #include "memdbg.h"
@@ -76,34 +75,6 @@ provider_helper_state_name(enum provider_helper_state state)
 
         case PROVIDER_HELPER_STATE_FAILED:
             return "failed";
-
-        default:
-            return "unknown";
-    }
-}
-
-const char *
-provider_helper_ipc_result_name(enum provider_helper_ipc_result result)
-{
-    switch (result)
-    {
-        case PROVIDER_HELPER_IPC_OK:
-            return "ok";
-
-        case PROVIDER_HELPER_IPC_SHORT_HEADER:
-            return "short-header";
-
-        case PROVIDER_HELPER_IPC_BAD_MAGIC:
-            return "bad-magic";
-
-        case PROVIDER_HELPER_IPC_BAD_VERSION:
-            return "bad-version";
-
-        case PROVIDER_HELPER_IPC_OVERSIZE:
-            return "oversize";
-
-        case PROVIDER_HELPER_IPC_SEQUENCE_ROLLBACK:
-            return "sequence-rollback";
 
         default:
             return "unknown";
@@ -155,151 +126,6 @@ provider_helper_supervisor_free(struct provider_helper_supervisor *supervisor)
     provider_helper_supervisor_stop(supervisor);
     CLEAR(*supervisor);
     supervisor->ipc_fd = -1;
-}
-
-static bool
-provider_helper_write_u64(struct buffer *buf, uint64_t value)
-{
-    const uint64_t network_value = htonll(value);
-    return buf_write(buf, &network_value, sizeof(network_value));
-}
-
-static uint64_t
-provider_helper_read_u64(struct buffer *buf, bool *good)
-{
-    uint64_t value = 0;
-    if (!buf_read(buf, &value, sizeof(value)))
-    {
-        *good = false;
-        return 0;
-    }
-    return ntohll(value);
-}
-
-bool
-provider_helper_ipc_write_header(struct buffer *buf,
-                                 const struct provider_helper_msg_header *header)
-{
-    if (!buf || !header || header->payload_len > PROVIDER_HELPER_IPC_MAX_MESSAGE)
-    {
-        return false;
-    }
-
-    return buf_write_u32(buf, header->magic)
-           && buf_write_u16(buf, header->version_major)
-           && buf_write_u16(buf, header->version_minor)
-           && buf_write_u32(buf, header->type)
-           && buf_write_u32(buf, header->flags)
-           && provider_helper_write_u64(buf, header->sequence)
-           && provider_helper_write_u64(buf, header->correlation_id)
-           && buf_write_u32(buf, header->payload_len)
-           && buf_write_u32(buf, header->reserved);
-}
-
-enum provider_helper_ipc_result
-provider_helper_ipc_read_header(struct buffer *buf,
-                                struct provider_helper_msg_header *header,
-                                uint32_t max_message_size,
-                                uint64_t *last_sequence)
-{
-    bool good = true;
-    if (!buf || !header || BLEN(buf) < PROVIDER_HELPER_IPC_HEADER_SIZE)
-    {
-        return PROVIDER_HELPER_IPC_SHORT_HEADER;
-    }
-
-    CLEAR(*header);
-    header->magic = buf_read_u32(buf, &good);
-    if (!good)
-    {
-        return PROVIDER_HELPER_IPC_SHORT_HEADER;
-    }
-
-    const int version_major = buf_read_u16(buf);
-    const int version_minor = buf_read_u16(buf);
-    if (version_major < 0 || version_minor < 0)
-    {
-        return PROVIDER_HELPER_IPC_SHORT_HEADER;
-    }
-    header->version_major = (uint16_t)version_major;
-    header->version_minor = (uint16_t)version_minor;
-
-    header->type = buf_read_u32(buf, &good);
-    if (!good)
-    {
-        return PROVIDER_HELPER_IPC_SHORT_HEADER;
-    }
-    header->flags = buf_read_u32(buf, &good);
-    if (!good)
-    {
-        return PROVIDER_HELPER_IPC_SHORT_HEADER;
-    }
-    header->sequence = provider_helper_read_u64(buf, &good);
-    if (!good)
-    {
-        return PROVIDER_HELPER_IPC_SHORT_HEADER;
-    }
-    header->correlation_id = provider_helper_read_u64(buf, &good);
-    if (!good)
-    {
-        return PROVIDER_HELPER_IPC_SHORT_HEADER;
-    }
-    header->payload_len = buf_read_u32(buf, &good);
-    if (!good)
-    {
-        return PROVIDER_HELPER_IPC_SHORT_HEADER;
-    }
-    header->reserved = buf_read_u32(buf, &good);
-    if (!good)
-    {
-        return PROVIDER_HELPER_IPC_SHORT_HEADER;
-    }
-
-    if (header->magic != PROVIDER_HELPER_IPC_MAGIC)
-    {
-        return PROVIDER_HELPER_IPC_BAD_MAGIC;
-    }
-    if (header->version_major != PROVIDER_HELPER_IPC_VERSION_MAJOR)
-    {
-        return PROVIDER_HELPER_IPC_BAD_VERSION;
-    }
-    if (!max_message_size || max_message_size > PROVIDER_HELPER_IPC_MAX_MESSAGE)
-    {
-        max_message_size = PROVIDER_HELPER_IPC_MAX_MESSAGE;
-    }
-    if (header->payload_len > max_message_size)
-    {
-        return PROVIDER_HELPER_IPC_OVERSIZE;
-    }
-    if (!header->sequence || (last_sequence && header->sequence <= *last_sequence))
-    {
-        return PROVIDER_HELPER_IPC_SEQUENCE_ROLLBACK;
-    }
-
-    if (last_sequence)
-    {
-        *last_sequence = header->sequence;
-    }
-    return PROVIDER_HELPER_IPC_OK;
-}
-
-bool
-provider_helper_negotiate_features(uint64_t supported_features,
-                                   uint64_t remote_mandatory_features,
-                                   uint64_t remote_optional_features,
-                                   uint64_t *negotiated_features)
-{
-    if (remote_mandatory_features & ~supported_features)
-    {
-        return false;
-    }
-
-    if (negotiated_features)
-    {
-        *negotiated_features =
-            (remote_mandatory_features | remote_optional_features) & supported_features;
-    }
-    return true;
 }
 
 #ifndef _WIN32

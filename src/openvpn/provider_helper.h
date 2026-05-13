@@ -103,11 +103,18 @@ void provider_helper_supervisor_set_state(struct provider_helper_supervisor *sup
 
 bool provider_helper_ipc_write_header(struct buffer *buf,
                                       const struct provider_helper_msg_header *header);
+bool provider_helper_ipc_encode_header(uint8_t *dst, size_t dst_len,
+                                       const struct provider_helper_msg_header *header);
 enum provider_helper_ipc_result
 provider_helper_ipc_read_header(struct buffer *buf,
                                 struct provider_helper_msg_header *header,
                                 uint32_t max_message_size,
                                 uint64_t *last_sequence);
+enum provider_helper_ipc_result
+provider_helper_ipc_decode_header(const uint8_t *src, size_t src_len,
+                                  struct provider_helper_msg_header *header,
+                                  uint32_t max_message_size,
+                                  uint64_t *last_sequence);
 bool provider_helper_negotiate_features(uint64_t supported_features,
                                         uint64_t remote_mandatory_features,
                                         uint64_t remote_optional_features,
