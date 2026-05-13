@@ -102,6 +102,20 @@ provider_helper_ipc_write_listener_fd(struct buffer *buf,
            && buf_write(buf, payload, sizeof(payload));
 }
 
+bool
+provider_helper_ipc_write_runtime_stats(struct buffer *buf,
+                                        const struct provider_helper_runtime_stats *stats)
+{
+    if (!buf || !stats)
+    {
+        return false;
+    }
+
+    uint8_t payload[PROVIDER_HELPER_RUNTIME_STATS_SIZE];
+    return provider_helper_ipc_encode_runtime_stats(payload, sizeof(payload), stats)
+           && buf_write(buf, payload, sizeof(payload));
+}
+
 enum provider_helper_ipc_result
 provider_helper_ipc_read_header(struct buffer *buf,
                                 struct provider_helper_msg_header *header,

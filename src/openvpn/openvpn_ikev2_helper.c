@@ -43,13 +43,6 @@ struct ikev2_helper_listener {
     struct provider_helper_listener_fd descriptor;
 };
 
-struct ikev2_helper_counters {
-    uint64_t datagrams_rx;
-    uint64_t datagrams_parsed;
-    uint64_t datagrams_malformed;
-    uint64_t datagrams_oversize;
-};
-
 static void
 ikev2_helper_signal_handler(int signum)
 {
@@ -132,6 +125,30 @@ ikev2_helper_send_header(int fd, uint32_t type, uint64_t sequence,
 
     return provider_helper_ipc_encode_header(header_buf, sizeof(header_buf), &header)
            && ikev2_helper_write_all(fd, header_buf, sizeof(header_buf));
+}
+
+static bool
+ikev2_helper_send_stats(int fd, uint64_t sequence, uint64_t correlation_id,
+                        const struct provider_helper_runtime_stats *stats)
+{
+    uint8_t frame[PROVIDER_HELPER_IPC_HEADER_SIZE
+                  + PROVIDER_HELPER_RUNTIME_STATS_SIZE];
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_STATS,
+        .sequence = sequence,
+        .correlation_id = correlation_id,
+        .payload_len = PROVIDER_HELPER_RUNTIME_STATS_SIZE,
+    };
+
+    return provider_helper_ipc_encode_header(frame, PROVIDER_HELPER_IPC_HEADER_SIZE,
+                                             &header)
+           && provider_helper_ipc_encode_runtime_stats(
+               frame + PROVIDER_HELPER_IPC_HEADER_SIZE,
+               PROVIDER_HELPER_RUNTIME_STATS_SIZE, stats)
+           && ikev2_helper_write_all(fd, frame, sizeof(frame));
 }
 
 static bool
@@ -300,7 +317,7 @@ ikev2_helper_read_listener_fd(int fd, const struct provider_helper_msg_header *h
 static void
 ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                              const struct provider_helper_runtime_config *config,
-                             struct ikev2_helper_counters *counters)
+                             struct provider_helper_runtime_stats *counters)
 {
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE + 1];
     struct sockaddr_storage peer;
@@ -348,7 +365,7 @@ ikev2_helper_loop(int fd)
     bool configured = false;
     struct ikev2_helper_listener listeners[IKEV2_HELPER_MAX_LISTENERS];
     size_t listener_count = 0;
-    struct ikev2_helper_counters counters;
+    struct provider_helper_runtime_stats counters;
     struct provider_helper_runtime_config config;
     provider_helper_runtime_config_default(&config);
     CLEAR(counters);
@@ -469,6 +486,15 @@ ikev2_helper_loop(int fd)
                 }
                 if (!ikev2_helper_send_header(fd, PROVIDER_HELPER_MSG_PONG,
                                               tx_sequence++, header.correlation_id))
+                {
+                    return 7;
+                }
+                break;
+
+            case PROVIDER_HELPER_MSG_STATS_REQUEST:
+                if (header.payload_len
+                    || !ikev2_helper_send_stats(fd, tx_sequence++, header.sequence,
+                                                &counters))
                 {
                     return 7;
                 }

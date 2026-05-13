@@ -35,6 +35,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 28
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  32
 #define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
 #define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE 4
 
@@ -80,6 +81,8 @@ enum provider_helper_msg_type {
     PROVIDER_HELPER_MSG_CONFIGURE_ACK,
     PROVIDER_HELPER_MSG_LISTENER_FD,
     PROVIDER_HELPER_MSG_LISTENER_FD_ACK,
+    PROVIDER_HELPER_MSG_STATS_REQUEST,
+    PROVIDER_HELPER_MSG_STATS,
 };
 
 enum provider_helper_ipc_result {
@@ -141,6 +144,13 @@ struct provider_helper_listener_fd {
     uint32_t flags;
 };
 
+struct provider_helper_runtime_stats {
+    uint64_t datagrams_rx;
+    uint64_t datagrams_parsed;
+    uint64_t datagrams_malformed;
+    uint64_t datagrams_oversize;
+};
+
 struct provider_helper_ikev2_header {
     uint64_t initiator_spi;
     uint64_t responder_spi;
@@ -167,10 +177,15 @@ struct provider_helper_supervisor {
     uint64_t supported_features;
     uint64_t negotiated_features;
     struct provider_helper_runtime_config runtime_config;
+    struct provider_helper_runtime_stats runtime_stats;
     unsigned int restart_count;
     time_t last_state_change;
     uint8_t header_buf[PROVIDER_HELPER_IPC_HEADER_SIZE];
     size_t header_len;
+    struct provider_helper_msg_header pending_header;
+    uint8_t payload_buf[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    size_t payload_len;
+    size_t payload_received;
 };
 
 const char *provider_helper_state_name(enum provider_helper_state state);
@@ -208,6 +223,8 @@ bool provider_helper_ipc_write_runtime_config(struct buffer *buf,
                                               const struct provider_helper_runtime_config *config);
 bool provider_helper_ipc_write_listener_fd(struct buffer *buf,
                                            const struct provider_helper_listener_fd *listener);
+bool provider_helper_ipc_write_runtime_stats(struct buffer *buf,
+                                             const struct provider_helper_runtime_stats *stats);
 bool provider_helper_ipc_encode_runtime_config(uint8_t *dst, size_t dst_len,
                                                const struct provider_helper_runtime_config *config);
 bool provider_helper_ipc_decode_runtime_config(const uint8_t *src, size_t src_len,
@@ -216,6 +233,10 @@ bool provider_helper_ipc_encode_listener_fd(uint8_t *dst, size_t dst_len,
                                             const struct provider_helper_listener_fd *listener);
 bool provider_helper_ipc_decode_listener_fd(const uint8_t *src, size_t src_len,
                                             struct provider_helper_listener_fd *listener);
+bool provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
+                                              const struct provider_helper_runtime_stats *stats);
+bool provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
+                                              struct provider_helper_runtime_stats *stats);
 enum provider_helper_ikev2_parse_result
 provider_helper_ikev2_parse_header(const uint8_t *packet,
                                    size_t packet_len,

@@ -290,6 +290,43 @@ provider_helper_ipc_decode_listener_fd(const uint8_t *src, size_t src_len,
     return (size_t)(pos - src) == PROVIDER_HELPER_LISTENER_FD_SIZE;
 }
 
+bool
+provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
+                                         const struct provider_helper_runtime_stats *stats)
+{
+    if (!dst || dst_len < PROVIDER_HELPER_RUNTIME_STATS_SIZE || !stats)
+    {
+        return false;
+    }
+
+    uint8_t *pos = dst;
+    provider_helper_wire_write_u64(&pos, stats->datagrams_rx);
+    provider_helper_wire_write_u64(&pos, stats->datagrams_parsed);
+    provider_helper_wire_write_u64(&pos, stats->datagrams_malformed);
+    provider_helper_wire_write_u64(&pos, stats->datagrams_oversize);
+
+    return (size_t)(pos - dst) == PROVIDER_HELPER_RUNTIME_STATS_SIZE;
+}
+
+bool
+provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
+                                         struct provider_helper_runtime_stats *stats)
+{
+    if (!src || src_len != PROVIDER_HELPER_RUNTIME_STATS_SIZE || !stats)
+    {
+        return false;
+    }
+
+    const uint8_t *pos = src;
+    CLEAR(*stats);
+    stats->datagrams_rx = provider_helper_wire_read_u64(&pos);
+    stats->datagrams_parsed = provider_helper_wire_read_u64(&pos);
+    stats->datagrams_malformed = provider_helper_wire_read_u64(&pos);
+    stats->datagrams_oversize = provider_helper_wire_read_u64(&pos);
+
+    return (size_t)(pos - src) == PROVIDER_HELPER_RUNTIME_STATS_SIZE;
+}
+
 const char *
 provider_helper_ikev2_parse_result_name(enum provider_helper_ikev2_parse_result result)
 {

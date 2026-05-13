@@ -103,6 +103,9 @@ provider_helper_close_ipc(struct provider_helper_supervisor *supervisor)
         supervisor->ipc_fd = -1;
     }
     supervisor->header_len = 0;
+    supervisor->payload_len = 0;
+    supervisor->payload_received = 0;
+    CLEAR(supervisor->pending_header);
 }
 
 void
@@ -306,6 +309,8 @@ provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
     supervisor->pid = pid;
     supervisor->last_rx_sequence = 0;
     supervisor->header_len = 0;
+    supervisor->payload_len = 0;
+    supervisor->payload_received = 0;
     provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_STARTING);
     return true;
 }
@@ -403,6 +408,51 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
         return;
     }
 
+    if (supervisor->payload_len)
+    {
+        const size_t remaining = supervisor->payload_len - supervisor->payload_received;
+        const ssize_t n = read(supervisor->ipc_fd,
+                               supervisor->payload_buf + supervisor->payload_received,
+                               remaining);
+        if (n < 0)
+        {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                return;
+            }
+            provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_DEGRADED);
+            provider_helper_close_ipc(supervisor);
+            return;
+        }
+        if (n == 0)
+        {
+            provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_DEGRADED);
+            provider_helper_close_ipc(supervisor);
+            return;
+        }
+        supervisor->payload_received += (size_t)n;
+        if (supervisor->payload_received < supervisor->payload_len)
+        {
+            return;
+        }
+
+        const struct provider_helper_msg_header header = supervisor->pending_header;
+        const size_t payload_len = supervisor->payload_len;
+        supervisor->payload_len = 0;
+        supervisor->payload_received = 0;
+
+        if (header.type != PROVIDER_HELPER_MSG_STATS
+            || payload_len != PROVIDER_HELPER_RUNTIME_STATS_SIZE
+            || supervisor->state != PROVIDER_HELPER_STATE_READY
+            || !provider_helper_ipc_decode_runtime_stats(
+                supervisor->payload_buf, payload_len, &supervisor->runtime_stats))
+        {
+            provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);
+            provider_helper_close_ipc(supervisor);
+        }
+        return;
+    }
+
     const size_t remaining = sizeof(supervisor->header_buf) - supervisor->header_len;
     const ssize_t n = read(supervisor->ipc_fd, supervisor->header_buf + supervisor->header_len,
                            remaining);
@@ -447,8 +497,17 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
 
     if (header.payload_len)
     {
-        provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);
-        provider_helper_close_ipc(supervisor);
+        if (header.payload_len > sizeof(supervisor->payload_buf))
+        {
+            provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);
+            provider_helper_close_ipc(supervisor);
+            return;
+        }
+
+        supervisor->pending_header = header;
+        supervisor->payload_len = header.payload_len;
+        supervisor->payload_received = 0;
+        provider_helper_process_event(supervisor);
         return;
     }
 

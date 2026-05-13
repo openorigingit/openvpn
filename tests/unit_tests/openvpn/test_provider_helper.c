@@ -182,6 +182,28 @@ test_provider_helper_listener_fd_roundtrip(void **state)
 }
 
 static void
+test_provider_helper_runtime_stats_roundtrip(void **state)
+{
+    (void)state;
+
+    const struct provider_helper_runtime_stats input = {
+        .datagrams_rx = 10,
+        .datagrams_parsed = 7,
+        .datagrams_malformed = 2,
+        .datagrams_oversize = 1,
+    };
+    struct provider_helper_runtime_stats output;
+    uint8_t payload[PROVIDER_HELPER_RUNTIME_STATS_SIZE];
+
+    assert_true(provider_helper_ipc_encode_runtime_stats(payload, sizeof(payload), &input));
+    assert_true(provider_helper_ipc_decode_runtime_stats(payload, sizeof(payload), &output));
+    assert_int_equal(output.datagrams_rx, input.datagrams_rx);
+    assert_int_equal(output.datagrams_parsed, input.datagrams_parsed);
+    assert_int_equal(output.datagrams_malformed, input.datagrams_malformed);
+    assert_int_equal(output.datagrams_oversize, input.datagrams_oversize);
+}
+
+static void
 test_write_be32(uint8_t *dst, uint32_t value)
 {
     dst[0] = (uint8_t)(value >> 24);
@@ -493,9 +515,10 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 3);
     test_send_ikev2_datagram(port);
+    usleep(10000);
     close(listener_fd);
 
-    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_PING, 3, 77);
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST, 3, 90);
     for (int i = 0; i < 100 && supervisor.last_rx_sequence < 4; ++i)
     {
         provider_helper_process_event(&supervisor);
@@ -504,6 +527,18 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 4);
+    assert_true(supervisor.runtime_stats.datagrams_rx >= 1);
+    assert_true(supervisor.runtime_stats.datagrams_parsed >= 1);
+
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_PING, 4, 77);
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 5; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 5);
 
     provider_helper_supervisor_stop(&supervisor);
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
@@ -545,6 +580,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_feature_negotiation),
         cmocka_unit_test(test_provider_helper_runtime_config_roundtrip),
         cmocka_unit_test(test_provider_helper_listener_fd_roundtrip),
+        cmocka_unit_test(test_provider_helper_runtime_stats_roundtrip),
         cmocka_unit_test(test_provider_helper_ikev2_parser),
         cmocka_unit_test(test_provider_helper_processes_partial_header),
         cmocka_unit_test(test_provider_helper_spawn_noop),
