@@ -347,6 +347,11 @@ bool provider_helper_runtime_config_valid(const struct provider_helper_runtime_c
 bool provider_helper_listener_fd_valid(const struct provider_helper_listener_fd *listener,
                                        char *reason,
                                        size_t reason_size);
+bool provider_helper_listener_fd_allowed_by_config(
+    const struct provider_helper_runtime_config *config,
+    const struct provider_helper_listener_fd *listener,
+    char *reason,
+    size_t reason_size);
 bool provider_helper_xfrm_lease_valid(const struct provider_helper_xfrm_lease *lease,
                                       char *reason,
                                       size_t reason_size);

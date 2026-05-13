@@ -134,6 +134,8 @@ test_provider_helper_runtime_config_roundtrip(void **state)
 
     provider_helper_runtime_config_default(&input);
     assert_true(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
+    assert_int_equal(input.flags, PROVIDER_HELPER_CONFIG_FORCE_NATT
+                                  | PROVIDER_HELPER_CONFIG_IPV4_ONLY);
     assert_true(provider_helper_ipc_encode_runtime_config(payload, sizeof(payload), &input));
     assert_true(provider_helper_ipc_decode_runtime_config(payload, sizeof(payload), &output));
     assert_int_equal(output.flags, input.flags);
@@ -147,6 +149,22 @@ test_provider_helper_runtime_config_roundtrip(void **state)
                      input.half_open_timeout_seconds);
     assert_int_equal(output.max_half_open_sas_per_source,
                      input.max_half_open_sas_per_source);
+
+    input.flags |= (1u << 31);
+    assert_false(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "unsupported runtime flags"));
+    input.flags = PROVIDER_HELPER_CONFIG_FORCE_NATT
+                  | PROVIDER_HELPER_CONFIG_IPV4_ONLY;
+    input.flags &= ~PROVIDER_HELPER_CONFIG_FORCE_NATT;
+    assert_false(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "FORCE_NATT"));
+    input.flags = PROVIDER_HELPER_CONFIG_FORCE_NATT
+                  | PROVIDER_HELPER_CONFIG_IPV4_ONLY;
+    input.flags &= ~PROVIDER_HELPER_CONFIG_IPV4_ONLY;
+    assert_false(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "IPV4_ONLY"));
+    input.flags = PROVIDER_HELPER_CONFIG_FORCE_NATT
+                  | PROVIDER_HELPER_CONFIG_IPV4_ONLY;
 
     input.cookie_threshold = input.max_half_open_sas + 1;
     assert_false(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
@@ -174,11 +192,15 @@ test_provider_helper_listener_fd_roundtrip(void **state)
         .local_port = 4500,
         .flags = PROVIDER_HELPER_LISTENER_FD_NATT,
     };
+    struct provider_helper_runtime_config config;
     struct provider_helper_listener_fd output;
     char reason[128];
     uint8_t payload[PROVIDER_HELPER_LISTENER_FD_SIZE];
 
+    provider_helper_runtime_config_default(&config);
     assert_true(provider_helper_listener_fd_valid(&input, reason, sizeof(reason)));
+    assert_true(provider_helper_listener_fd_allowed_by_config(
+                    &config, &input, reason, sizeof(reason)));
     assert_true(provider_helper_ipc_encode_listener_fd(payload, sizeof(payload), &input));
     assert_true(provider_helper_ipc_decode_listener_fd(payload, sizeof(payload), &output));
     assert_int_equal(output.listener_id, input.listener_id);
@@ -191,6 +213,17 @@ test_provider_helper_listener_fd_roundtrip(void **state)
     input.protocol = IPPROTO_TCP;
     assert_false(provider_helper_listener_fd_valid(&input, reason, sizeof(reason)));
     assert_non_null(strstr(reason, "UDP"));
+    input.protocol = IPPROTO_UDP;
+    input.flags = PROVIDER_HELPER_LISTENER_FD_IKE
+                  | PROVIDER_HELPER_LISTENER_FD_NATT;
+    assert_false(provider_helper_listener_fd_valid(&input, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "either IKE or NAT-T"));
+    input.flags = PROVIDER_HELPER_LISTENER_FD_NATT;
+    input.family = AF_INET6;
+    assert_true(provider_helper_listener_fd_valid(&input, reason, sizeof(reason)));
+    assert_false(provider_helper_listener_fd_allowed_by_config(
+                     &config, &input, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "IPv4-only"));
 }
 
 static void

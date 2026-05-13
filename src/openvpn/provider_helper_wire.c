@@ -71,9 +71,27 @@ provider_helper_runtime_config_valid(const struct provider_helper_runtime_config
                                      char *reason,
                                      size_t reason_size)
 {
+    const uint32_t allowed_flags = PROVIDER_HELPER_CONFIG_FORCE_NATT
+                                   | PROVIDER_HELPER_CONFIG_IPV4_ONLY;
+
     if (!config)
     {
         provider_helper_config_reason(reason, reason_size, "missing runtime config");
+        return false;
+    }
+    if (config->flags & ~allowed_flags)
+    {
+        provider_helper_config_reason(reason, reason_size, "unsupported runtime flags");
+        return false;
+    }
+    if (!(config->flags & PROVIDER_HELPER_CONFIG_FORCE_NATT))
+    {
+        provider_helper_config_reason(reason, reason_size, "FORCE_NATT is required");
+        return false;
+    }
+    if (!(config->flags & PROVIDER_HELPER_CONFIG_IPV4_ONLY))
+    {
+        provider_helper_config_reason(reason, reason_size, "IPV4_ONLY is required");
         return false;
     }
     if (config->max_half_open_sas == 0)
@@ -166,6 +184,37 @@ provider_helper_listener_fd_valid(const struct provider_helper_listener_fd *list
     if (!listener->flags || (listener->flags & ~allowed_flags))
     {
         provider_helper_config_reason(reason, reason_size, "unsupported listener flags");
+        return false;
+    }
+    if (((listener->flags & PROVIDER_HELPER_LISTENER_FD_IKE) != 0)
+        == ((listener->flags & PROVIDER_HELPER_LISTENER_FD_NATT) != 0))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "listener must be either IKE or NAT-T");
+        return false;
+    }
+
+    provider_helper_config_reason(reason, reason_size, "ok");
+    return true;
+}
+
+bool
+provider_helper_listener_fd_allowed_by_config(
+    const struct provider_helper_runtime_config *config,
+    const struct provider_helper_listener_fd *listener,
+    char *reason,
+    size_t reason_size)
+{
+    if (!provider_helper_runtime_config_valid(config, reason, reason_size)
+        || !provider_helper_listener_fd_valid(listener, reason, reason_size))
+    {
+        return false;
+    }
+    if ((config->flags & PROVIDER_HELPER_CONFIG_IPV4_ONLY)
+        && listener->family != AF_INET)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "IPv4-only config requires AF_INET listener");
         return false;
     }
 

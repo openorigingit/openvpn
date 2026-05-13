@@ -227,7 +227,8 @@ provider_helper_supervisor_send_listener_fd(
 {
     if (!supervisor || supervisor->ipc_fd < 0 || fd < 0
         || supervisor->state != PROVIDER_HELPER_STATE_READY
-        || !provider_helper_listener_fd_valid(listener, NULL, 0))
+        || !provider_helper_listener_fd_allowed_by_config(
+            &supervisor->runtime_config, listener, NULL, 0))
     {
         return false;
     }

@@ -458,14 +458,15 @@ ikev2_helper_validate_listener_socket(
 static bool
 ikev2_helper_read_listener_fd(int fd, const struct provider_helper_msg_header *header,
                               struct provider_helper_listener_fd *listener,
-                              int *listener_fd)
+                              int *listener_fd,
+                              const struct provider_helper_runtime_config *config)
 {
     uint8_t payload[PROVIDER_HELPER_LISTENER_FD_SIZE];
     *listener_fd = -1;
     if (!header || header->payload_len != sizeof(payload)
         || !ikev2_helper_recv_listener_payload(fd, payload, sizeof(payload), listener_fd)
         || !provider_helper_ipc_decode_listener_fd(payload, sizeof(payload), listener)
-        || !provider_helper_listener_fd_valid(listener, NULL, 0)
+        || !provider_helper_listener_fd_allowed_by_config(config, listener, NULL, 0)
         || !ikev2_helper_validate_listener_socket(*listener_fd, listener))
     {
         if (*listener_fd >= 0)
@@ -1014,7 +1015,8 @@ ikev2_helper_loop(int fd)
                 int listener_fd = -1;
                 struct provider_helper_listener_fd listener;
                 if (!configured || listener_count >= SIZE(listeners)
-                    || !ikev2_helper_read_listener_fd(fd, &header, &listener, &listener_fd)
+                    || !ikev2_helper_read_listener_fd(fd, &header, &listener,
+                                                      &listener_fd, &config)
                     || !ikev2_helper_send_header(fd, PROVIDER_HELPER_MSG_LISTENER_FD_ACK,
                                                  tx_sequence++, header.sequence))
                 {
