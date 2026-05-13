@@ -205,6 +205,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .datagrams_oversize = 1,
         .ike_sa_init_accepted = 5,
         .ike_sa_init_cookie_required = 4,
+        .ike_sa_init_cookie_present = 11,
+        .ike_sa_init_cookie_unverified_dropped = 12,
         .ike_sa_init_half_open_dropped = 3,
         .ike_sa_init_per_source_dropped = 9,
         .ike_sa_init_duplicate = 2,
@@ -225,6 +227,10 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
     assert_int_equal(output.ike_sa_init_accepted, input.ike_sa_init_accepted);
     assert_int_equal(output.ike_sa_init_cookie_required,
                      input.ike_sa_init_cookie_required);
+    assert_int_equal(output.ike_sa_init_cookie_present,
+                     input.ike_sa_init_cookie_present);
+    assert_int_equal(output.ike_sa_init_cookie_unverified_dropped,
+                     input.ike_sa_init_cookie_unverified_dropped);
     assert_int_equal(output.ike_sa_init_half_open_dropped,
                      input.ike_sa_init_half_open_dropped);
     assert_int_equal(output.ike_sa_init_per_source_dropped,
@@ -415,11 +421,62 @@ test_make_empty_ike_sa_init_packet(uint8_t *packet, size_t packet_size)
     return packet_len;
 }
 
+static size_t
+test_make_ike_sa_init_cookie_packet(uint8_t *packet, size_t packet_size)
+{
+    const uint8_t cookie[] = { 0x63, 0x6f, 0x6f, 0x6b,
+                               0x69, 0x65, 0x31, 0x32 };
+    const size_t sa_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                          + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                          + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE;
+    const size_t ke_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                          + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE + 8;
+    const size_t notify_len = PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE
+                              + sizeof(cookie);
+    size_t packet_len = test_make_ike_sa_init_packet(packet, packet_size);
+    assert_true(packet_size >= packet_len + notify_len);
+
+    const size_t nonce = PROVIDER_HELPER_IKEV2_HEADER_SIZE + sa_len + ke_len;
+    packet[nonce] = PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY;
+    const size_t notify = packet_len;
+    test_add_ikev2_payload(packet, notify, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+                           (uint16_t)notify_len, 0);
+    packet[notify + 4] = 0;
+    packet[notify + 5] = 0;
+    test_write_be16(packet + notify + 6, PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE);
+    memcpy(packet + notify + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE, cookie,
+           sizeof(cookie));
+
+    packet_len += notify_len;
+    test_write_be32(packet + 24, (uint32_t)packet_len);
+    return packet_len;
+}
+
 static void
 test_send_ikev2_datagram_from(int fd, uint16_t port, uint64_t initiator_spi)
 {
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     const size_t packet_len = test_make_ike_sa_init_packet(packet, sizeof(packet));
+    test_write_be64(packet, initiator_spi);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    assert_int_equal(sendto(fd, packet, packet_len, 0,
+                            (struct sockaddr *)&addr, sizeof(addr)),
+                     packet_len);
+}
+
+static void
+test_send_ikev2_cookie_datagram_from(int fd, uint16_t port,
+                                     uint64_t initiator_spi)
+{
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t packet_len =
+        test_make_ike_sa_init_cookie_packet(packet, sizeof(packet));
     test_write_be64(packet, initiator_spi);
 
     struct sockaddr_in addr;
@@ -968,6 +1025,12 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     test_send_ikev2_datagram_from(cookie_fd, port, 0x0102030405060708ull);
     usleep(10000);
     close(cookie_fd);
+
+    int cookie_present_fd = test_create_udp_sender(0x7f000003u);
+    test_send_ikev2_cookie_datagram_from(cookie_present_fd, port,
+                                         0x0807060504030201ull);
+    usleep(10000);
+    close(cookie_present_fd);
     close(listener_fd);
 
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST, 4, 90);
@@ -979,13 +1042,16 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 5);
-    assert_true(supervisor.runtime_stats.datagrams_rx >= 6);
-    assert_true(supervisor.runtime_stats.datagrams_parsed >= 6);
+    assert_true(supervisor.runtime_stats.datagrams_rx >= 7);
+    assert_true(supervisor.runtime_stats.datagrams_parsed >= 7);
     assert_true(supervisor.runtime_stats.ike_sa_init_accepted >= 2);
     assert_true(supervisor.runtime_stats.ike_sa_init_duplicate >= 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_retransmit_dropped >= 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_per_source_dropped >= 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_cookie_required >= 1);
+    assert_true(supervisor.runtime_stats.ike_sa_init_cookie_present >= 1);
+    assert_true(
+        supervisor.runtime_stats.ike_sa_init_cookie_unverified_dropped >= 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 2);
 
     sleep(2);
