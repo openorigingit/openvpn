@@ -30,6 +30,10 @@ test_binaries += tls_crypt_testdriver
 endif
 endif
 
+if !WIN32
+test_binaries += provider_helper_testdriver
+endif
+
 if WIN32
 test_binaries += cryptoapi_testdriver
 LDADD = -lws2_32
@@ -45,6 +49,10 @@ if !CROSS_COMPILING
 TESTS = $(test_binaries)
 endif
 check_PROGRAMS = $(test_binaries)
+
+if !WIN32
+check_PROGRAMS += provider_helper_noop
+endif
 
 if HAVE_SITNL
 check_PROGRAMS += networking_testdriver
@@ -259,6 +267,35 @@ provider_session_testdriver_SOURCES = test_provider_session.c \
 	$(top_srcdir)/src/openvpn/buffer.c \
 	$(top_srcdir)/src/openvpn/otime.c \
 	$(top_srcdir)/src/openvpn/interval.c \
+	$(top_srcdir)/src/openvpn/fdmisc.c \
+	$(top_srcdir)/src/openvpn/platform.c \
+	$(top_srcdir)/src/openvpn/win32-util.c
+
+provider_helper_testdriver_CFLAGS  = \
+	-I$(top_srcdir)/include -I$(top_srcdir)/src/compat -I$(top_srcdir)/src/openvpn \
+	@TEST_CFLAGS@
+provider_helper_testdriver_LDFLAGS = @TEST_LDFLAGS@
+provider_helper_testdriver_DEPENDENCIES = provider_helper_noop
+provider_helper_testdriver_SOURCES = test_provider_helper.c \
+	mock_msg.c mock_msg.h test_common.h \
+	mock_get_random.c \
+	$(top_srcdir)/src/openvpn/provider_helper.c \
+	$(top_srcdir)/src/openvpn/buffer.c \
+	$(top_srcdir)/src/openvpn/otime.c \
+	$(top_srcdir)/src/openvpn/fdmisc.c \
+	$(top_srcdir)/src/openvpn/platform.c \
+	$(top_srcdir)/src/openvpn/win32-util.c
+
+provider_helper_noop_CFLAGS  = \
+	-I$(top_srcdir)/include -I$(top_srcdir)/src/compat -I$(top_srcdir)/src/openvpn \
+	@TEST_CFLAGS@
+provider_helper_noop_LDFLAGS = @TEST_LDFLAGS@
+provider_helper_noop_SOURCES = test_provider_helper_noop.c \
+	mock_msg.c mock_msg.h test_common.h \
+	mock_get_random.c \
+	$(top_srcdir)/src/openvpn/provider_helper.c \
+	$(top_srcdir)/src/openvpn/buffer.c \
+	$(top_srcdir)/src/openvpn/otime.c \
 	$(top_srcdir)/src/openvpn/fdmisc.c \
 	$(top_srcdir)/src/openvpn/platform.c \
 	$(top_srcdir)/src/openvpn/win32-util.c

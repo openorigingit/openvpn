@@ -283,6 +283,7 @@ multi_init(struct context *t)
      * Init our multi_context object.
      */
     CLEAR(*m);
+    provider_helper_supervisor_init(&m->provider_helper);
     provider_session_table_init(&m->provider_sessions);
 
     /*
@@ -671,6 +672,7 @@ multi_uninit(struct multi_context *m)
 
         multi_reap_all(m);
 
+        provider_helper_supervisor_free(&m->provider_helper);
         provider_session_table_free(&m->provider_sessions);
 
         hash_free(m->hash);

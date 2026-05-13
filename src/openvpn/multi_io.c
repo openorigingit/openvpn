@@ -45,6 +45,7 @@
 #define MULTI_IO_MANAGEMENT       ((void *)4)
 #define MULTI_IO_FILE_CLOSE_WRITE ((void *)5)
 #define MULTI_IO_DCO              ((void *)6)
+#define MULTI_IO_PROVIDER_HELPER  ((void *)7)
 
 #ifdef ENABLE_DEBUG
 static const char *
@@ -191,6 +192,7 @@ multi_io_wait(struct multi_context *m)
     /* arm inotify watcher */
     event_ctl(m->multi_io->es, m->top.c2.inotify_fd, EVENT_READ, MULTI_IO_FILE_CLOSE_WRITE);
 #endif
+    provider_helper_event_set(&m->provider_helper, m->multi_io->es, MULTI_IO_PROVIDER_HELPER);
 
     status =
         event_wait(m->multi_io->es, &m->top.c2.timeval, m->multi_io->esr, m->multi_io->maxevents);
@@ -504,6 +506,10 @@ multi_io_process_io(struct multi_context *m)
                 else if (e->arg == MULTI_IO_SIG)
                 {
                     get_signal(&m->top.sig->signal_received);
+                }
+                else if (e->arg == MULTI_IO_PROVIDER_HELPER)
+                {
+                    provider_helper_process_event(&m->provider_helper);
                 }
 #ifdef ENABLE_ASYNC_PUSH
                 else if (e->arg == MULTI_IO_FILE_CLOSE_WRITE)
