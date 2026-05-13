@@ -28,6 +28,22 @@
 
 #include "syshead.h"
 
+#if defined(ENABLE_CRYPTO_OPENSSL)
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <openssl/opensslv.h>
+#include <openssl/rand.h>
+#elif defined(ENABLE_CRYPTO_MBEDTLS)
+#include <mbedtls/md.h>
+#include <mbedtls/version.h>
+#if MBEDTLS_VERSION_NUMBER >= 0x03020100
+#include <psa/crypto.h>
+#else
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/entropy.h>
+#endif
+#endif
+
 #include "provider_helper.h"
 
 #include "memdbg.h"
@@ -37,6 +53,8 @@
 #define IKEV2_HELPER_MAX_LISTENERS 4
 #define IKEV2_HELPER_MAX_XFRM_LEASES 8
 #define IKEV2_HELPER_MAX_IKE_SAS PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_SAS
+#define IKEV2_HELPER_COOKIE_KEY_BYTES 32
+#define IKEV2_HELPER_COOKIE_MAX_PAST_EPOCHS 1
 
 static volatile sig_atomic_t helper_stop;
 
@@ -63,6 +81,11 @@ struct ikev2_helper_ike_sa_table {
     uint32_t active;
 };
 
+struct ikev2_helper_cookie_context {
+    bool ready;
+    uint8_t key[IKEV2_HELPER_COOKIE_KEY_BYTES];
+};
+
 static void
 ikev2_helper_signal_handler(int signum)
 {
@@ -81,6 +104,127 @@ ikev2_helper_install_signals(void)
     return sigaction(SIGTERM, &sa, NULL) == 0
            && sigaction(SIGINT, &sa, NULL) == 0
            && sigaction(SIGHUP, &sa, NULL) == 0;
+}
+
+static void
+ikev2_helper_secure_zero(void *data, size_t len)
+{
+    volatile uint8_t *pos = data;
+    while (len--)
+    {
+        *pos++ = 0;
+    }
+}
+
+static bool
+ikev2_helper_random_bytes(uint8_t *dst, size_t dst_len)
+{
+    if (!dst || !dst_len)
+    {
+        return false;
+    }
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    return dst_len <= INT_MAX && RAND_bytes(dst, (int)dst_len) == 1;
+#elif defined(ENABLE_CRYPTO_MBEDTLS) && MBEDTLS_VERSION_NUMBER >= 0x03020100
+    return psa_crypto_init() == PSA_SUCCESS
+           && psa_generate_random(dst, dst_len) == PSA_SUCCESS;
+#elif defined(ENABLE_CRYPTO_MBEDTLS)
+    bool ret = false;
+    mbedtls_entropy_context entropy;
+    mbedtls_ctr_drbg_context ctr_drbg;
+    const unsigned char personalization[] = "openvpn-ikev2-helper-cookie";
+    mbedtls_entropy_init(&entropy);
+    mbedtls_ctr_drbg_init(&ctr_drbg);
+    if (mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+                              personalization,
+                              sizeof(personalization) - 1) == 0)
+    {
+        ret = mbedtls_ctr_drbg_random(&ctr_drbg, dst, dst_len) == 0;
+    }
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+    mbedtls_entropy_free(&entropy);
+    return ret;
+#else
+    (void)dst;
+    (void)dst_len;
+    return false;
+#endif
+}
+
+static bool
+ikev2_helper_hmac_sha256(const uint8_t *key, size_t key_len,
+                         const uint8_t *input, size_t input_len,
+                         uint8_t *tag, size_t tag_len)
+{
+    if (!key || !key_len || !input || !input_len || !tag || !tag_len
+        || key_len > INT_MAX || tag_len > 32)
+    {
+        return false;
+    }
+
+    uint8_t full[32];
+    bool ret = false;
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    unsigned int full_len = 0;
+    ret = HMAC(EVP_sha256(), key, (int)key_len, input, input_len, full,
+               &full_len) != NULL
+          && full_len >= tag_len;
+#elif defined(ENABLE_CRYPTO_MBEDTLS)
+    const mbedtls_md_info_t *md_info =
+        mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    ret = md_info
+          && mbedtls_md_hmac(md_info, key, key_len, input, input_len, full) == 0;
+#else
+    (void)key;
+    (void)key_len;
+    (void)input;
+    (void)input_len;
+#endif
+    if (ret)
+    {
+        memcpy(tag, full, tag_len);
+    }
+    ikev2_helper_secure_zero(full, sizeof(full));
+    return ret;
+}
+
+static bool
+ikev2_helper_cookie_mac(void *ctx, const uint8_t *input, size_t input_len,
+                        uint8_t *tag, size_t tag_len)
+{
+    struct ikev2_helper_cookie_context *cookie_ctx = ctx;
+    return cookie_ctx && cookie_ctx->ready
+           && ikev2_helper_hmac_sha256(cookie_ctx->key,
+                                       sizeof(cookie_ctx->key), input,
+                                       input_len, tag, tag_len);
+}
+
+static void
+ikev2_helper_cookie_context_init(struct ikev2_helper_cookie_context *cookie_ctx)
+{
+    CLEAR(*cookie_ctx);
+    cookie_ctx->ready = ikev2_helper_random_bytes(cookie_ctx->key,
+                                                  sizeof(cookie_ctx->key));
+}
+
+static void
+ikev2_helper_cookie_context_free(struct ikev2_helper_cookie_context *cookie_ctx)
+{
+    if (cookie_ctx)
+    {
+        ikev2_helper_secure_zero(cookie_ctx, sizeof(*cookie_ctx));
+    }
+}
+
+static uint32_t
+ikev2_helper_cookie_epoch(time_t now)
+{
+    if (now < 0)
+    {
+        now = 0;
+    }
+    return (uint32_t)((uint64_t)now
+                      / PROVIDER_HELPER_IKEV2_COOKIE_EPOCH_SECONDS);
 }
 
 static bool
@@ -535,11 +679,47 @@ ikev2_helper_expire_ike_sas(struct ikev2_helper_ike_sa_table *table,
     counters->ike_sa_active = table->active;
 }
 
+static bool
+ikev2_helper_send_cookie_response(
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_cookie_context *cookie_ctx,
+    const struct sockaddr_storage *peer,
+    socklen_t peer_len,
+    const struct provider_helper_ikev2_header *header,
+    time_t now)
+{
+    uint8_t cookie[PROVIDER_HELPER_IKEV2_COOKIE_BYTES];
+    uint8_t response[PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE
+                     + PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                     + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE
+                     + PROVIDER_HELPER_IKEV2_COOKIE_BYTES];
+    size_t cookie_len = 0;
+    size_t response_len = 0;
+    const uint32_t epoch = ikev2_helper_cookie_epoch(now);
+
+    if (!listener || !cookie_ctx || !cookie_ctx->ready || !peer || !header
+        || !provider_helper_ikev2_build_cookie(
+            cookie, sizeof(cookie), &cookie_len, listener->descriptor.listener_id,
+            peer, header->initiator_spi, epoch, ikev2_helper_cookie_mac,
+            cookie_ctx)
+        || !provider_helper_ikev2_build_cookie_response(
+            response, sizeof(response), header, cookie, cookie_len,
+            &response_len))
+    {
+        return false;
+    }
+
+    const ssize_t sent = sendto(listener->fd, response, response_len, 0,
+                                (const struct sockaddr *)peer, peer_len);
+    return sent == (ssize_t)response_len;
+}
+
 static void
 ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                              const struct provider_helper_runtime_config *config,
                              struct ikev2_helper_ike_sa_table *sa_table,
-                             struct provider_helper_runtime_stats *counters)
+                             struct provider_helper_runtime_stats *counters,
+                             struct ikev2_helper_cookie_context *cookie_ctx)
 {
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE + 1];
     struct sockaddr_storage peer;
@@ -584,15 +764,25 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 ++counters->datagrams_malformed;
                 return;
             }
+            const time_t now = time(NULL);
             if (summary.saw_cookie_notify)
             {
                 ++counters->ike_sa_init_cookie_present;
-                ++counters->ike_sa_init_cookie_unverified_dropped;
-                counters->ike_sa_active = sa_table->active;
-                return;
+                const uint32_t epoch = ikev2_helper_cookie_epoch(now);
+                if (!provider_helper_ikev2_verify_cookie(
+                        packet + summary.cookie_offset, summary.cookie_len,
+                        listener->descriptor.listener_id, &peer,
+                        header.initiator_spi, epoch,
+                        IKEV2_HELPER_COOKIE_MAX_PAST_EPOCHS,
+                        ikev2_helper_cookie_mac, cookie_ctx))
+                {
+                    ++counters->ike_sa_init_cookie_unverified_dropped;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+                ++counters->ike_sa_init_cookie_verified;
             }
 
-            const time_t now = time(NULL);
             ikev2_helper_expire_ike_sas(sa_table, counters, now,
                                         config->half_open_timeout_seconds);
 
@@ -628,9 +818,19 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
             {
                 ++counters->ike_sa_init_per_source_dropped;
             }
-            else if (sa_table->active >= config->cookie_threshold)
+            else if (sa_table->active >= config->cookie_threshold
+                     && !summary.saw_cookie_notify)
             {
                 ++counters->ike_sa_init_cookie_required;
+                if (ikev2_helper_send_cookie_response(
+                        listener, cookie_ctx, &peer, peer_len, &header, now))
+                {
+                    ++counters->ike_sa_init_cookie_response_tx;
+                }
+                else
+                {
+                    ++counters->ike_sa_init_cookie_response_failed;
+                }
             }
             else if (!ikev2_helper_add_ike_sa(sa_table, listener, &header, &peer,
                                               peer_len))
@@ -653,6 +853,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
 static int
 ikev2_helper_loop(int fd)
 {
+    int ret = 0;
     uint64_t tx_sequence = 1;
     uint64_t last_rx_sequence = 0;
     bool configured = false;
@@ -662,6 +863,7 @@ ikev2_helper_loop(int fd)
     size_t xfrm_lease_count = 0;
     struct provider_helper_runtime_stats counters;
     struct ikev2_helper_ike_sa_table sa_table;
+    struct ikev2_helper_cookie_context cookie_ctx;
     struct provider_helper_runtime_config config;
     provider_helper_runtime_config_default(&config);
     CLEAR(counters);
@@ -672,10 +874,12 @@ ikev2_helper_loop(int fd)
         listeners[i].fd = -1;
     }
     CLEAR(xfrm_leases);
+    ikev2_helper_cookie_context_init(&cookie_ctx);
 
     if (!ikev2_helper_send_header(fd, PROVIDER_HELPER_MSG_HELLO, tx_sequence++, 1))
     {
-        return 2;
+        ret = 2;
+        goto done;
     }
 
     while (!helper_stop)
@@ -699,7 +903,8 @@ ikev2_helper_loop(int fd)
             {
                 continue;
             }
-            return 3;
+            ret = 3;
+            goto done;
         }
         if (poll_status == 0)
         {
@@ -707,22 +912,25 @@ ikev2_helper_loop(int fd)
         }
         if (pfds[0].revents & (POLLERR | POLLNVAL))
         {
-            return 4;
+            ret = 4;
+            goto done;
         }
         if (pfds[0].revents & POLLHUP)
         {
-            return 0;
+            ret = 0;
+            goto done;
         }
         for (nfds_t i = 1; i < nfds; ++i)
         {
             if (pfds[i].revents & (POLLERR | POLLNVAL))
             {
-                return 9;
+                ret = 9;
+                goto done;
             }
             if (pfds[i].revents & POLLIN)
             {
                 ikev2_helper_handle_datagram(&listeners[i - 1], &config, &sa_table,
-                                             &counters);
+                                             &counters, &cookie_ctx);
             }
         }
 
@@ -734,7 +942,8 @@ ikev2_helper_loop(int fd)
         struct provider_helper_msg_header header;
         if (!ikev2_helper_read_header(fd, &header, &last_rx_sequence))
         {
-            return helper_stop ? 0 : 5;
+            ret = helper_stop ? 0 : 5;
+            goto done;
         }
         switch (header.type)
         {
@@ -744,7 +953,8 @@ ikev2_helper_loop(int fd)
                     || !ikev2_helper_send_header(fd, PROVIDER_HELPER_MSG_CONFIGURE_ACK,
                                                  tx_sequence++, header.sequence))
                 {
-                    return 6;
+                    ret = 6;
+                    goto done;
                 }
                 configured = true;
                 break;
@@ -762,7 +972,8 @@ ikev2_helper_loop(int fd)
                     {
                         close(listener_fd);
                     }
-                    return 6;
+                    ret = 6;
+                    goto done;
                 }
                 listeners[listener_count].fd = listener_fd;
                 listeners[listener_count].descriptor = listener;
@@ -779,7 +990,8 @@ ikev2_helper_loop(int fd)
                         fd, PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL_ACK,
                         tx_sequence++, header.sequence))
                 {
-                    return 6;
+                    ret = 6;
+                    goto done;
                 }
                 xfrm_leases[xfrm_lease_count++] = lease;
                 break;
@@ -789,26 +1001,30 @@ ikev2_helper_loop(int fd)
             case PROVIDER_HELPER_MSG_PONG:
                 if (header.payload_len)
                 {
-                    return 6;
+                    ret = 6;
+                    goto done;
                 }
                 break;
 
             case PROVIDER_HELPER_MSG_PING:
                 if (header.payload_len)
                 {
-                    return 6;
+                    ret = 6;
+                    goto done;
                 }
                 if (!ikev2_helper_send_header(fd, PROVIDER_HELPER_MSG_PONG,
                                               tx_sequence++, header.correlation_id))
                 {
-                    return 7;
+                    ret = 7;
+                    goto done;
                 }
                 break;
 
             case PROVIDER_HELPER_MSG_STATS_REQUEST:
                 if (header.payload_len)
                 {
-                    return 7;
+                    ret = 7;
+                    goto done;
                 }
                 ikev2_helper_expire_ike_sas(&sa_table, &counters, time(NULL),
                                             config.half_open_timeout_seconds);
@@ -816,22 +1032,26 @@ ikev2_helper_loop(int fd)
                 if (!ikev2_helper_send_stats(fd, tx_sequence++, header.sequence,
                                              &counters))
                 {
-                    return 7;
+                    ret = 7;
+                    goto done;
                 }
                 break;
 
             default:
-                return 8;
+                ret = 8;
+                goto done;
         }
     }
 
+done:
     for (size_t i = 0; i < listener_count; ++i)
     {
         close(listeners[i].fd);
         listeners[i].fd = -1;
     }
+    ikev2_helper_cookie_context_free(&cookie_ctx);
 
-    return 0;
+    return ret;
 }
 
 int

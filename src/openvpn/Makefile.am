@@ -188,5 +188,6 @@ openvpn_ikev2_helper_SOURCES = \
 	provider_helper_wire.c
 openvpn_ikev2_helper_LDADD = \
 	$(top_builddir)/src/compat/libcompat.la \
-	$(SOCKETS_LIBS)
+	$(SOCKETS_LIBS) \
+	$(OPTIONAL_CRYPTO_LIBS)
 endif
