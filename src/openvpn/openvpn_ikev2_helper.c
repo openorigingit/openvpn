@@ -43,6 +43,13 @@ struct ikev2_helper_listener {
     struct provider_helper_listener_fd descriptor;
 };
 
+struct ikev2_helper_counters {
+    uint64_t datagrams_rx;
+    uint64_t datagrams_parsed;
+    uint64_t datagrams_malformed;
+    uint64_t datagrams_oversize;
+};
+
 static void
 ikev2_helper_signal_handler(int signum)
 {
@@ -290,6 +297,49 @@ ikev2_helper_read_listener_fd(int fd, const struct provider_helper_msg_header *h
     return true;
 }
 
+static void
+ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
+                             const struct provider_helper_runtime_config *config,
+                             struct ikev2_helper_counters *counters)
+{
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE + 1];
+    struct sockaddr_storage peer;
+    socklen_t peer_len = sizeof(peer);
+
+    const ssize_t n = recvfrom(listener->fd, packet, sizeof(packet), 0,
+                               (struct sockaddr *)&peer, &peer_len);
+    if (n < 0)
+    {
+        if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
+        {
+            ++counters->datagrams_malformed;
+        }
+        return;
+    }
+
+    ++counters->datagrams_rx;
+    if ((uint64_t)n > config->max_packet_size || (size_t)n > sizeof(packet))
+    {
+        ++counters->datagrams_oversize;
+        return;
+    }
+
+    struct provider_helper_ikev2_header header;
+    const bool expect_natt =
+        (listener->descriptor.flags & PROVIDER_HELPER_LISTENER_FD_NATT) != 0;
+    const enum provider_helper_ikev2_parse_result result =
+        provider_helper_ikev2_parse_header(packet, (size_t)n, config->max_packet_size,
+                                           expect_natt, &header);
+    if (result == PROVIDER_HELPER_IKEV2_PARSE_OK)
+    {
+        ++counters->datagrams_parsed;
+    }
+    else
+    {
+        ++counters->datagrams_malformed;
+    }
+}
+
 static int
 ikev2_helper_loop(int fd)
 {
@@ -298,8 +348,10 @@ ikev2_helper_loop(int fd)
     bool configured = false;
     struct ikev2_helper_listener listeners[IKEV2_HELPER_MAX_LISTENERS];
     size_t listener_count = 0;
+    struct ikev2_helper_counters counters;
     struct provider_helper_runtime_config config;
     provider_helper_runtime_config_default(&config);
+    CLEAR(counters);
     CLEAR(listeners);
     for (size_t i = 0; i < SIZE(listeners); ++i)
     {
@@ -313,12 +365,19 @@ ikev2_helper_loop(int fd)
 
     while (!helper_stop)
     {
-        struct pollfd pfd = {
-            .fd = fd,
-            .events = POLLIN,
-        };
+        struct pollfd pfds[1 + IKEV2_HELPER_MAX_LISTENERS];
+        CLEAR(pfds);
+        pfds[0].fd = fd;
+        pfds[0].events = POLLIN;
+        nfds_t nfds = 1;
+        for (size_t i = 0; i < listener_count; ++i)
+        {
+            pfds[nfds].fd = listeners[i].fd;
+            pfds[nfds].events = POLLIN;
+            ++nfds;
+        }
 
-        const int poll_status = poll(&pfd, 1, -1);
+        const int poll_status = poll(pfds, nfds, -1);
         if (poll_status < 0)
         {
             if (errno == EINTR)
@@ -331,15 +390,27 @@ ikev2_helper_loop(int fd)
         {
             continue;
         }
-        if (pfd.revents & (POLLERR | POLLNVAL))
+        if (pfds[0].revents & (POLLERR | POLLNVAL))
         {
             return 4;
         }
-        if (pfd.revents & POLLHUP)
+        if (pfds[0].revents & POLLHUP)
         {
             return 0;
         }
-        if (!(pfd.revents & POLLIN))
+        for (nfds_t i = 1; i < nfds; ++i)
+        {
+            if (pfds[i].revents & (POLLERR | POLLNVAL))
+            {
+                return 9;
+            }
+            if (pfds[i].revents & POLLIN)
+            {
+                ikev2_helper_handle_datagram(&listeners[i - 1], &config, &counters);
+            }
+        }
+
+        if (!(pfds[0].revents & POLLIN))
         {
             continue;
         }

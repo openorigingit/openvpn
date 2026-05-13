@@ -218,6 +218,31 @@ test_make_ikev2_header(uint8_t *packet, bool natt, uint8_t exchange_type,
 }
 
 static void
+test_send_ikev2_datagram(uint16_t port)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    assert_true(fd >= 0);
+
+    uint8_t packet[PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE
+                   + PROVIDER_HELPER_IKEV2_HEADER_SIZE];
+    test_make_ikev2_header(packet, false,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT,
+                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+                           0, PROVIDER_HELPER_IKEV2_HEADER_SIZE);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    assert_int_equal(sendto(fd, packet, PROVIDER_HELPER_IKEV2_HEADER_SIZE, 0,
+                            (struct sockaddr *)&addr, sizeof(addr)),
+                     PROVIDER_HELPER_IKEV2_HEADER_SIZE);
+    close(fd);
+}
+
+static void
 test_provider_helper_ikev2_parser(void **state)
 {
     (void)state;
@@ -467,6 +492,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 3);
+    test_send_ikev2_datagram(port);
     close(listener_fd);
 
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_PING, 3, 77);
