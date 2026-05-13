@@ -260,6 +260,10 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_sa_init_state_failed = 22,
         .ike_sa_active = 8,
         .ike_sa_expired = 6,
+        .ike_auth_rx = 26,
+        .ike_auth_malformed = 27,
+        .ike_auth_no_state = 28,
+        .ike_auth_unsupported = 29,
     };
     struct provider_helper_runtime_stats output;
     uint8_t payload[PROVIDER_HELPER_RUNTIME_STATS_SIZE];
@@ -314,6 +318,10 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_sa_init_state_failed);
     assert_int_equal(output.ike_sa_active, input.ike_sa_active);
     assert_int_equal(output.ike_sa_expired, input.ike_sa_expired);
+    assert_int_equal(output.ike_auth_rx, input.ike_auth_rx);
+    assert_int_equal(output.ike_auth_malformed, input.ike_auth_malformed);
+    assert_int_equal(output.ike_auth_no_state, input.ike_auth_no_state);
+    assert_int_equal(output.ike_auth_unsupported, input.ike_auth_unsupported);
 }
 
 static void
@@ -596,12 +604,58 @@ test_make_ike_sa_init_cookie_packet(uint8_t *packet, size_t packet_size)
         packet, packet_size, cookie, sizeof(cookie));
 }
 
+static size_t
+test_make_ike_auth_packet(uint8_t *packet, size_t packet_size,
+                          uint64_t initiator_spi, uint64_t responder_spi)
+{
+    const uint16_t sk_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 32;
+    const size_t packet_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE + sk_len;
+    assert_true(packet_size >= packet_len);
+    memset(packet, 0, packet_size);
+    test_make_ikev2_header(packet, false,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+                           responder_spi, (uint32_t)packet_len);
+    test_write_be64(packet, initiator_spi);
+    packet[16] = PROVIDER_HELPER_IKEV2_PAYLOAD_SK;
+    test_write_be32(packet + 20, 1);
+    size_t pos = PROVIDER_HELPER_IKEV2_HEADER_SIZE;
+    pos = test_add_ikev2_payload(packet, pos, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+                                 sk_len, 0);
+    memset(packet + PROVIDER_HELPER_IKEV2_HEADER_SIZE
+               + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE,
+           0xee, sk_len - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE);
+    assert_int_equal(pos, packet_len);
+    return packet_len;
+}
+
 static void
 test_send_ikev2_datagram_from(int fd, uint16_t port, uint64_t initiator_spi)
 {
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     const size_t packet_len = test_make_ike_sa_init_packet(packet, sizeof(packet));
     test_write_be64(packet, initiator_spi);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    assert_int_equal(sendto(fd, packet, packet_len, 0,
+                            (struct sockaddr *)&addr, sizeof(addr)),
+                     packet_len);
+}
+
+static void
+test_send_ikev2_ike_auth_datagram_from(int fd, uint16_t port,
+                                       uint64_t initiator_spi,
+                                       uint64_t responder_spi)
+{
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t packet_len =
+        test_make_ike_auth_packet(packet, sizeof(packet), initiator_spi,
+                                  responder_spi);
 
     struct sockaddr_in addr;
     CLEAR(addr);
@@ -751,7 +805,7 @@ test_recv_ikev2_cookie_response(int fd, uint8_t *cookie, size_t cookie_size)
     return summary.cookie_len;
 }
 
-static void
+static uint64_t
 test_recv_ikev2_sa_init_response(int fd, uint64_t initiator_spi)
 {
     uint8_t response[PROVIDER_HELPER_IPC_MAX_MESSAGE];
@@ -799,6 +853,7 @@ test_recv_ikev2_sa_init_response(int fd, uint64_t initiator_spi)
                                + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE + i] != 0;
     }
     assert_true(nonzero_ke);
+    return header.responder_spi;
 }
 
 struct test_cookie_mac_ctx {
@@ -1048,6 +1103,29 @@ test_provider_helper_ikev2_payload_parser(void **state)
     assert_int_equal(selection.prf_id, PROVIDER_HELPER_IKEV2_PRF_HMAC_SHA2_256);
     assert_int_equal(selection.dh_id, PROVIDER_HELPER_IKEV2_DH_ECP_256);
 
+    packet_len = test_make_ike_auth_packet(packet, sizeof(packet),
+                                           0x1122334455667788ull,
+                                           0x8877665544332211ull);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, packet_len, PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE,
+                         false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_validate_ike_auth_request(
+                         packet, packet_len, &header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_true(summary.saw_sk);
+    assert_int_equal(summary.sk_count, 1);
+    assert_int_equal(summary.sk_len, 32);
+    packet[16] = PROVIDER_HELPER_IKEV2_PAYLOAD_AUTH;
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, packet_len, PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE,
+                         false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_validate_ike_auth_request(
+                         packet, packet_len, &header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_MISSING_REQUIRED_PAYLOAD);
+
+    packet_len = test_make_ike_sa_init_packet(packet, sizeof(packet));
     packet[PROVIDER_HELPER_IKEV2_HEADER_SIZE + 2] = 0;
     packet[PROVIDER_HELPER_IKEV2_HEADER_SIZE + 3] = 3;
     assert_int_equal(provider_helper_ikev2_parse_payloads(
@@ -1607,10 +1685,20 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     int response_fd = test_create_udp_sender(0x7f000004u);
     test_send_ikev2_datagram_from(response_fd, port, 0xfeedfacecafebeefull);
     usleep(10000);
-    test_recv_ikev2_sa_init_response(response_fd, 0xfeedfacecafebeefull);
+    const uint64_t responder_spi =
+        test_recv_ikev2_sa_init_response(response_fd, 0xfeedfacecafebeefull);
     test_send_ikev2_datagram_from(response_fd, port, 0xfeedfacecafebeefull);
     usleep(10000);
-    test_recv_ikev2_sa_init_response(response_fd, 0xfeedfacecafebeefull);
+    assert_int_equal(test_recv_ikev2_sa_init_response(
+                         response_fd, 0xfeedfacecafebeefull),
+                     responder_spi);
+    test_send_ikev2_ike_auth_datagram_from(response_fd, port,
+                                           0xfeedfacecafebeefull, responder_spi);
+    usleep(10000);
+    test_send_ikev2_ike_auth_datagram_from(response_fd, port,
+                                           0xfeedfacecafebeefull,
+                                           0x0102030405060708ull);
+    usleep(10000);
     close(response_fd);
 
     int datagram_fd = test_create_udp_sender(0);
@@ -1692,8 +1780,8 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
-    assert_true(supervisor.runtime_stats.datagrams_rx >= 18);
-    assert_true(supervisor.runtime_stats.datagrams_parsed >= 18);
+    assert_true(supervisor.runtime_stats.datagrams_rx >= 20);
+    assert_true(supervisor.runtime_stats.datagrams_parsed >= 20);
     assert_true(supervisor.runtime_stats.ike_sa_init_accepted >= 4);
     assert_true(supervisor.runtime_stats.ike_sa_init_state_failed >= 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_keymat_ready >= 4);
@@ -1718,6 +1806,10 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_true(supervisor.runtime_stats.ike_sa_init_cookie_verified >= 1);
     assert_true(
         supervisor.runtime_stats.ike_sa_init_cookie_unverified_dropped >= 1);
+    assert_true(supervisor.runtime_stats.ike_auth_rx >= 2);
+    assert_true(supervisor.runtime_stats.ike_auth_no_state >= 1);
+    assert_true(supervisor.runtime_stats.ike_auth_unsupported >= 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_malformed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 4);
 
     sleep(4);

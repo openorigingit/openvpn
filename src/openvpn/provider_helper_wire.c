@@ -455,6 +455,10 @@ provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_state_failed);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_active);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_expired);
+    provider_helper_wire_write_u64(&pos, stats->ike_auth_rx);
+    provider_helper_wire_write_u64(&pos, stats->ike_auth_malformed);
+    provider_helper_wire_write_u64(&pos, stats->ike_auth_no_state);
+    provider_helper_wire_write_u64(&pos, stats->ike_auth_unsupported);
 
     return (size_t)(pos - dst) == PROVIDER_HELPER_RUNTIME_STATS_SIZE;
 }
@@ -504,6 +508,10 @@ provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
     stats->ike_sa_init_state_failed = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_active = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_expired = provider_helper_wire_read_u64(&pos);
+    stats->ike_auth_rx = provider_helper_wire_read_u64(&pos);
+    stats->ike_auth_malformed = provider_helper_wire_read_u64(&pos);
+    stats->ike_auth_no_state = provider_helper_wire_read_u64(&pos);
+    stats->ike_auth_unsupported = provider_helper_wire_read_u64(&pos);
 
     return (size_t)(pos - src) == PROVIDER_HELPER_RUNTIME_STATS_SIZE;
 }
@@ -806,6 +814,16 @@ provider_helper_ikev2_record_payload(
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_TSR:
             summary->saw_tsr = true;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_SK:
+            summary->saw_sk = true;
+            ++summary->sk_count;
+            if (summary->sk_count == 1)
+            {
+                summary->sk_offset = body_offset;
+                summary->sk_len = body_len;
+            }
             break;
     }
 }
@@ -1468,6 +1486,42 @@ provider_helper_ikev2_validate_ike_sa_init_request(
 
     return provider_helper_ikev2_validate_sa_init_payloads(packet, packet_len,
                                                            out);
+}
+
+enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_validate_ike_auth_request(
+    const uint8_t *packet,
+    size_t packet_len,
+    const struct provider_helper_ikev2_header *header,
+    struct provider_helper_ikev2_payload_summary *summary)
+{
+    if (!header || header->exchange_type != PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH
+        || (header->flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE)
+        || !(header->flags & PROVIDER_HELPER_IKEV2_FLAG_INITIATOR)
+        || !header->responder_spi || header->message_id != 1)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_SPI;
+    }
+    if (header->next_payload != PROVIDER_HELPER_IKEV2_PAYLOAD_SK)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_MISSING_REQUIRED_PAYLOAD;
+    }
+
+    struct provider_helper_ikev2_payload_summary local_summary;
+    struct provider_helper_ikev2_payload_summary *out =
+        summary ? summary : &local_summary;
+    const enum provider_helper_ikev2_parse_result result =
+        provider_helper_ikev2_parse_payloads(packet, packet_len, header, out);
+    if (result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+    {
+        return result;
+    }
+    if (!out->saw_sk || out->sk_count != 1 || out->payload_count != 1
+        || !out->sk_len)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_MISSING_REQUIRED_PAYLOAD;
+    }
+    return PROVIDER_HELPER_IKEV2_PARSE_OK;
 }
 
 static bool

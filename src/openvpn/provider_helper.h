@@ -35,7 +35,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 36
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  224
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  256
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
 #define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE 4
@@ -247,6 +247,10 @@ struct provider_helper_runtime_stats {
     uint64_t ike_sa_init_state_failed;
     uint64_t ike_sa_active;
     uint64_t ike_sa_expired;
+    uint64_t ike_auth_rx;
+    uint64_t ike_auth_malformed;
+    uint64_t ike_auth_no_state;
+    uint64_t ike_auth_unsupported;
 };
 
 struct provider_helper_xfrm_lease {
@@ -287,10 +291,12 @@ struct provider_helper_ikev2_payload_summary {
     bool saw_eap;
     bool saw_tsi;
     bool saw_tsr;
+    bool saw_sk;
     bool saw_cookie_notify;
     uint32_t sa_count;
     uint32_t ke_count;
     uint32_t nonce_count;
+    uint32_t sk_count;
     size_t sa_offset;
     size_t sa_len;
     size_t ke_offset;
@@ -300,6 +306,8 @@ struct provider_helper_ikev2_payload_summary {
     size_t ke_data_len;
     size_t nonce_offset;
     size_t nonce_len;
+    size_t sk_offset;
+    size_t sk_len;
     size_t cookie_offset;
     size_t cookie_len;
 };
@@ -421,6 +429,12 @@ provider_helper_ikev2_parse_payloads(
     struct provider_helper_ikev2_payload_summary *summary);
 enum provider_helper_ikev2_parse_result
 provider_helper_ikev2_validate_ike_sa_init_request(
+    const uint8_t *packet,
+    size_t packet_len,
+    const struct provider_helper_ikev2_header *header,
+    struct provider_helper_ikev2_payload_summary *summary);
+enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_validate_ike_auth_request(
     const uint8_t *packet,
     size_t packet_len,
     const struct provider_helper_ikev2_header *header,

@@ -1036,6 +1036,8 @@ ikev2_helper_find_ike_sa(struct ikev2_helper_ike_sa_table *table,
         if (sa->active
             && sa->listener_id == listener->descriptor.listener_id
             && sa->initiator_spi == header->initiator_spi
+            && (!header->responder_spi
+                || sa->responder_spi == header->responder_spi)
             && ikev2_helper_peer_equal(&sa->peer, sa->peer_len, peer, peer_len))
         {
             return sa;
@@ -1530,6 +1532,33 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     }
                 }
             }
+            counters->ike_sa_active = sa_table->active;
+        }
+        else if (header.exchange_type == PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH
+                 && !(header.flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE))
+        {
+            ++counters->ike_auth_rx;
+            struct provider_helper_ikev2_payload_summary summary;
+            const enum provider_helper_ikev2_parse_result auth_result =
+                provider_helper_ikev2_validate_ike_auth_request(
+                    packet, (size_t)n, &header, &summary);
+            if (auth_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+            {
+                ++counters->ike_auth_malformed;
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
+
+            struct ikev2_helper_ike_sa *sa =
+                ikev2_helper_find_ike_sa(sa_table, listener, &header, &peer, peer_len);
+            if (!sa)
+            {
+                ++counters->ike_auth_no_state;
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
+
+            ++counters->ike_auth_unsupported;
             counters->ike_sa_active = sa_table->active;
         }
     }
