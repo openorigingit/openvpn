@@ -263,7 +263,9 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_auth_rx = 26,
         .ike_auth_malformed = 27,
         .ike_auth_no_state = 28,
-        .ike_auth_unsupported = 29,
+        .ike_auth_decrypted = 29,
+        .ike_auth_decrypt_failed = 30,
+        .ike_auth_unsupported = 31,
     };
     struct provider_helper_runtime_stats output;
     uint8_t payload[PROVIDER_HELPER_RUNTIME_STATS_SIZE];
@@ -321,6 +323,9 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
     assert_int_equal(output.ike_auth_rx, input.ike_auth_rx);
     assert_int_equal(output.ike_auth_malformed, input.ike_auth_malformed);
     assert_int_equal(output.ike_auth_no_state, input.ike_auth_no_state);
+    assert_int_equal(output.ike_auth_decrypted, input.ike_auth_decrypted);
+    assert_int_equal(output.ike_auth_decrypt_failed,
+                     input.ike_auth_decrypt_failed);
     assert_int_equal(output.ike_auth_unsupported, input.ike_auth_unsupported);
 }
 
@@ -1808,7 +1813,9 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
         supervisor.runtime_stats.ike_sa_init_cookie_unverified_dropped >= 1);
     assert_true(supervisor.runtime_stats.ike_auth_rx >= 2);
     assert_true(supervisor.runtime_stats.ike_auth_no_state >= 1);
-    assert_true(supervisor.runtime_stats.ike_auth_unsupported >= 1);
+    assert_true(supervisor.runtime_stats.ike_auth_decrypt_failed >= 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_decrypted, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_malformed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 4);
 

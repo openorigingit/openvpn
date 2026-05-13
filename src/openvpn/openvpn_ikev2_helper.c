@@ -40,6 +40,7 @@
 #elif defined(ENABLE_CRYPTO_MBEDTLS)
 #include <mbedtls/ecdh.h>
 #include <mbedtls/ecp.h>
+#include <mbedtls/gcm.h>
 #include <mbedtls/md.h>
 #include <mbedtls/version.h>
 #if MBEDTLS_VERSION_NUMBER >= 0x03020100
@@ -67,6 +68,10 @@
 #define IKEV2_HELPER_ECP_256_SHARED_SECRET_BYTES 32
 #define IKEV2_HELPER_PRF_SHA256_BYTES 32
 #define IKEV2_HELPER_AES_GCM_SALT_BYTES 4
+#define IKEV2_HELPER_AES_GCM_IV_BYTES 8
+#define IKEV2_HELPER_AES_GCM_TAG_BYTES 16
+#define IKEV2_HELPER_AES_GCM_NONCE_BYTES \
+    (IKEV2_HELPER_AES_GCM_SALT_BYTES + IKEV2_HELPER_AES_GCM_IV_BYTES)
 #define IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES \
     (32 + IKEV2_HELPER_AES_GCM_SALT_BYTES)
 #define IKEV2_HELPER_IKE_KEYMAT_MAX_BYTES \
@@ -1163,6 +1168,163 @@ ikev2_helper_body_inside(size_t packet_len, size_t offset, size_t len)
 }
 
 static bool
+ikev2_helper_aes_gcm_decrypt(const uint8_t *key, size_t key_len,
+                             const uint8_t *nonce, size_t nonce_len,
+                             const uint8_t *aad, size_t aad_len,
+                             const uint8_t *ciphertext, size_t ciphertext_len,
+                             const uint8_t *tag, size_t tag_len,
+                             uint8_t *plaintext, size_t plaintext_size,
+                             size_t *plaintext_len)
+{
+    if (plaintext_len)
+    {
+        *plaintext_len = 0;
+    }
+    if (!key || (key_len != 16 && key_len != 32)
+        || !nonce || nonce_len != IKEV2_HELPER_AES_GCM_NONCE_BYTES
+        || !aad || aad_len > INT_MAX
+        || !ciphertext || ciphertext_len > INT_MAX
+        || !tag || tag_len != IKEV2_HELPER_AES_GCM_TAG_BYTES
+        || !plaintext || plaintext_size < ciphertext_len || !plaintext_len)
+    {
+        return false;
+    }
+
+    bool ret = false;
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    const EVP_CIPHER *cipher = key_len == 16 ? EVP_aes_128_gcm()
+                                             : EVP_aes_256_gcm();
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    int out_len = 0;
+    int final_len = 0;
+    if (ctx
+        && EVP_DecryptInit_ex(ctx, cipher, NULL, NULL, NULL) == 1
+        && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, (int)nonce_len,
+                               NULL) == 1
+        && EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce) == 1
+        && EVP_DecryptUpdate(ctx, NULL, &out_len, aad, (int)aad_len) == 1
+        && EVP_DecryptUpdate(ctx, plaintext, &out_len, ciphertext,
+                             (int)ciphertext_len) == 1
+        && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, (int)tag_len,
+                               (void *)tag) == 1
+        && EVP_DecryptFinal_ex(ctx, plaintext + out_len, &final_len) == 1)
+    {
+        *plaintext_len = (size_t)(out_len + final_len);
+        ret = true;
+    }
+    EVP_CIPHER_CTX_free(ctx);
+#elif defined(ENABLE_CRYPTO_MBEDTLS) && defined(MBEDTLS_GCM_C)
+    mbedtls_gcm_context ctx;
+    mbedtls_gcm_init(&ctx);
+    ret = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key,
+                             (unsigned int)(key_len * 8)) == 0
+          && mbedtls_gcm_auth_decrypt(&ctx, ciphertext_len, nonce, nonce_len,
+                                      aad, aad_len, tag, tag_len, ciphertext,
+                                      plaintext) == 0;
+    if (ret)
+    {
+        *plaintext_len = ciphertext_len;
+    }
+    mbedtls_gcm_free(&ctx);
+#else
+    (void)key;
+    (void)key_len;
+    (void)nonce;
+    (void)nonce_len;
+    (void)aad;
+    (void)aad_len;
+    (void)ciphertext;
+    (void)ciphertext_len;
+    (void)tag;
+    (void)tag_len;
+#endif
+
+    if (!ret)
+    {
+        ikev2_helper_secure_zero(plaintext, plaintext_size);
+        *plaintext_len = 0;
+    }
+    return ret;
+}
+
+static bool
+ikev2_helper_decrypt_ike_auth_sk(
+    const struct ikev2_helper_ike_sa *sa,
+    const uint8_t *packet,
+    size_t packet_len,
+    const struct provider_helper_ikev2_header *header,
+    const struct provider_helper_ikev2_payload_summary *summary,
+    uint8_t *plaintext,
+    size_t plaintext_size,
+    size_t *plaintext_len)
+{
+    if (plaintext_len)
+    {
+        *plaintext_len = 0;
+    }
+    if (!sa || !packet || !header || !summary || !plaintext || !plaintext_len
+        || sa->sk_ei_len <= IKEV2_HELPER_AES_GCM_SALT_BYTES
+        || sa->sk_ei_len > sizeof(sa->sk_ei)
+        || !summary->saw_sk || summary->sk_count != 1
+        || summary->sk_offset < PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+        || !ikev2_helper_body_inside(packet_len, summary->sk_offset,
+                                     summary->sk_len)
+        || summary->sk_len <= IKEV2_HELPER_AES_GCM_IV_BYTES
+                             + IKEV2_HELPER_AES_GCM_TAG_BYTES)
+    {
+        return false;
+    }
+
+    const size_t sk_payload_offset =
+        summary->sk_offset - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    if (sk_payload_offset < header->header_offset
+        || summary->sk_offset < header->header_offset
+        || !ikev2_helper_body_inside(packet_len, header->header_offset,
+                                     summary->sk_offset - header->header_offset))
+    {
+        return false;
+    }
+
+    const uint8_t *iv = packet + summary->sk_offset;
+    const uint8_t *ciphertext = iv + IKEV2_HELPER_AES_GCM_IV_BYTES;
+    const size_t ciphertext_len = summary->sk_len
+                                  - IKEV2_HELPER_AES_GCM_IV_BYTES
+                                  - IKEV2_HELPER_AES_GCM_TAG_BYTES;
+    const uint8_t *tag = packet + summary->sk_offset + summary->sk_len
+                         - IKEV2_HELPER_AES_GCM_TAG_BYTES;
+    const uint8_t *aad = packet + header->header_offset;
+    const size_t aad_len = summary->sk_offset - header->header_offset;
+    const size_t key_len = sa->sk_ei_len - IKEV2_HELPER_AES_GCM_SALT_BYTES;
+    const uint8_t *salt = sa->sk_ei + key_len;
+    uint8_t nonce[IKEV2_HELPER_AES_GCM_NONCE_BYTES];
+    memcpy(nonce, salt, IKEV2_HELPER_AES_GCM_SALT_BYTES);
+    memcpy(nonce + IKEV2_HELPER_AES_GCM_SALT_BYTES, iv,
+           IKEV2_HELPER_AES_GCM_IV_BYTES);
+
+    bool ret = ikev2_helper_aes_gcm_decrypt(
+        sa->sk_ei, key_len, nonce, sizeof(nonce), aad, aad_len, ciphertext,
+        ciphertext_len, tag, IKEV2_HELPER_AES_GCM_TAG_BYTES, plaintext,
+        plaintext_size, plaintext_len);
+    ikev2_helper_secure_zero(nonce, sizeof(nonce));
+    if (!ret || *plaintext_len < 1)
+    {
+        ikev2_helper_secure_zero(plaintext, plaintext_size);
+        *plaintext_len = 0;
+        return false;
+    }
+
+    const size_t padding_len = plaintext[*plaintext_len - 1] + 1;
+    if (padding_len > *plaintext_len)
+    {
+        ikev2_helper_secure_zero(plaintext, plaintext_size);
+        *plaintext_len = 0;
+        return false;
+    }
+    *plaintext_len -= padding_len;
+    return true;
+}
+
+static bool
 ikev2_helper_responder_spi_exists(
     const struct ikev2_helper_ike_sa_table *table,
     uint64_t responder_spi)
@@ -1754,6 +1916,19 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 counters->ike_sa_active = sa_table->active;
                 return;
             }
+
+            uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+            size_t plaintext_len = 0;
+            if (!ikev2_helper_decrypt_ike_auth_sk(
+                    sa, packet, (size_t)n, &header, &summary, plaintext,
+                    sizeof(plaintext), &plaintext_len))
+            {
+                ++counters->ike_auth_decrypt_failed;
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
+            ++counters->ike_auth_decrypted;
+            ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
 
             ++counters->ike_auth_unsupported;
             counters->ike_sa_active = sa_table->active;

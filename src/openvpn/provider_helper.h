@@ -35,7 +35,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 36
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  256
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  272
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
 #define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE 4
@@ -250,6 +250,8 @@ struct provider_helper_runtime_stats {
     uint64_t ike_auth_rx;
     uint64_t ike_auth_malformed;
     uint64_t ike_auth_no_state;
+    uint64_t ike_auth_decrypted;
+    uint64_t ike_auth_decrypt_failed;
     uint64_t ike_auth_unsupported;
 };
 
