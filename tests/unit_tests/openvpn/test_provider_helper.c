@@ -1222,6 +1222,100 @@ test_provider_helper_ikev2_cookie_response(void **state)
 }
 
 static void
+test_provider_helper_ikev2_sa_init_response(void **state)
+{
+    (void)state;
+
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    uint8_t response[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    uint8_t responder_ke[PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES];
+    uint8_t responder_nonce[32];
+    struct provider_helper_ikev2_header header;
+    struct provider_helper_ikev2_header response_header;
+    struct provider_helper_ikev2_payload_summary summary;
+    struct provider_helper_ikev2_sa_selection selection;
+    size_t packet_len = test_make_ike_sa_init_packet(packet, sizeof(packet));
+    size_t response_len = 0;
+    const uint64_t responder_spi = 0xaabbccddeeff0011ull;
+
+    for (size_t i = 0; i < sizeof(responder_ke); ++i)
+    {
+        responder_ke[i] = (uint8_t)(0x70 + i);
+    }
+    for (size_t i = 0; i < sizeof(responder_nonce); ++i)
+    {
+        responder_nonce[i] = (uint8_t)(0x40 + i);
+    }
+
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, packet_len, PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE,
+                         false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_validate_ike_sa_init_request(
+                         packet, packet_len, &header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_select_ike_sa_init_proposal(
+                         packet, packet_len, &summary, &selection),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+
+    assert_true(provider_helper_ikev2_build_sa_init_response(
+                    response, sizeof(response), &header, responder_spi,
+                    &selection, responder_ke, sizeof(responder_ke),
+                    responder_nonce, sizeof(responder_nonce), &response_len));
+
+    const size_t expected_sa_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                                   + TEST_IKEV2_SA_PROPOSAL_LEN;
+    const size_t expected_ke_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                                   + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE
+                                   + sizeof(responder_ke);
+    const size_t expected_nonce_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + sizeof(responder_nonce);
+    assert_int_equal(response_len,
+                     PROVIDER_HELPER_IKEV2_HEADER_SIZE + expected_sa_len
+                     + expected_ke_len + expected_nonce_len);
+
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         response, response_len,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, false,
+                         &response_header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(response_header.initiator_spi, header.initiator_spi);
+    assert_int_equal(response_header.responder_spi, responder_spi);
+    assert_int_equal(response_header.next_payload,
+                     PROVIDER_HELPER_IKEV2_PAYLOAD_SA);
+    assert_int_equal(response_header.flags, PROVIDER_HELPER_IKEV2_FLAG_RESPONSE);
+    assert_int_equal(provider_helper_ikev2_parse_payloads(
+                         response, response_len, &response_header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(summary.payload_count, 3);
+    assert_true(summary.saw_sa);
+    assert_true(summary.saw_ke);
+    assert_true(summary.saw_nonce);
+    assert_int_equal(summary.sa_len, TEST_IKEV2_SA_PROPOSAL_LEN);
+    assert_int_equal(summary.ke_len,
+                     PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE
+                     + sizeof(responder_ke));
+    assert_int_equal(summary.nonce_len, sizeof(responder_nonce));
+    assert_int_equal((((uint16_t)response[summary.ke_offset]) << 8)
+                     | response[summary.ke_offset + 1],
+                     PROVIDER_HELPER_IKEV2_DH_ECP_256);
+    assert_memory_equal(response + summary.ke_offset
+                        + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE,
+                        responder_ke, sizeof(responder_ke));
+    assert_memory_equal(response + summary.nonce_offset, responder_nonce,
+                        sizeof(responder_nonce));
+
+    assert_false(provider_helper_ikev2_build_sa_init_response(
+                     response, sizeof(response), &header, 0, &selection,
+                     responder_ke, sizeof(responder_ke), responder_nonce,
+                     sizeof(responder_nonce), &response_len));
+    assert_false(provider_helper_ikev2_build_sa_init_response(
+                     response, sizeof(response), &header, responder_spi,
+                     &selection, responder_ke, sizeof(responder_ke) - 1,
+                     responder_nonce, sizeof(responder_nonce), &response_len));
+}
+
+static void
 test_provider_helper_processes_partial_header(void **state)
 {
     (void)state;
@@ -1361,7 +1455,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     supervisor.runtime_config.max_half_open_sas = 4;
     supervisor.runtime_config.max_half_open_sas_per_source = 2;
     supervisor.runtime_config.retransmit_limit = 1;
-    supervisor.runtime_config.half_open_timeout_seconds = 1;
+    supervisor.runtime_config.half_open_timeout_seconds = 3;
 
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path, argv));
@@ -1440,6 +1534,31 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     close(datagram_fd);
     usleep(250000);
 
+    uint64_t helper_request_sequence = 4;
+    for (int attempt = 0;
+         attempt < 20 && supervisor.runtime_stats.ike_sa_active < 2;
+         ++attempt)
+    {
+        const uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
+        write_helper_header_fd(supervisor.ipc_fd,
+                               PROVIDER_HELPER_MSG_STATS_REQUEST,
+                               helper_request_sequence++, 89);
+        for (int i = 0;
+             i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+             ++i)
+        {
+            provider_helper_process_event(&supervisor);
+            usleep(10000);
+        }
+        assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+        assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+        if (supervisor.runtime_stats.ike_sa_active < 2)
+        {
+            usleep(25000);
+        }
+    }
+    assert_true(supervisor.runtime_stats.ike_sa_active >= 2);
+
     int cookie_fd = test_create_udp_sender(0x7f000002u);
     uint8_t cookie[PROVIDER_HELPER_IKEV2_COOKIE_MAX_BYTES];
     test_send_ikev2_datagram_from(cookie_fd, port, 0x0102030405060708ull);
@@ -1458,15 +1577,19 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     close(cookie_present_fd);
     close(listener_fd);
 
-    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST, 4, 90);
-    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 5; ++i)
+    uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           helper_request_sequence++, 90);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
     }
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
-    assert_int_equal(supervisor.last_rx_sequence, 5);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
     assert_true(supervisor.runtime_stats.datagrams_rx >= 15);
     assert_true(supervisor.runtime_stats.datagrams_parsed >= 15);
     assert_true(supervisor.runtime_stats.ike_sa_init_accepted >= 3);
@@ -1492,28 +1615,36 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
         supervisor.runtime_stats.ike_sa_init_cookie_unverified_dropped >= 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 3);
 
-    sleep(2);
-    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST, 5, 91);
-    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 6; ++i)
+    sleep(4);
+    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           helper_request_sequence++, 91);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
     }
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
-    assert_int_equal(supervisor.last_rx_sequence, 6);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
     assert_true(supervisor.runtime_stats.ike_sa_expired >= 3);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
 
-    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_PING, 6, 77);
-    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 7; ++i)
+    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_PING,
+                           helper_request_sequence++, 77);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
     }
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
-    assert_int_equal(supervisor.last_rx_sequence, 7);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
 
     provider_helper_supervisor_stop(&supervisor);
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
@@ -1560,6 +1691,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_ikev2_parser),
         cmocka_unit_test(test_provider_helper_ikev2_payload_parser),
         cmocka_unit_test(test_provider_helper_ikev2_cookie_response),
+        cmocka_unit_test(test_provider_helper_ikev2_sa_init_response),
         cmocka_unit_test(test_provider_helper_ikev2_cookie_builder),
         cmocka_unit_test(test_provider_helper_processes_partial_header),
         cmocka_unit_test(test_provider_helper_spawn_noop),

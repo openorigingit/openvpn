@@ -446,6 +446,17 @@ bool provider_helper_ikev2_build_invalid_ke_response(
     const struct provider_helper_ikev2_header *request,
     uint16_t dh_group,
     size_t *out_len);
+bool provider_helper_ikev2_build_sa_init_response(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_ikev2_header *request,
+    uint64_t responder_spi,
+    const struct provider_helper_ikev2_sa_selection *selection,
+    const uint8_t *responder_ke,
+    size_t responder_ke_len,
+    const uint8_t *responder_nonce,
+    size_t responder_nonce_len,
+    size_t *out_len);
 bool provider_helper_ikev2_build_cookie(
     uint8_t *dst,
     size_t dst_len,

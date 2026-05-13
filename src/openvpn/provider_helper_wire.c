@@ -1597,6 +1597,168 @@ provider_helper_ikev2_build_invalid_ke_response(
 }
 
 static bool
+provider_helper_ikev2_selected_suite_valid(
+    const struct provider_helper_ikev2_sa_selection *selection)
+{
+    return selection && selection->selected && selection->proposal_number
+           && selection->encr_id == PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16
+           && (!selection->encr_key_bits
+               || selection->encr_key_bits == 128
+               || selection->encr_key_bits == 256)
+           && selection->prf_id == PROVIDER_HELPER_IKEV2_PRF_HMAC_SHA2_256
+           && !selection->integ_id
+           && selection->dh_id == PROVIDER_HELPER_IKEV2_DH_ECP_256;
+}
+
+static uint16_t
+provider_helper_ikev2_transform_len(uint16_t key_bits)
+{
+    return PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE + (key_bits ? 4 : 0);
+}
+
+static void
+provider_helper_ikev2_write_transform(uint8_t **pos,
+                                      uint8_t next_transform,
+                                      uint8_t transform_type,
+                                      uint16_t transform_id,
+                                      uint16_t key_bits)
+{
+    *(*pos)++ = next_transform;
+    *(*pos)++ = 0;
+    provider_helper_wire_write_u16(pos,
+                                   provider_helper_ikev2_transform_len(key_bits));
+    *(*pos)++ = transform_type;
+    *(*pos)++ = 0;
+    provider_helper_wire_write_u16(pos, transform_id);
+    if (key_bits)
+    {
+        provider_helper_wire_write_u16(
+            pos, 0x8000u | PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH);
+        provider_helper_wire_write_u16(pos, key_bits);
+    }
+}
+
+bool
+provider_helper_ikev2_build_sa_init_response(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_ikev2_header *request,
+    uint64_t responder_spi,
+    const struct provider_helper_ikev2_sa_selection *selection,
+    const uint8_t *responder_ke,
+    size_t responder_ke_len,
+    const uint8_t *responder_nonce,
+    size_t responder_nonce_len,
+    size_t *out_len)
+{
+    if (out_len)
+    {
+        *out_len = 0;
+    }
+    if (!dst || !request || !responder_spi
+        || !provider_helper_ikev2_selected_suite_valid(selection)
+        || !responder_ke || !responder_nonce
+        || responder_ke_len
+           != provider_helper_ikev2_dh_public_bytes(selection->dh_id)
+        || responder_nonce_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+        || responder_nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES
+        || request->exchange_type != PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT
+        || request->message_id != 0
+        || request->responder_spi != 0
+        || !(request->flags & PROVIDER_HELPER_IKEV2_FLAG_INITIATOR)
+        || (request->flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE))
+    {
+        return false;
+    }
+
+    const uint16_t encr_transform_len =
+        provider_helper_ikev2_transform_len(selection->encr_key_bits);
+    const uint16_t prf_transform_len =
+        provider_helper_ikev2_transform_len(0);
+    const uint16_t dh_transform_len =
+        provider_helper_ikev2_transform_len(0);
+    const uint16_t proposal_len =
+        (uint16_t)(PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                   + encr_transform_len + prf_transform_len
+                   + dh_transform_len);
+    const uint16_t sa_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + proposal_len;
+    const uint16_t ke_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+        + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE + (uint16_t)responder_ke_len;
+    const uint16_t nonce_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+        + (uint16_t)responder_nonce_len;
+    const uint32_t ike_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                             + sa_payload_len + ke_payload_len
+                             + nonce_payload_len;
+    const size_t offset = request->natt
+                          ? PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE : 0;
+    const size_t packet_len = offset + ike_len;
+    if (dst_len < packet_len)
+    {
+        return false;
+    }
+
+    memset(dst, 0, packet_len);
+    uint8_t *pos = dst + offset;
+    provider_helper_wire_write_u64(&pos, request->initiator_spi);
+    provider_helper_wire_write_u64(&pos, responder_spi);
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_SA;
+    *pos++ = (PROVIDER_HELPER_IKEV2_MAJOR_VERSION << 4)
+             | PROVIDER_HELPER_IKEV2_MINOR_VERSION;
+    *pos++ = PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT;
+    *pos++ = PROVIDER_HELPER_IKEV2_FLAG_RESPONSE;
+    provider_helper_wire_write_u32(&pos, 0);
+    provider_helper_wire_write_u32(&pos, ike_len);
+
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_KE;
+    *pos++ = 0;
+    provider_helper_wire_write_u16(&pos, sa_payload_len);
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+    *pos++ = 0;
+    provider_helper_wire_write_u16(&pos, proposal_len);
+    *pos++ = selection->proposal_number;
+    *pos++ = PROVIDER_HELPER_IKEV2_PROTOCOL_IKE;
+    *pos++ = 0;
+    *pos++ = 3; /* ENCR, PRF, DH. */
+    provider_helper_ikev2_write_transform(
+        &pos, PROVIDER_HELPER_IKEV2_TRANSFORM_MORE,
+        PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR, selection->encr_id,
+        selection->encr_key_bits);
+    provider_helper_ikev2_write_transform(
+        &pos, PROVIDER_HELPER_IKEV2_TRANSFORM_MORE,
+        PROVIDER_HELPER_IKEV2_TRANSFORM_PRF, selection->prf_id, 0);
+    provider_helper_ikev2_write_transform(
+        &pos, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+        PROVIDER_HELPER_IKEV2_TRANSFORM_DH, selection->dh_id, 0);
+
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE;
+    *pos++ = 0;
+    provider_helper_wire_write_u16(&pos, ke_payload_len);
+    provider_helper_wire_write_u16(&pos, selection->dh_id);
+    provider_helper_wire_write_u16(&pos, 0);
+    memcpy(pos, responder_ke, responder_ke_len);
+    pos += responder_ke_len;
+
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+    *pos++ = 0;
+    provider_helper_wire_write_u16(&pos, nonce_payload_len);
+    memcpy(pos, responder_nonce, responder_nonce_len);
+    pos += responder_nonce_len;
+
+    if ((size_t)(pos - dst) != packet_len)
+    {
+        return false;
+    }
+    if (out_len)
+    {
+        *out_len = packet_len;
+    }
+    return true;
+}
+
+static bool
 provider_helper_ikev2_cookie_mac_input(uint8_t *dst,
                                        size_t dst_len,
                                        size_t *out_len,
