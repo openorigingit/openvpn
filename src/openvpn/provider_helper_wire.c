@@ -325,6 +325,85 @@ provider_helper_auth_request_valid(
     return true;
 }
 
+static bool
+provider_helper_auth_reason_byte_allowed(uint8_t c)
+{
+    return c >= 0x20 && c <= 0x7e;
+}
+
+bool
+provider_helper_auth_response_valid(
+    const struct provider_helper_auth_response *response,
+    char *reason,
+    size_t reason_size)
+{
+    if (!response)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "missing auth response");
+        return false;
+    }
+    if (!response->request_id)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "auth response request id must be nonzero");
+        return false;
+    }
+    if (response->flags || response->reserved)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "auth response reserved fields must be zero");
+        return false;
+    }
+    if (response->decision != PROVIDER_HELPER_AUTH_DENY
+        && response->decision != PROVIDER_HELPER_AUTH_ALLOW)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "unsupported auth decision");
+        return false;
+    }
+    if (!response->reason_len
+        || response->reason_len >= sizeof(response->reason))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "invalid auth response reason length");
+        return false;
+    }
+    for (uint32_t i = 0; i < response->reason_len; ++i)
+    {
+        if (!provider_helper_auth_reason_byte_allowed(
+                (uint8_t)response->reason[i]))
+        {
+            provider_helper_config_reason(
+                reason, reason_size,
+                "auth response reason contains invalid characters");
+            return false;
+        }
+    }
+    if (response->decision == PROVIDER_HELPER_AUTH_ALLOW)
+    {
+        if (!response->provider_session_id || !response->xfrm_lease_id
+            || !response->policy_revision)
+        {
+            provider_helper_config_reason(
+                reason, reason_size,
+                "allow auth response requires session, lease, and policy ids");
+            return false;
+        }
+    }
+    else if (response->provider_session_id || response->xfrm_lease_id
+             || response->policy_revision)
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "deny auth response must not carry authorization ids");
+        return false;
+    }
+
+    provider_helper_config_reason(reason, reason_size, "ok");
+    return true;
+}
+
 static void
 provider_helper_wire_write_u16(uint8_t **pos, uint16_t value)
 {
@@ -689,6 +768,61 @@ provider_helper_ipc_decode_auth_request(
 
     return (size_t)(pos - src) == PROVIDER_HELPER_AUTH_REQUEST_SIZE
            && provider_helper_auth_request_valid(request, NULL, 0);
+}
+
+bool
+provider_helper_ipc_encode_auth_response(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_auth_response *response)
+{
+    if (!dst || dst_len < PROVIDER_HELPER_AUTH_RESPONSE_SIZE
+        || !provider_helper_auth_response_valid(response, NULL, 0))
+    {
+        return false;
+    }
+
+    uint8_t *pos = dst;
+    provider_helper_wire_write_u64(&pos, response->request_id);
+    provider_helper_wire_write_u64(&pos, response->provider_session_id);
+    provider_helper_wire_write_u64(&pos, response->xfrm_lease_id);
+    provider_helper_wire_write_u64(&pos, response->policy_revision);
+    provider_helper_wire_write_u32(&pos, response->decision);
+    provider_helper_wire_write_u32(&pos, response->reason_len);
+    provider_helper_wire_write_u32(&pos, response->flags);
+    provider_helper_wire_write_u32(&pos, response->reserved);
+    memcpy(pos, response->reason, sizeof(response->reason));
+    pos += sizeof(response->reason);
+
+    return (size_t)(pos - dst) == PROVIDER_HELPER_AUTH_RESPONSE_SIZE;
+}
+
+bool
+provider_helper_ipc_decode_auth_response(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_auth_response *response)
+{
+    if (!src || src_len != PROVIDER_HELPER_AUTH_RESPONSE_SIZE || !response)
+    {
+        return false;
+    }
+
+    const uint8_t *pos = src;
+    CLEAR(*response);
+    response->request_id = provider_helper_wire_read_u64(&pos);
+    response->provider_session_id = provider_helper_wire_read_u64(&pos);
+    response->xfrm_lease_id = provider_helper_wire_read_u64(&pos);
+    response->policy_revision = provider_helper_wire_read_u64(&pos);
+    response->decision = provider_helper_wire_read_u32(&pos);
+    response->reason_len = provider_helper_wire_read_u32(&pos);
+    response->flags = provider_helper_wire_read_u32(&pos);
+    response->reserved = provider_helper_wire_read_u32(&pos);
+    memcpy(response->reason, pos, sizeof(response->reason));
+    pos += sizeof(response->reason);
+
+    return (size_t)(pos - src) == PROVIDER_HELPER_AUTH_RESPONSE_SIZE
+           && provider_helper_auth_response_valid(response, NULL, 0);
 }
 
 const char *

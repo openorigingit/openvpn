@@ -39,6 +39,8 @@
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
 #define PROVIDER_HELPER_AUTH_REQUEST_SIZE   296
+#define PROVIDER_HELPER_AUTH_REASON_SIZE    128
+#define PROVIDER_HELPER_AUTH_RESPONSE_SIZE  176
 #define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
 #define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE 4
 #define PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE 4
@@ -128,6 +130,7 @@ enum provider_helper_msg_type {
     PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL,
     PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL_ACK,
     PROVIDER_HELPER_MSG_AUTH_REQUEST,
+    PROVIDER_HELPER_MSG_AUTH_RESPONSE,
 };
 
 enum provider_helper_ipc_result {
@@ -194,6 +197,11 @@ enum provider_helper_auth_profile {
     PROVIDER_HELPER_AUTH_PROFILE_EAP_TLS = 1,
 };
 
+enum provider_helper_auth_decision {
+    PROVIDER_HELPER_AUTH_DENY = 1,
+    PROVIDER_HELPER_AUTH_ALLOW = 2,
+};
+
 struct provider_helper_msg_header {
     uint32_t magic;
     uint16_t version_major;
@@ -215,6 +223,18 @@ struct provider_helper_auth_request {
     uint32_t ikev2_id_type;
     uint32_t claimed_principal_len;
     char claimed_principal[PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE];
+};
+
+struct provider_helper_auth_response {
+    uint64_t request_id;
+    uint64_t provider_session_id;
+    uint64_t xfrm_lease_id;
+    uint64_t policy_revision;
+    uint32_t decision;
+    uint32_t reason_len;
+    uint32_t flags;
+    uint32_t reserved;
+    char reason[PROVIDER_HELPER_AUTH_REASON_SIZE];
 };
 
 struct provider_helper_runtime_config {
@@ -409,6 +429,10 @@ bool provider_helper_xfrm_lease_valid(const struct provider_helper_xfrm_lease *l
 bool provider_helper_auth_request_valid(const struct provider_helper_auth_request *request,
                                         char *reason,
                                         size_t reason_size);
+bool provider_helper_auth_response_valid(
+    const struct provider_helper_auth_response *response,
+    char *reason,
+    size_t reason_size);
 
 bool provider_helper_ipc_write_header(struct buffer *buf,
                                       const struct provider_helper_msg_header *header);
@@ -435,6 +459,9 @@ bool provider_helper_ipc_write_xfrm_lease(struct buffer *buf,
 bool provider_helper_ipc_write_auth_request(
     struct buffer *buf,
     const struct provider_helper_auth_request *request);
+bool provider_helper_ipc_write_auth_response(
+    struct buffer *buf,
+    const struct provider_helper_auth_response *response);
 bool provider_helper_ipc_encode_runtime_config(uint8_t *dst, size_t dst_len,
                                                const struct provider_helper_runtime_config *config);
 bool provider_helper_ipc_decode_runtime_config(const uint8_t *src, size_t src_len,
@@ -459,6 +486,14 @@ bool provider_helper_ipc_decode_auth_request(
     const uint8_t *src,
     size_t src_len,
     struct provider_helper_auth_request *request);
+bool provider_helper_ipc_encode_auth_response(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_auth_response *response);
+bool provider_helper_ipc_decode_auth_response(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_auth_response *response);
 enum provider_helper_ikev2_parse_result
 provider_helper_ikev2_parse_header(const uint8_t *packet,
                                    size_t packet_len,

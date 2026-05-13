@@ -442,6 +442,61 @@ test_provider_helper_auth_request_roundtrip(void **state)
 }
 
 static void
+test_provider_helper_auth_response_roundtrip(void **state)
+{
+    (void)state;
+
+    struct provider_helper_auth_response input = {
+        .request_id = 101,
+        .decision = PROVIDER_HELPER_AUTH_DENY,
+    };
+    const char reason_text[] = "unsupported until policy bridge is wired";
+    snprintf(input.reason, sizeof(input.reason), "%s", reason_text);
+    assert_true(strlen(input.reason) <= UINT32_MAX);
+    input.reason_len = (uint32_t)strlen(input.reason);
+
+    struct provider_helper_auth_response output;
+    char reason[128];
+    uint8_t payload[PROVIDER_HELPER_AUTH_RESPONSE_SIZE];
+
+    assert_true(provider_helper_auth_response_valid(&input, reason,
+                                                    sizeof(reason)));
+    assert_true(provider_helper_ipc_encode_auth_response(payload,
+                                                         sizeof(payload),
+                                                         &input));
+    assert_true(provider_helper_ipc_decode_auth_response(payload,
+                                                         sizeof(payload),
+                                                         &output));
+    assert_int_equal(output.request_id, input.request_id);
+    assert_int_equal(output.provider_session_id, 0);
+    assert_int_equal(output.xfrm_lease_id, 0);
+    assert_int_equal(output.policy_revision, 0);
+    assert_int_equal(output.decision, input.decision);
+    assert_int_equal(output.reason_len, input.reason_len);
+    assert_memory_equal(output.reason, input.reason, input.reason_len);
+
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_AUTH_RESPONSE_SIZE);
+    assert_true(provider_helper_ipc_write_auth_response(&buf, &input));
+    assert_int_equal(BLEN(&buf), PROVIDER_HELPER_AUTH_RESPONSE_SIZE);
+    free_buf(&buf);
+
+    input.decision = PROVIDER_HELPER_AUTH_ALLOW;
+    assert_false(provider_helper_auth_response_valid(&input, reason,
+                                                     sizeof(reason)));
+    assert_non_null(strstr(reason, "requires"));
+
+    input.provider_session_id = 7;
+    input.xfrm_lease_id = 17;
+    input.policy_revision = 3;
+    assert_true(provider_helper_auth_response_valid(&input, reason,
+                                                    sizeof(reason)));
+    input.reason[3] = '\n';
+    assert_false(provider_helper_auth_response_valid(&input, reason,
+                                                     sizeof(reason)));
+    assert_non_null(strstr(reason, "reason"));
+}
+
+static void
 test_write_be16(uint8_t *dst, uint16_t value)
 {
     dst[0] = (uint8_t)(value >> 8);
@@ -2311,6 +2366,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_runtime_stats_roundtrip),
         cmocka_unit_test(test_provider_helper_xfrm_lease_roundtrip),
         cmocka_unit_test(test_provider_helper_auth_request_roundtrip),
+        cmocka_unit_test(test_provider_helper_auth_response_roundtrip),
         cmocka_unit_test(test_provider_helper_ikev2_parser),
         cmocka_unit_test(test_provider_helper_ikev2_payload_parser),
         cmocka_unit_test(test_provider_helper_ikev2_cookie_response),
