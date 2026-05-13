@@ -270,6 +270,36 @@ provider_helper_principal_byte_allowed(uint8_t c)
     return c >= 0x21 && c <= 0x7e;
 }
 
+static bool
+provider_helper_auth_text_field_valid(const char *value,
+                                      uint32_t value_len,
+                                      size_t value_size,
+                                      bool allow_space)
+{
+    if (value_len >= value_size)
+    {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < value_len; ++i)
+    {
+        const uint8_t c = (uint8_t)value[i];
+        if (allow_space)
+        {
+            if (c < 0x20 || c > 0x7e)
+            {
+                return false;
+            }
+        }
+        else if (!provider_helper_principal_byte_allowed(c))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 bool
 provider_helper_auth_request_valid(
     const struct provider_helper_auth_request *request,
@@ -287,6 +317,12 @@ provider_helper_auth_request_valid(
     {
         provider_helper_config_reason(reason, reason_size,
                                       "auth request ids must be nonzero");
+        return false;
+    }
+    if (request->reserved)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "auth request reserved fields must be zero");
         return false;
     }
     if (request->profile != PROVIDER_HELPER_AUTH_PROFILE_EAP_TLS)
@@ -309,16 +345,42 @@ provider_helper_auth_request_valid(
                                       "invalid claimed principal length");
         return false;
     }
-    for (uint32_t i = 0; i < request->claimed_principal_len; ++i)
+    if (!provider_helper_auth_text_field_valid(
+            request->claimed_principal, request->claimed_principal_len,
+            sizeof(request->claimed_principal), false))
     {
-        if (!provider_helper_principal_byte_allowed(
-                (uint8_t)request->claimed_principal[i]))
-        {
-            provider_helper_config_reason(
-                reason, reason_size,
-                "claimed principal contains invalid characters");
-            return false;
-        }
+        provider_helper_config_reason(
+            reason, reason_size,
+            "claimed principal contains invalid characters");
+        return false;
+    }
+    if (!provider_helper_auth_text_field_valid(
+            request->credential_fingerprint,
+            request->credential_fingerprint_len,
+            sizeof(request->credential_fingerprint), false))
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "credential fingerprint contains invalid characters");
+        return false;
+    }
+    if (!provider_helper_auth_text_field_valid(
+            request->cert_serial, request->cert_serial_len,
+            sizeof(request->cert_serial), false))
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "certificate serial contains invalid characters");
+        return false;
+    }
+    if (!provider_helper_auth_text_field_valid(
+            request->cert_issuer, request->cert_issuer_len,
+            sizeof(request->cert_issuer), true))
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "certificate issuer contains invalid characters");
+        return false;
     }
 
     provider_helper_config_reason(reason, reason_size, "ok");
@@ -747,9 +809,21 @@ provider_helper_ipc_encode_auth_request(
     provider_helper_wire_write_u32(&pos, request->profile);
     provider_helper_wire_write_u32(&pos, request->ikev2_id_type);
     provider_helper_wire_write_u32(&pos, request->claimed_principal_len);
+    provider_helper_wire_write_u32(&pos,
+                                   request->credential_fingerprint_len);
+    provider_helper_wire_write_u32(&pos, request->cert_serial_len);
+    provider_helper_wire_write_u32(&pos, request->cert_issuer_len);
+    provider_helper_wire_write_u32(&pos, request->reserved);
     memcpy(pos, request->claimed_principal,
            sizeof(request->claimed_principal));
     pos += sizeof(request->claimed_principal);
+    memcpy(pos, request->credential_fingerprint,
+           sizeof(request->credential_fingerprint));
+    pos += sizeof(request->credential_fingerprint);
+    memcpy(pos, request->cert_serial, sizeof(request->cert_serial));
+    pos += sizeof(request->cert_serial);
+    memcpy(pos, request->cert_issuer, sizeof(request->cert_issuer));
+    pos += sizeof(request->cert_issuer);
 
     return (size_t)(pos - dst) == PROVIDER_HELPER_AUTH_REQUEST_SIZE;
 }
@@ -774,9 +848,21 @@ provider_helper_ipc_decode_auth_request(
     request->profile = provider_helper_wire_read_u32(&pos);
     request->ikev2_id_type = provider_helper_wire_read_u32(&pos);
     request->claimed_principal_len = provider_helper_wire_read_u32(&pos);
+    request->credential_fingerprint_len =
+        provider_helper_wire_read_u32(&pos);
+    request->cert_serial_len = provider_helper_wire_read_u32(&pos);
+    request->cert_issuer_len = provider_helper_wire_read_u32(&pos);
+    request->reserved = provider_helper_wire_read_u32(&pos);
     memcpy(request->claimed_principal, pos,
            sizeof(request->claimed_principal));
     pos += sizeof(request->claimed_principal);
+    memcpy(request->credential_fingerprint, pos,
+           sizeof(request->credential_fingerprint));
+    pos += sizeof(request->credential_fingerprint);
+    memcpy(request->cert_serial, pos, sizeof(request->cert_serial));
+    pos += sizeof(request->cert_serial);
+    memcpy(request->cert_issuer, pos, sizeof(request->cert_issuer));
+    pos += sizeof(request->cert_issuer);
 
     return (size_t)(pos - src) == PROVIDER_HELPER_AUTH_REQUEST_SIZE
            && provider_helper_auth_request_valid(request, NULL, 0);

@@ -414,6 +414,20 @@ test_provider_helper_auth_request_roundtrip(void **state)
              principal);
     assert_true(strlen(input.claimed_principal) <= UINT32_MAX);
     input.claimed_principal_len = (uint32_t)strlen(input.claimed_principal);
+    const char fingerprint[] = "sha256:abcdef0123456789";
+    snprintf(input.credential_fingerprint,
+             sizeof(input.credential_fingerprint), "%s", fingerprint);
+    assert_true(strlen(input.credential_fingerprint) <= UINT32_MAX);
+    input.credential_fingerprint_len =
+        (uint32_t)strlen(input.credential_fingerprint);
+    const char serial[] = "01:23:45";
+    snprintf(input.cert_serial, sizeof(input.cert_serial), "%s", serial);
+    assert_true(strlen(input.cert_serial) <= UINT32_MAX);
+    input.cert_serial_len = (uint32_t)strlen(input.cert_serial);
+    const char issuer[] = "CN=Example CA,O=Example Org";
+    snprintf(input.cert_issuer, sizeof(input.cert_issuer), "%s", issuer);
+    assert_true(strlen(input.cert_issuer) <= UINT32_MAX);
+    input.cert_issuer_len = (uint32_t)strlen(input.cert_issuer);
 
     struct provider_helper_auth_request output;
     char reason[128];
@@ -437,6 +451,17 @@ test_provider_helper_auth_request_roundtrip(void **state)
                      input.claimed_principal_len);
     assert_memory_equal(output.claimed_principal, input.claimed_principal,
                         input.claimed_principal_len);
+    assert_int_equal(output.credential_fingerprint_len,
+                     input.credential_fingerprint_len);
+    assert_memory_equal(output.credential_fingerprint,
+                        input.credential_fingerprint,
+                        input.credential_fingerprint_len);
+    assert_int_equal(output.cert_serial_len, input.cert_serial_len);
+    assert_memory_equal(output.cert_serial, input.cert_serial,
+                        input.cert_serial_len);
+    assert_int_equal(output.cert_issuer_len, input.cert_issuer_len);
+    assert_memory_equal(output.cert_issuer, input.cert_issuer,
+                        input.cert_issuer_len);
 
     struct buffer buf = alloc_buf(PROVIDER_HELPER_AUTH_REQUEST_SIZE);
     assert_true(provider_helper_ipc_write_auth_request(&buf, &input));
@@ -448,6 +473,26 @@ test_provider_helper_auth_request_roundtrip(void **state)
                                                     sizeof(reason)));
     assert_non_null(strstr(reason, "principal"));
     input.claimed_principal[1] = 'l';
+    input.credential_fingerprint[1] = '\n';
+    assert_false(provider_helper_auth_request_valid(&input, reason,
+                                                    sizeof(reason)));
+    assert_non_null(strstr(reason, "fingerprint"));
+    input.credential_fingerprint[1] = 'h';
+    input.cert_serial[1] = '\n';
+    assert_false(provider_helper_auth_request_valid(&input, reason,
+                                                    sizeof(reason)));
+    assert_non_null(strstr(reason, "serial"));
+    input.cert_serial[1] = '1';
+    input.cert_issuer[1] = '\n';
+    assert_false(provider_helper_auth_request_valid(&input, reason,
+                                                    sizeof(reason)));
+    assert_non_null(strstr(reason, "issuer"));
+    input.cert_issuer[1] = 'N';
+    input.reserved = 1;
+    assert_false(provider_helper_auth_request_valid(&input, reason,
+                                                    sizeof(reason)));
+    assert_non_null(strstr(reason, "reserved"));
+    input.reserved = 0;
     input.profile = 0;
     assert_false(provider_helper_auth_request_valid(&input, reason,
                                                     sizeof(reason)));

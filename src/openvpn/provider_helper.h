@@ -38,7 +38,10 @@
 #define PROVIDER_HELPER_RUNTIME_STATS_SIZE  344
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
-#define PROVIDER_HELPER_AUTH_REQUEST_SIZE   296
+#define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
+#define PROVIDER_HELPER_AUTH_SERIAL_SIZE      128
+#define PROVIDER_HELPER_AUTH_ISSUER_SIZE      256
+#define PROVIDER_HELPER_AUTH_REQUEST_SIZE     824
 #define PROVIDER_HELPER_AUTH_REASON_SIZE    128
 #define PROVIDER_HELPER_AUTH_RESPONSE_SIZE  176
 #define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
@@ -222,7 +225,14 @@ struct provider_helper_auth_request {
     uint32_t profile;
     uint32_t ikev2_id_type;
     uint32_t claimed_principal_len;
+    uint32_t credential_fingerprint_len;
+    uint32_t cert_serial_len;
+    uint32_t cert_issuer_len;
+    uint32_t reserved;
     char claimed_principal[PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE];
+    char credential_fingerprint[PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE];
+    char cert_serial[PROVIDER_HELPER_AUTH_SERIAL_SIZE];
+    char cert_issuer[PROVIDER_HELPER_AUTH_ISSUER_SIZE];
 };
 
 struct provider_helper_auth_response {

@@ -291,6 +291,24 @@ multi_ikev2_helper_policy_profile(uint32_t profile)
 }
 
 static bool
+multi_ikev2_helper_copy_auth_field(char *dst, size_t dst_size,
+                                   const char *src, uint32_t src_len)
+{
+    if (!dst || !dst_size || !src || src_len >= dst_size)
+    {
+        return false;
+    }
+
+    dst[0] = '\0';
+    if (src_len)
+    {
+        memcpy(dst, src, src_len);
+        dst[src_len] = '\0';
+    }
+    return true;
+}
+
+static bool
 multi_ikev2_helper_auth_request(void *arg,
                                 const struct provider_helper_auth_request *request,
                                 struct provider_helper_auth_response *response)
@@ -304,19 +322,41 @@ multi_ikev2_helper_auth_request(void *arg,
     }
 
     char principal[PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE];
+    char credential_fingerprint[PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE];
+    char cert_serial[PROVIDER_HELPER_AUTH_SERIAL_SIZE];
+    char cert_issuer[PROVIDER_HELPER_AUTH_ISSUER_SIZE];
     CLEAR(principal);
-    if (request->claimed_principal_len >= sizeof(principal))
+    CLEAR(credential_fingerprint);
+    CLEAR(cert_serial);
+    CLEAR(cert_issuer);
+    if (!multi_ikev2_helper_copy_auth_field(
+            principal, sizeof(principal), request->claimed_principal,
+            request->claimed_principal_len)
+        || !multi_ikev2_helper_copy_auth_field(
+            credential_fingerprint, sizeof(credential_fingerprint),
+            request->credential_fingerprint,
+            request->credential_fingerprint_len)
+        || !multi_ikev2_helper_copy_auth_field(
+            cert_serial, sizeof(cert_serial), request->cert_serial,
+            request->cert_serial_len)
+        || !multi_ikev2_helper_copy_auth_field(
+            cert_issuer, sizeof(cert_issuer), request->cert_issuer,
+            request->cert_issuer_len))
     {
-        multi_ikev2_helper_auth_deny(response, request->request_id,
-                                     "provider principal is invalid");
+        multi_ikev2_helper_auth_deny(
+            response, request->request_id,
+            "provider auth credential metadata is invalid");
         return true;
     }
-    memcpy(principal, request->claimed_principal,
-           request->claimed_principal_len);
 
     const struct provider_policy_auth_context context = {
         .profile_mode = multi_ikev2_helper_policy_profile(request->profile),
         .principal = principal,
+        .credential_fingerprint = request->credential_fingerprint_len
+                                      ? credential_fingerprint
+                                      : NULL,
+        .cert_serial = request->cert_serial_len ? cert_serial : NULL,
+        .cert_issuer = request->cert_issuer_len ? cert_issuer : NULL,
     };
     struct provider_policy_auth_result result;
     provider_policy_authorize(&context, &result);
