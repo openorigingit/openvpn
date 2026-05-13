@@ -346,12 +346,43 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
     return pos + payload_len;
 }
 
+#define TEST_IKEV2_ENCR_TRANSFORM_LEN \
+    (PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE + 4)
+#define TEST_IKEV2_PRF_TRANSFORM_LEN PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
+#define TEST_IKEV2_DH_TRANSFORM_LEN PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
+#define TEST_IKEV2_SA_PROPOSAL_LEN \
+    (PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE \
+     + TEST_IKEV2_ENCR_TRANSFORM_LEN + TEST_IKEV2_PRF_TRANSFORM_LEN \
+     + TEST_IKEV2_DH_TRANSFORM_LEN)
+#define TEST_IKEV2_SA_PAYLOAD_LEN \
+    (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + TEST_IKEV2_SA_PROPOSAL_LEN)
+
+static size_t
+test_ike_sa_init_encr_transform_offset(void)
+{
+    return PROVIDER_HELPER_IKEV2_HEADER_SIZE
+           + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+           + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE;
+}
+
+static size_t
+test_ike_sa_init_prf_transform_offset(void)
+{
+    return test_ike_sa_init_encr_transform_offset()
+           + TEST_IKEV2_ENCR_TRANSFORM_LEN;
+}
+
+static size_t
+test_ike_sa_init_dh_transform_offset(void)
+{
+    return test_ike_sa_init_prf_transform_offset()
+           + TEST_IKEV2_PRF_TRANSFORM_LEN;
+}
+
 static size_t
 test_make_ike_sa_init_packet(uint8_t *packet, size_t packet_size)
 {
-    const uint16_t sa_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
-                            + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
-                            + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE;
+    const uint16_t sa_len = TEST_IKEV2_SA_PAYLOAD_LEN;
     const uint16_t ke_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
                             + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE + 8;
     const uint16_t nonce_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
@@ -371,20 +402,32 @@ test_make_ike_sa_init_packet(uint8_t *packet, size_t packet_size)
     const size_t proposal = PROVIDER_HELPER_IKEV2_HEADER_SIZE
                             + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
     packet[proposal] = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
-    test_write_be16(packet + proposal + 2,
-                    PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
-                    + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE);
+    test_write_be16(packet + proposal + 2, TEST_IKEV2_SA_PROPOSAL_LEN);
     packet[proposal + 4] = 1; /* Proposal number. */
     packet[proposal + 5] = PROVIDER_HELPER_IKEV2_PROTOCOL_IKE;
     packet[proposal + 6] = 0; /* Initial IKE proposals do not carry SPI here. */
-    packet[proposal + 7] = 1; /* One transform. */
-    const size_t transform =
-        proposal + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE;
+    packet[proposal + 7] = 3; /* ENCR, PRF, DH. */
+    size_t transform = test_ike_sa_init_encr_transform_offset();
+    packet[transform] = PROVIDER_HELPER_IKEV2_TRANSFORM_MORE;
+    test_write_be16(packet + transform + 2, TEST_IKEV2_ENCR_TRANSFORM_LEN);
+    packet[transform + 4] = PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR;
+    test_write_be16(packet + transform + 6, PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16);
+    test_write_be16(packet + transform + 8,
+                    0x8000u | PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH);
+    test_write_be16(packet + transform + 10, 256);
+
+    transform = test_ike_sa_init_prf_transform_offset();
+    packet[transform] = PROVIDER_HELPER_IKEV2_TRANSFORM_MORE;
+    test_write_be16(packet + transform + 2, TEST_IKEV2_PRF_TRANSFORM_LEN);
+    packet[transform + 4] = PROVIDER_HELPER_IKEV2_TRANSFORM_PRF;
+    test_write_be16(packet + transform + 6,
+                    PROVIDER_HELPER_IKEV2_PRF_HMAC_SHA2_256);
+
+    transform = test_ike_sa_init_dh_transform_offset();
     packet[transform] = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
-    test_write_be16(packet + transform + 2,
-                    PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE);
-    packet[transform + 4] = 1; /* Transform type: encryption algorithm. */
-    test_write_be16(packet + transform + 6, 20);
+    test_write_be16(packet + transform + 2, TEST_IKEV2_DH_TRANSFORM_LEN);
+    packet[transform + 4] = PROVIDER_HELPER_IKEV2_TRANSFORM_DH;
+    test_write_be16(packet + transform + 6, PROVIDER_HELPER_IKEV2_DH_ECP_256);
 
     const size_t ke = pos + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
     pos = test_add_ikev2_payload(packet, pos, PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE,
@@ -435,9 +478,7 @@ test_make_ike_sa_init_cookie_packet_with_cookie(uint8_t *packet, size_t packet_s
                                                 const uint8_t *cookie,
                                                 size_t cookie_len)
 {
-    const size_t sa_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
-                          + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
-                          + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE;
+    const size_t sa_len = TEST_IKEV2_SA_PAYLOAD_LEN;
     const size_t ke_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
                           + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE + 8;
     const size_t notify_len = PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE
@@ -789,8 +830,7 @@ test_provider_helper_ikev2_payload_parser(void **state)
     assert_int_equal(summary.ke_count, 1);
     assert_int_equal(summary.nonce_count, 1);
     assert_int_equal(summary.sa_len,
-                     PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
-                     + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE);
+                     TEST_IKEV2_SA_PROPOSAL_LEN);
     assert_int_equal(summary.ke_len,
                      PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE + 8);
     assert_int_equal(summary.nonce_len,
@@ -798,6 +838,16 @@ test_provider_helper_ikev2_payload_parser(void **state)
     assert_int_equal(provider_helper_ikev2_validate_ike_sa_init_request(
                          packet, packet_len, &header, &summary),
                      PROVIDER_HELPER_IKEV2_PARSE_OK);
+    struct provider_helper_ikev2_sa_selection selection;
+    assert_int_equal(provider_helper_ikev2_select_ike_sa_init_proposal(
+                         packet, packet_len, &summary, &selection),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_true(selection.selected);
+    assert_int_equal(selection.proposal_number, 1);
+    assert_int_equal(selection.encr_id, PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16);
+    assert_int_equal(selection.encr_key_bits, 256);
+    assert_int_equal(selection.prf_id, PROVIDER_HELPER_IKEV2_PRF_HMAC_SHA2_256);
+    assert_int_equal(selection.dh_id, PROVIDER_HELPER_IKEV2_DH_ECP_256);
 
     packet[PROVIDER_HELPER_IKEV2_HEADER_SIZE + 2] = 0;
     packet[PROVIDER_HELPER_IKEV2_HEADER_SIZE + 3] = 3;
@@ -839,9 +889,7 @@ test_provider_helper_ikev2_payload_parser(void **state)
                      PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH);
 
     packet_len = test_make_ike_sa_init_packet(packet, sizeof(packet));
-    const size_t sa_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
-                          + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
-                          + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE;
+    const size_t sa_len = TEST_IKEV2_SA_PAYLOAD_LEN;
     const size_t ke_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
                           + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE + 8;
     const size_t nonce_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
@@ -878,6 +926,22 @@ test_provider_helper_ikev2_payload_parser(void **state)
     assert_int_equal(provider_helper_ikev2_parse_payloads(
                          packet, packet_len, &header, &summary),
                      PROVIDER_HELPER_IKEV2_PARSE_UNSUPPORTED_CRITICAL_PAYLOAD);
+
+    packet_len = test_make_ike_sa_init_packet(packet, sizeof(packet));
+    test_write_be16(packet + test_ike_sa_init_prf_transform_offset() + 6, 999);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, packet_len, PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE,
+                         false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_validate_ike_sa_init_request(
+                         packet, packet_len, &header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_select_ike_sa_init_proposal(
+                         packet, packet_len, &summary, &selection),
+                     PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN);
+    assert_string_equal(provider_helper_ikev2_parse_result_name(
+                            PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN),
+                        "no-proposal-chosen");
 }
 
 static void

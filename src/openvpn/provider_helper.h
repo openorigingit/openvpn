@@ -44,6 +44,7 @@
 #define PROVIDER_HELPER_IKEV2_MAX_PAYLOADS  32
 #define PROVIDER_HELPER_IKEV2_MAX_PROPOSALS 16
 #define PROVIDER_HELPER_IKEV2_MAX_TRANSFORMS 32
+#define PROVIDER_HELPER_IKEV2_MAX_TRANSFORM_ATTRS 16
 #define PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE 8
 #define PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE 8
 #define PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE 4
@@ -76,6 +77,14 @@
 #define PROVIDER_HELPER_IKEV2_PROPOSAL_MORE  2
 #define PROVIDER_HELPER_IKEV2_TRANSFORM_MORE 3
 #define PROVIDER_HELPER_IKEV2_PROTOCOL_IKE   1
+#define PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR 1
+#define PROVIDER_HELPER_IKEV2_TRANSFORM_PRF  2
+#define PROVIDER_HELPER_IKEV2_TRANSFORM_INTEG 3
+#define PROVIDER_HELPER_IKEV2_TRANSFORM_DH   4
+#define PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16 20
+#define PROVIDER_HELPER_IKEV2_PRF_HMAC_SHA2_256 5
+#define PROVIDER_HELPER_IKEV2_DH_ECP_256 19
+#define PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH 14
 
 #define PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_SAS 1024
 #define PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_PER_SOURCE 32
@@ -169,6 +178,7 @@ enum provider_helper_ikev2_parse_result {
     PROVIDER_HELPER_IKEV2_PARSE_UNSUPPORTED_CRITICAL_PAYLOAD,
     PROVIDER_HELPER_IKEV2_PARSE_MISSING_REQUIRED_PAYLOAD,
     PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD,
+    PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN,
 };
 
 struct provider_helper_msg_header {
@@ -277,6 +287,16 @@ struct provider_helper_ikev2_payload_summary {
     size_t cookie_len;
 };
 
+struct provider_helper_ikev2_sa_selection {
+    bool selected;
+    uint8_t proposal_number;
+    uint16_t encr_id;
+    uint16_t encr_key_bits;
+    uint16_t prf_id;
+    uint16_t integ_id;
+    uint16_t dh_id;
+};
+
 typedef bool (*provider_helper_ikev2_cookie_mac_fn)(
     void *ctx,
     const uint8_t *input,
@@ -383,6 +403,12 @@ provider_helper_ikev2_validate_ike_sa_init_request(
     size_t packet_len,
     const struct provider_helper_ikev2_header *header,
     struct provider_helper_ikev2_payload_summary *summary);
+enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_select_ike_sa_init_proposal(
+    const uint8_t *packet,
+    size_t packet_len,
+    const struct provider_helper_ikev2_payload_summary *summary,
+    struct provider_helper_ikev2_sa_selection *selection);
 bool provider_helper_ikev2_build_cookie_response(
     uint8_t *dst,
     size_t dst_len,

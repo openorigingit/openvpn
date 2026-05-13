@@ -72,6 +72,7 @@ struct ikev2_helper_ike_sa {
     uint32_t retransmits;
     time_t created;
     time_t updated;
+    struct provider_helper_ikev2_sa_selection selection;
     struct sockaddr_storage peer;
     socklen_t peer_len;
 };
@@ -607,9 +608,11 @@ ikev2_helper_add_ike_sa(struct ikev2_helper_ike_sa_table *table,
                         const struct ikev2_helper_listener *listener,
                         const struct provider_helper_ikev2_header *header,
                         const struct sockaddr_storage *peer,
-                        socklen_t peer_len)
+                        socklen_t peer_len,
+                        const struct provider_helper_ikev2_sa_selection *selection)
 {
-    if (!table || !listener || !header || !peer)
+    if (!table || !listener || !header || !peer || !selection
+        || !selection->selected)
     {
         return false;
     }
@@ -627,6 +630,7 @@ ikev2_helper_add_ike_sa(struct ikev2_helper_ike_sa_table *table,
             sa->message_id = header->message_id;
             sa->created = time(NULL);
             sa->updated = sa->created;
+            sa->selection = *selection;
             sa->peer = *peer;
             sa->peer_len = peer_len;
             ++table->active;
@@ -832,14 +836,27 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     ++counters->ike_sa_init_cookie_response_failed;
                 }
             }
-            else if (!ikev2_helper_add_ike_sa(sa_table, listener, &header, &peer,
-                                              peer_len))
-            {
-                ++counters->ike_sa_table_full_dropped;
-            }
             else
             {
-                ++counters->ike_sa_init_accepted;
+                struct provider_helper_ikev2_sa_selection selection;
+                const enum provider_helper_ikev2_parse_result select_result =
+                    provider_helper_ikev2_select_ike_sa_init_proposal(
+                        packet, (size_t)n, &summary, &selection);
+                if (select_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+                {
+                    ++counters->datagrams_malformed;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+                if (!ikev2_helper_add_ike_sa(sa_table, listener, &header, &peer,
+                                             peer_len, &selection))
+                {
+                    ++counters->ike_sa_table_full_dropped;
+                }
+                else
+                {
+                    ++counters->ike_sa_init_accepted;
+                }
             }
             counters->ike_sa_active = sa_table->active;
         }
