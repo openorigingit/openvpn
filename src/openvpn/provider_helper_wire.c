@@ -290,6 +290,131 @@ provider_helper_ipc_decode_listener_fd(const uint8_t *src, size_t src_len,
     return (size_t)(pos - src) == PROVIDER_HELPER_LISTENER_FD_SIZE;
 }
 
+const char *
+provider_helper_ikev2_parse_result_name(enum provider_helper_ikev2_parse_result result)
+{
+    switch (result)
+    {
+        case PROVIDER_HELPER_IKEV2_PARSE_OK:
+            return "ok";
+
+        case PROVIDER_HELPER_IKEV2_PARSE_TOO_SHORT:
+            return "too-short";
+
+        case PROVIDER_HELPER_IKEV2_PARSE_OVERSIZE:
+            return "oversize";
+
+        case PROVIDER_HELPER_IKEV2_PARSE_BAD_NATT_MARKER:
+            return "bad-natt-marker";
+
+        case PROVIDER_HELPER_IKEV2_PARSE_BAD_VERSION:
+            return "bad-version";
+
+        case PROVIDER_HELPER_IKEV2_PARSE_BAD_FLAGS:
+            return "bad-flags";
+
+        case PROVIDER_HELPER_IKEV2_PARSE_BAD_LENGTH:
+            return "bad-length";
+
+        case PROVIDER_HELPER_IKEV2_PARSE_UNSUPPORTED_EXCHANGE:
+            return "unsupported-exchange";
+
+        case PROVIDER_HELPER_IKEV2_PARSE_BAD_SPI:
+            return "bad-spi";
+
+        default:
+            return "unknown";
+    }
+}
+
+static bool
+provider_helper_ikev2_exchange_supported(uint8_t exchange_type)
+{
+    switch (exchange_type)
+    {
+        case PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT:
+        case PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH:
+        case PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA:
+        case PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_parse_header(const uint8_t *packet,
+                                   size_t packet_len,
+                                   uint32_t max_packet_size,
+                                   bool expect_natt,
+                                   struct provider_helper_ikev2_header *header)
+{
+    const size_t offset = expect_natt ? PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE : 0;
+    const size_t min_len = offset + PROVIDER_HELPER_IKEV2_HEADER_SIZE;
+
+    if (header)
+    {
+        CLEAR(*header);
+    }
+    if (!packet || !header || packet_len < min_len)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_TOO_SHORT;
+    }
+    if (!max_packet_size || packet_len > max_packet_size)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_OVERSIZE;
+    }
+    if (expect_natt
+        && (packet[0] || packet[1] || packet[2] || packet[3]))
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_NATT_MARKER;
+    }
+
+    const uint8_t *pos = packet + offset;
+    header->initiator_spi = provider_helper_wire_read_u64(&pos);
+    header->responder_spi = provider_helper_wire_read_u64(&pos);
+    header->next_payload = *pos++;
+
+    const uint8_t version = *pos++;
+    header->major_version = version >> 4;
+    header->minor_version = version & 0x0f;
+
+    header->exchange_type = *pos++;
+    header->flags = *pos++;
+    header->message_id = provider_helper_wire_read_u32(&pos);
+    header->ike_length = provider_helper_wire_read_u32(&pos);
+    header->natt = expect_natt;
+    header->header_offset = offset;
+
+    if (header->major_version != PROVIDER_HELPER_IKEV2_MAJOR_VERSION)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_VERSION;
+    }
+    if (header->flags & PROVIDER_HELPER_IKEV2_FLAG_VERSION)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_FLAGS;
+    }
+    if (header->ike_length < PROVIDER_HELPER_IKEV2_HEADER_SIZE
+        || header->ike_length != packet_len - offset)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_LENGTH;
+    }
+    if (!provider_helper_ikev2_exchange_supported(header->exchange_type))
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_UNSUPPORTED_EXCHANGE;
+    }
+    if (!header->initiator_spi
+        || (header->exchange_type == PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT
+            && !(header->flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE)
+            && header->responder_spi))
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_SPI;
+    }
+
+    return PROVIDER_HELPER_IKEV2_PARSE_OK;
+}
+
 bool
 provider_helper_ipc_encode_header(uint8_t *dst, size_t dst_len,
                                   const struct provider_helper_msg_header *header)

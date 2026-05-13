@@ -182,6 +182,139 @@ test_provider_helper_listener_fd_roundtrip(void **state)
 }
 
 static void
+test_write_be32(uint8_t *dst, uint32_t value)
+{
+    dst[0] = (uint8_t)(value >> 24);
+    dst[1] = (uint8_t)(value >> 16);
+    dst[2] = (uint8_t)(value >> 8);
+    dst[3] = (uint8_t)value;
+}
+
+static void
+test_write_be64(uint8_t *dst, uint64_t value)
+{
+    for (size_t i = 0; i < 8; ++i)
+    {
+        dst[i] = (uint8_t)(value >> ((7 - i) * 8));
+    }
+}
+
+static void
+test_make_ikev2_header(uint8_t *packet, bool natt, uint8_t exchange_type,
+                       uint8_t flags, uint64_t responder_spi, uint32_t ike_length)
+{
+    const size_t offset = natt ? PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE : 0;
+    memset(packet, 0, PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE
+           + PROVIDER_HELPER_IKEV2_HEADER_SIZE);
+    test_write_be64(packet + offset, 0x1122334455667788ull);
+    test_write_be64(packet + offset + 8, responder_spi);
+    packet[offset + 16] = 33; /* SA */
+    packet[offset + 17] = (PROVIDER_HELPER_IKEV2_MAJOR_VERSION << 4)
+                          | PROVIDER_HELPER_IKEV2_MINOR_VERSION;
+    packet[offset + 18] = exchange_type;
+    packet[offset + 19] = flags;
+    test_write_be32(packet + offset + 20, 0);
+    test_write_be32(packet + offset + 24, ike_length);
+}
+
+static void
+test_provider_helper_ikev2_parser(void **state)
+{
+    (void)state;
+
+    uint8_t packet[PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE
+                   + PROVIDER_HELPER_IKEV2_HEADER_SIZE];
+    struct provider_helper_ikev2_header header;
+
+    test_make_ikev2_header(packet, false,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT,
+                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+                           0, PROVIDER_HELPER_IKEV2_HEADER_SIZE);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, PROVIDER_HELPER_IKEV2_HEADER_SIZE,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(header.initiator_spi, 0x1122334455667788ull);
+    assert_int_equal(header.responder_spi, 0);
+    assert_int_equal(header.exchange_type, PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT);
+    assert_int_equal(header.major_version, PROVIDER_HELPER_IKEV2_MAJOR_VERSION);
+    assert_false(header.natt);
+    assert_int_equal(header.header_offset, 0);
+
+    test_make_ikev2_header(packet, true,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
+                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+                           0x8877665544332211ull,
+                           PROVIDER_HELPER_IKEV2_HEADER_SIZE);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, sizeof(packet),
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, true, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_true(header.natt);
+    assert_int_equal(header.header_offset, PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE);
+
+    packet[0] = 1;
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, sizeof(packet),
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, true, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_BAD_NATT_MARKER);
+
+    test_make_ikev2_header(packet, false,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT,
+                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+                           0, PROVIDER_HELPER_IKEV2_HEADER_SIZE);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, PROVIDER_HELPER_IKEV2_HEADER_SIZE,
+                         PROVIDER_HELPER_IKEV2_HEADER_SIZE - 1, false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OVERSIZE);
+
+    packet[17] = 0x10;
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, PROVIDER_HELPER_IKEV2_HEADER_SIZE,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_BAD_VERSION);
+
+    test_make_ikev2_header(packet, false,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT,
+                           PROVIDER_HELPER_IKEV2_FLAG_VERSION,
+                           0, PROVIDER_HELPER_IKEV2_HEADER_SIZE);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, PROVIDER_HELPER_IKEV2_HEADER_SIZE,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_BAD_FLAGS);
+
+    test_make_ikev2_header(packet, false,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT,
+                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+                           0, PROVIDER_HELPER_IKEV2_HEADER_SIZE + 1);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, PROVIDER_HELPER_IKEV2_HEADER_SIZE,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_BAD_LENGTH);
+
+    test_make_ikev2_header(packet, false, 99,
+                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+                           0, PROVIDER_HELPER_IKEV2_HEADER_SIZE);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, PROVIDER_HELPER_IKEV2_HEADER_SIZE,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_UNSUPPORTED_EXCHANGE);
+
+    test_make_ikev2_header(packet, false,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT,
+                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+                           1, PROVIDER_HELPER_IKEV2_HEADER_SIZE);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, PROVIDER_HELPER_IKEV2_HEADER_SIZE,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_BAD_SPI);
+
+    assert_string_equal(provider_helper_ikev2_parse_result_name(
+                            PROVIDER_HELPER_IKEV2_PARSE_BAD_SPI),
+                        "bad-spi");
+}
+
+static void
 test_provider_helper_processes_partial_header(void **state)
 {
     (void)state;
@@ -386,6 +519,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_feature_negotiation),
         cmocka_unit_test(test_provider_helper_runtime_config_roundtrip),
         cmocka_unit_test(test_provider_helper_listener_fd_roundtrip),
+        cmocka_unit_test(test_provider_helper_ikev2_parser),
         cmocka_unit_test(test_provider_helper_processes_partial_header),
         cmocka_unit_test(test_provider_helper_spawn_noop),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_scaffold),

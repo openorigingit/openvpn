@@ -35,12 +35,20 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 28
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
+#define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
+#define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE 4
 
 #define PROVIDER_HELPER_CONFIG_FORCE_NATT (1u << 0)
 #define PROVIDER_HELPER_CONFIG_IPV4_ONLY  (1u << 1)
 
 #define PROVIDER_HELPER_LISTENER_FD_IKE   (1u << 0)
 #define PROVIDER_HELPER_LISTENER_FD_NATT  (1u << 1)
+
+#define PROVIDER_HELPER_IKEV2_MAJOR_VERSION 2
+#define PROVIDER_HELPER_IKEV2_MINOR_VERSION 0
+#define PROVIDER_HELPER_IKEV2_FLAG_INITIATOR 0x08
+#define PROVIDER_HELPER_IKEV2_FLAG_VERSION   0x10
+#define PROVIDER_HELPER_IKEV2_FLAG_RESPONSE  0x20
 
 #define PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_SAS 1024
 #define PROVIDER_HELPER_DEFAULT_COOKIE_THRESHOLD  128
@@ -83,6 +91,25 @@ enum provider_helper_ipc_result {
     PROVIDER_HELPER_IPC_SEQUENCE_ROLLBACK,
 };
 
+enum provider_helper_ikev2_exchange_type {
+    PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT = 34,
+    PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH = 35,
+    PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA = 36,
+    PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL = 37,
+};
+
+enum provider_helper_ikev2_parse_result {
+    PROVIDER_HELPER_IKEV2_PARSE_OK = 0,
+    PROVIDER_HELPER_IKEV2_PARSE_TOO_SHORT,
+    PROVIDER_HELPER_IKEV2_PARSE_OVERSIZE,
+    PROVIDER_HELPER_IKEV2_PARSE_BAD_NATT_MARKER,
+    PROVIDER_HELPER_IKEV2_PARSE_BAD_VERSION,
+    PROVIDER_HELPER_IKEV2_PARSE_BAD_FLAGS,
+    PROVIDER_HELPER_IKEV2_PARSE_BAD_LENGTH,
+    PROVIDER_HELPER_IKEV2_PARSE_UNSUPPORTED_EXCHANGE,
+    PROVIDER_HELPER_IKEV2_PARSE_BAD_SPI,
+};
+
 struct provider_helper_msg_header {
     uint32_t magic;
     uint16_t version_major;
@@ -114,6 +141,20 @@ struct provider_helper_listener_fd {
     uint32_t flags;
 };
 
+struct provider_helper_ikev2_header {
+    uint64_t initiator_spi;
+    uint64_t responder_spi;
+    uint32_t message_id;
+    uint32_t ike_length;
+    uint8_t next_payload;
+    uint8_t major_version;
+    uint8_t minor_version;
+    uint8_t exchange_type;
+    uint8_t flags;
+    bool natt;
+    size_t header_offset;
+};
+
 struct provider_helper_supervisor {
     enum provider_helper_state state;
     int ipc_fd;
@@ -134,6 +175,8 @@ struct provider_helper_supervisor {
 
 const char *provider_helper_state_name(enum provider_helper_state state);
 const char *provider_helper_ipc_result_name(enum provider_helper_ipc_result result);
+const char *provider_helper_ikev2_parse_result_name(
+    enum provider_helper_ikev2_parse_result result);
 
 void provider_helper_supervisor_init(struct provider_helper_supervisor *supervisor);
 void provider_helper_supervisor_free(struct provider_helper_supervisor *supervisor);
@@ -173,6 +216,12 @@ bool provider_helper_ipc_encode_listener_fd(uint8_t *dst, size_t dst_len,
                                             const struct provider_helper_listener_fd *listener);
 bool provider_helper_ipc_decode_listener_fd(const uint8_t *src, size_t src_len,
                                             struct provider_helper_listener_fd *listener);
+enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_parse_header(const uint8_t *packet,
+                                   size_t packet_len,
+                                   uint32_t max_packet_size,
+                                   bool expect_natt,
+                                   struct provider_helper_ikev2_header *header);
 bool provider_helper_negotiate_features(uint64_t supported_features,
                                         uint64_t remote_mandatory_features,
                                         uint64_t remote_optional_features,
