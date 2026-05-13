@@ -150,6 +150,38 @@ test_provider_helper_runtime_config_roundtrip(void **state)
 }
 
 static void
+test_provider_helper_listener_fd_roundtrip(void **state)
+{
+    (void)state;
+
+    struct provider_helper_listener_fd input = {
+        .listener_id = 7,
+        .family = AF_INET,
+        .socket_type = SOCK_DGRAM,
+        .protocol = IPPROTO_UDP,
+        .local_port = 4500,
+        .flags = PROVIDER_HELPER_LISTENER_FD_NATT,
+    };
+    struct provider_helper_listener_fd output;
+    char reason[128];
+    uint8_t payload[PROVIDER_HELPER_LISTENER_FD_SIZE];
+
+    assert_true(provider_helper_listener_fd_valid(&input, reason, sizeof(reason)));
+    assert_true(provider_helper_ipc_encode_listener_fd(payload, sizeof(payload), &input));
+    assert_true(provider_helper_ipc_decode_listener_fd(payload, sizeof(payload), &output));
+    assert_int_equal(output.listener_id, input.listener_id);
+    assert_int_equal(output.family, input.family);
+    assert_int_equal(output.socket_type, input.socket_type);
+    assert_int_equal(output.protocol, input.protocol);
+    assert_int_equal(output.local_port, input.local_port);
+    assert_int_equal(output.flags, input.flags);
+
+    input.protocol = IPPROTO_TCP;
+    assert_false(provider_helper_listener_fd_valid(&input, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "UDP"));
+}
+
+static void
 test_provider_helper_processes_partial_header(void **state)
 {
     (void)state;
@@ -216,6 +248,26 @@ test_provider_helper_spawn_noop(void **state)
     assert_int_equal(supervisor.ipc_fd, -1);
 }
 
+static int
+test_create_udp_listener(uint16_t *port)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    assert_true(fd >= 0);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    assert_int_equal(bind(fd, (struct sockaddr *)&addr, sizeof(addr)), 0);
+
+    socklen_t addr_len = sizeof(addr);
+    assert_int_equal(getsockname(fd, (struct sockaddr *)&addr, &addr_len), 0);
+    *port = ntohs(addr.sin_port);
+    assert_true(*port > 0);
+    return fd;
+}
+
 static void
 write_helper_header_fd(int fd, uint32_t type, uint64_t sequence,
                        uint64_t correlation_id)
@@ -261,7 +313,19 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 2);
 
-    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_PING, 2, 77);
+    uint16_t port = 0;
+    int listener_fd = test_create_udp_listener(&port);
+    const struct provider_helper_listener_fd listener = {
+        .listener_id = 1,
+        .family = AF_INET,
+        .socket_type = SOCK_DGRAM,
+        .protocol = IPPROTO_UDP,
+        .local_port = port,
+        .flags = PROVIDER_HELPER_LISTENER_FD_IKE,
+    };
+    assert_true(provider_helper_supervisor_send_listener_fd(&supervisor, listener_fd,
+                                                            &listener, 88));
+
     for (int i = 0; i < 100 && supervisor.last_rx_sequence < 3; ++i)
     {
         provider_helper_process_event(&supervisor);
@@ -270,6 +334,17 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 3);
+    close(listener_fd);
+
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_PING, 3, 77);
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 4; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 4);
 
     provider_helper_supervisor_stop(&supervisor);
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
@@ -310,6 +385,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_rejects_bad_framing),
         cmocka_unit_test(test_provider_helper_feature_negotiation),
         cmocka_unit_test(test_provider_helper_runtime_config_roundtrip),
+        cmocka_unit_test(test_provider_helper_listener_fd_roundtrip),
         cmocka_unit_test(test_provider_helper_processes_partial_header),
         cmocka_unit_test(test_provider_helper_spawn_noop),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_scaffold),

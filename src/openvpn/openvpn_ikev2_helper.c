@@ -34,7 +34,14 @@
 
 #ifndef _WIN32
 
+#define IKEV2_HELPER_MAX_LISTENERS 4
+
 static volatile sig_atomic_t helper_stop;
+
+struct ikev2_helper_listener {
+    int fd;
+    struct provider_helper_listener_fd descriptor;
+};
 
 static void
 ikev2_helper_signal_handler(int signum)
@@ -175,14 +182,129 @@ ikev2_helper_read_runtime_config(int fd, const struct provider_helper_msg_header
            && provider_helper_runtime_config_valid(config, NULL, 0);
 }
 
+static bool
+ikev2_helper_recv_listener_payload(int ipc_fd, uint8_t *payload, size_t payload_len,
+                                   int *listener_fd)
+{
+    char control[CMSG_SPACE(sizeof(*listener_fd))];
+    CLEAR(control);
+
+    struct iovec iov = {
+        .iov_base = payload,
+        .iov_len = payload_len,
+    };
+    struct msghdr msg = {
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_control = control,
+        .msg_controllen = sizeof(control),
+    };
+
+    ssize_t n;
+    do
+    {
+        n = recvmsg(ipc_fd, &msg, MSG_WAITALL);
+    } while (n < 0 && errno == EINTR && !helper_stop);
+
+    if (n != (ssize_t)payload_len)
+    {
+        return false;
+    }
+    if (msg.msg_flags & (MSG_TRUNC | MSG_CTRUNC))
+    {
+        return false;
+    }
+
+    for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+         cmsg;
+         cmsg = CMSG_NXTHDR(&msg, cmsg))
+    {
+        if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS
+            && cmsg->cmsg_len >= CMSG_LEN(sizeof(*listener_fd)))
+        {
+            memcpy(listener_fd, CMSG_DATA(cmsg), sizeof(*listener_fd));
+            return *listener_fd >= 0;
+        }
+    }
+
+    return false;
+}
+
+static bool
+ikev2_helper_validate_listener_socket(
+    int fd,
+    const struct provider_helper_listener_fd *listener)
+{
+    int socket_type = 0;
+    socklen_t socket_type_len = sizeof(socket_type);
+    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &socket_type, &socket_type_len) != 0
+        || socket_type != (int)listener->socket_type)
+    {
+        return false;
+    }
+
+    struct sockaddr_storage ss;
+    socklen_t ss_len = sizeof(ss);
+    if (getsockname(fd, (struct sockaddr *)&ss, &ss_len) != 0
+        || ss.ss_family != (sa_family_t)listener->family)
+    {
+        return false;
+    }
+
+    switch (ss.ss_family)
+    {
+        case AF_INET:
+            return ntohs(((struct sockaddr_in *)&ss)->sin_port)
+                   == listener->local_port;
+
+        case AF_INET6:
+            return ntohs(((struct sockaddr_in6 *)&ss)->sin6_port)
+                   == listener->local_port;
+
+        default:
+            return false;
+    }
+}
+
+static bool
+ikev2_helper_read_listener_fd(int fd, const struct provider_helper_msg_header *header,
+                              struct provider_helper_listener_fd *listener,
+                              int *listener_fd)
+{
+    uint8_t payload[PROVIDER_HELPER_LISTENER_FD_SIZE];
+    *listener_fd = -1;
+    if (!header || header->payload_len != sizeof(payload)
+        || !ikev2_helper_recv_listener_payload(fd, payload, sizeof(payload), listener_fd)
+        || !provider_helper_ipc_decode_listener_fd(payload, sizeof(payload), listener)
+        || !provider_helper_listener_fd_valid(listener, NULL, 0)
+        || !ikev2_helper_validate_listener_socket(*listener_fd, listener))
+    {
+        if (*listener_fd >= 0)
+        {
+            close(*listener_fd);
+            *listener_fd = -1;
+        }
+        return false;
+    }
+
+    return true;
+}
+
 static int
 ikev2_helper_loop(int fd)
 {
     uint64_t tx_sequence = 1;
     uint64_t last_rx_sequence = 0;
     bool configured = false;
+    struct ikev2_helper_listener listeners[IKEV2_HELPER_MAX_LISTENERS];
+    size_t listener_count = 0;
     struct provider_helper_runtime_config config;
     provider_helper_runtime_config_default(&config);
+    CLEAR(listeners);
+    for (size_t i = 0; i < SIZE(listeners); ++i)
+    {
+        listeners[i].fd = -1;
+    }
 
     if (!ikev2_helper_send_header(fd, PROVIDER_HELPER_MSG_HELLO, tx_sequence++, 1))
     {
@@ -240,6 +362,27 @@ ikev2_helper_loop(int fd)
                 configured = true;
                 break;
 
+            case PROVIDER_HELPER_MSG_LISTENER_FD:
+            {
+                int listener_fd = -1;
+                struct provider_helper_listener_fd listener;
+                if (!configured || listener_count >= SIZE(listeners)
+                    || !ikev2_helper_read_listener_fd(fd, &header, &listener, &listener_fd)
+                    || !ikev2_helper_send_header(fd, PROVIDER_HELPER_MSG_LISTENER_FD_ACK,
+                                                 tx_sequence++, header.sequence))
+                {
+                    if (listener_fd >= 0)
+                    {
+                        close(listener_fd);
+                    }
+                    return 6;
+                }
+                listeners[listener_count].fd = listener_fd;
+                listeners[listener_count].descriptor = listener;
+                ++listener_count;
+                break;
+            }
+
             case PROVIDER_HELPER_MSG_HELLO_REPLY:
             case PROVIDER_HELPER_MSG_PONG:
                 if (header.payload_len)
@@ -263,6 +406,12 @@ ikev2_helper_loop(int fd)
             default:
                 return 8;
         }
+    }
+
+    for (size_t i = 0; i < listener_count; ++i)
+    {
+        close(listeners[i].fd);
+        listeners[i].fd = -1;
     }
 
     return 0;

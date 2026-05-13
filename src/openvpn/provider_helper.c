@@ -180,6 +180,84 @@ provider_helper_supervisor_send_config(struct provider_helper_supervisor *superv
 }
 
 #ifndef _WIN32
+static bool
+provider_helper_send_fd_payload(int ipc_fd, const uint8_t *payload, size_t payload_len,
+                                int fd)
+{
+    char control[CMSG_SPACE(sizeof(fd))];
+    CLEAR(control);
+
+    struct iovec iov = {
+        .iov_base = (void *)payload,
+        .iov_len = payload_len,
+    };
+    struct msghdr msg = {
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_control = control,
+        .msg_controllen = sizeof(control),
+    };
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    if (!cmsg)
+    {
+        return false;
+    }
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(fd));
+    memcpy(CMSG_DATA(cmsg), &fd, sizeof(fd));
+
+    ssize_t written;
+    do
+    {
+        written = sendmsg(ipc_fd, &msg, 0);
+    } while (written < 0 && errno == EINTR);
+    return written == (ssize_t)payload_len;
+}
+
+bool
+provider_helper_supervisor_send_listener_fd(
+    struct provider_helper_supervisor *supervisor,
+    int fd,
+    const struct provider_helper_listener_fd *listener,
+    uint64_t correlation_id)
+{
+    if (!supervisor || supervisor->ipc_fd < 0 || fd < 0
+        || supervisor->state != PROVIDER_HELPER_STATE_READY
+        || !provider_helper_listener_fd_valid(listener, NULL, 0))
+    {
+        return false;
+    }
+
+    struct buffer header_buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_LISTENER_FD,
+        .sequence = supervisor->next_tx_sequence++,
+        .correlation_id = correlation_id,
+        .payload_len = PROVIDER_HELPER_LISTENER_FD_SIZE,
+    };
+
+    uint8_t payload[PROVIDER_HELPER_LISTENER_FD_SIZE];
+    const bool encoded =
+        provider_helper_ipc_write_header(&header_buf, &header)
+        && provider_helper_ipc_encode_listener_fd(payload, sizeof(payload), listener);
+    const bool written = encoded
+                         && provider_helper_write_all(supervisor->ipc_fd, BPTR(&header_buf),
+                                                      (size_t)BLEN(&header_buf))
+                         && provider_helper_send_fd_payload(supervisor->ipc_fd, payload,
+                                                            sizeof(payload), fd);
+    free_buf(&header_buf);
+    if (!written)
+    {
+        provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_DEGRADED);
+        provider_helper_close_ipc(supervisor);
+    }
+    return written;
+}
+
 bool
 provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
                                  const char *path,
@@ -395,6 +473,14 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
                 break;
             }
             provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_READY);
+            break;
+
+        case PROVIDER_HELPER_MSG_LISTENER_FD_ACK:
+            if (supervisor->state != PROVIDER_HELPER_STATE_READY)
+            {
+                provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);
+                provider_helper_close_ipc(supervisor);
+            }
             break;
 
         case PROVIDER_HELPER_MSG_PING:

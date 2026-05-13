@@ -112,6 +112,49 @@ provider_helper_runtime_config_valid(const struct provider_helper_runtime_config
     return true;
 }
 
+bool
+provider_helper_listener_fd_valid(const struct provider_helper_listener_fd *listener,
+                                  char *reason,
+                                  size_t reason_size)
+{
+    const uint32_t allowed_flags = PROVIDER_HELPER_LISTENER_FD_IKE
+                                   | PROVIDER_HELPER_LISTENER_FD_NATT;
+
+    if (!listener)
+    {
+        provider_helper_config_reason(reason, reason_size, "missing listener fd");
+        return false;
+    }
+    if (!listener->listener_id)
+    {
+        provider_helper_config_reason(reason, reason_size, "listener_id must be nonzero");
+        return false;
+    }
+    if (listener->family != AF_INET && listener->family != AF_INET6)
+    {
+        provider_helper_config_reason(reason, reason_size, "unsupported listener family");
+        return false;
+    }
+    if (listener->socket_type != SOCK_DGRAM || listener->protocol != IPPROTO_UDP)
+    {
+        provider_helper_config_reason(reason, reason_size, "listener must be UDP datagram");
+        return false;
+    }
+    if (!listener->local_port || listener->local_port > 65535)
+    {
+        provider_helper_config_reason(reason, reason_size, "listener port outside bounds");
+        return false;
+    }
+    if (!listener->flags || (listener->flags & ~allowed_flags))
+    {
+        provider_helper_config_reason(reason, reason_size, "unsupported listener flags");
+        return false;
+    }
+
+    provider_helper_config_reason(reason, reason_size, "ok");
+    return true;
+}
+
 static void
 provider_helper_wire_write_u16(uint8_t **pos, uint16_t value)
 {
@@ -204,6 +247,47 @@ provider_helper_ipc_decode_runtime_config(const uint8_t *src, size_t src_len,
     config->worker_limit = provider_helper_wire_read_u32(&pos);
 
     return (size_t)(pos - src) == PROVIDER_HELPER_RUNTIME_CONFIG_SIZE;
+}
+
+bool
+provider_helper_ipc_encode_listener_fd(uint8_t *dst, size_t dst_len,
+                                       const struct provider_helper_listener_fd *listener)
+{
+    if (!dst || dst_len < PROVIDER_HELPER_LISTENER_FD_SIZE || !listener)
+    {
+        return false;
+    }
+
+    uint8_t *pos = dst;
+    provider_helper_wire_write_u32(&pos, listener->listener_id);
+    provider_helper_wire_write_u32(&pos, listener->family);
+    provider_helper_wire_write_u32(&pos, listener->socket_type);
+    provider_helper_wire_write_u32(&pos, listener->protocol);
+    provider_helper_wire_write_u32(&pos, listener->local_port);
+    provider_helper_wire_write_u32(&pos, listener->flags);
+
+    return (size_t)(pos - dst) == PROVIDER_HELPER_LISTENER_FD_SIZE;
+}
+
+bool
+provider_helper_ipc_decode_listener_fd(const uint8_t *src, size_t src_len,
+                                       struct provider_helper_listener_fd *listener)
+{
+    if (!src || src_len != PROVIDER_HELPER_LISTENER_FD_SIZE || !listener)
+    {
+        return false;
+    }
+
+    const uint8_t *pos = src;
+    CLEAR(*listener);
+    listener->listener_id = provider_helper_wire_read_u32(&pos);
+    listener->family = provider_helper_wire_read_u32(&pos);
+    listener->socket_type = provider_helper_wire_read_u32(&pos);
+    listener->protocol = provider_helper_wire_read_u32(&pos);
+    listener->local_port = provider_helper_wire_read_u32(&pos);
+    listener->flags = provider_helper_wire_read_u32(&pos);
+
+    return (size_t)(pos - src) == PROVIDER_HELPER_LISTENER_FD_SIZE;
 }
 
 bool

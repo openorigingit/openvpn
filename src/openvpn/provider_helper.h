@@ -34,9 +34,13 @@
 #define PROVIDER_HELPER_CHILD_FD          3
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 28
+#define PROVIDER_HELPER_LISTENER_FD_SIZE    24
 
 #define PROVIDER_HELPER_CONFIG_FORCE_NATT (1u << 0)
 #define PROVIDER_HELPER_CONFIG_IPV4_ONLY  (1u << 1)
+
+#define PROVIDER_HELPER_LISTENER_FD_IKE   (1u << 0)
+#define PROVIDER_HELPER_LISTENER_FD_NATT  (1u << 1)
 
 #define PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_SAS 1024
 #define PROVIDER_HELPER_DEFAULT_COOKIE_THRESHOLD  128
@@ -66,6 +70,8 @@ enum provider_helper_msg_type {
     PROVIDER_HELPER_MSG_ERROR,
     PROVIDER_HELPER_MSG_CONFIGURE,
     PROVIDER_HELPER_MSG_CONFIGURE_ACK,
+    PROVIDER_HELPER_MSG_LISTENER_FD,
+    PROVIDER_HELPER_MSG_LISTENER_FD_ACK,
 };
 
 enum provider_helper_ipc_result {
@@ -99,6 +105,15 @@ struct provider_helper_runtime_config {
     uint32_t worker_limit;
 };
 
+struct provider_helper_listener_fd {
+    uint32_t listener_id;
+    uint32_t family;
+    uint32_t socket_type;
+    uint32_t protocol;
+    uint32_t local_port;
+    uint32_t flags;
+};
+
 struct provider_helper_supervisor {
     enum provider_helper_state state;
     int ipc_fd;
@@ -128,6 +143,9 @@ void provider_helper_runtime_config_default(struct provider_helper_runtime_confi
 bool provider_helper_runtime_config_valid(const struct provider_helper_runtime_config *config,
                                           char *reason,
                                           size_t reason_size);
+bool provider_helper_listener_fd_valid(const struct provider_helper_listener_fd *listener,
+                                       char *reason,
+                                       size_t reason_size);
 
 bool provider_helper_ipc_write_header(struct buffer *buf,
                                       const struct provider_helper_msg_header *header);
@@ -145,10 +163,16 @@ provider_helper_ipc_decode_header(const uint8_t *src, size_t src_len,
                                   uint64_t *last_sequence);
 bool provider_helper_ipc_write_runtime_config(struct buffer *buf,
                                               const struct provider_helper_runtime_config *config);
+bool provider_helper_ipc_write_listener_fd(struct buffer *buf,
+                                           const struct provider_helper_listener_fd *listener);
 bool provider_helper_ipc_encode_runtime_config(uint8_t *dst, size_t dst_len,
                                                const struct provider_helper_runtime_config *config);
 bool provider_helper_ipc_decode_runtime_config(const uint8_t *src, size_t src_len,
                                                struct provider_helper_runtime_config *config);
+bool provider_helper_ipc_encode_listener_fd(uint8_t *dst, size_t dst_len,
+                                            const struct provider_helper_listener_fd *listener);
+bool provider_helper_ipc_decode_listener_fd(const uint8_t *src, size_t src_len,
+                                            struct provider_helper_listener_fd *listener);
 bool provider_helper_negotiate_features(uint64_t supported_features,
                                         uint64_t remote_mandatory_features,
                                         uint64_t remote_optional_features,
@@ -159,6 +183,11 @@ bool provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervi
                                       const char *path,
                                       char *const argv[]);
 bool provider_helper_supervisor_reap(struct provider_helper_supervisor *supervisor);
+bool provider_helper_supervisor_send_listener_fd(
+    struct provider_helper_supervisor *supervisor,
+    int fd,
+    const struct provider_helper_listener_fd *listener,
+    uint64_t correlation_id);
 #endif
 void provider_helper_supervisor_stop(struct provider_helper_supervisor *supervisor);
 void provider_helper_event_set(struct provider_helper_supervisor *supervisor,
