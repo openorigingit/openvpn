@@ -1453,7 +1453,6 @@ ikev2_helper_extract_claimed_idi(
     sa->claimed_principal_ready = false;
     sa->claimed_principal_len = 0;
     sa->claimed_principal_id_type = 0;
-    sa->pending_auth_request_id = 0;
     ikev2_helper_secure_zero(sa->claimed_principal,
                              sizeof(sa->claimed_principal));
 
@@ -2358,6 +2357,13 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 return;
             }
             ++counters->ike_auth_inner_parsed;
+            if (sa->pending_auth_request_id)
+            {
+                ++counters->ike_auth_request_pending_dropped;
+                ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
             if (!ikev2_helper_extract_claimed_idi(sa, plaintext, plaintext_len,
                                                   &inner_summary))
             {
