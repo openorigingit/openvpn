@@ -51,6 +51,7 @@ struct ikev2_helper_ike_sa {
     uint64_t responder_spi;
     uint32_t listener_id;
     uint32_t message_id;
+    uint32_t retransmits;
     time_t created;
     time_t updated;
     struct sockaddr_storage peer;
@@ -597,6 +598,13 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 ikev2_helper_find_ike_sa(sa_table, listener, &header, &peer, peer_len);
             if (existing)
             {
+                if (existing->retransmits >= config->retransmit_limit)
+                {
+                    ++counters->ike_sa_init_retransmit_dropped;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+                ++existing->retransmits;
                 existing->updated = now;
                 ++counters->ike_sa_init_duplicate;
                 counters->ike_sa_active = sa_table->active;

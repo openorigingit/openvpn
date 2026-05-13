@@ -208,6 +208,7 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_sa_init_half_open_dropped = 3,
         .ike_sa_init_per_source_dropped = 9,
         .ike_sa_init_duplicate = 2,
+        .ike_sa_init_retransmit_dropped = 7,
         .ike_sa_table_full_dropped = 1,
         .ike_sa_active = 8,
         .ike_sa_expired = 6,
@@ -229,6 +230,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
     assert_int_equal(output.ike_sa_init_per_source_dropped,
                      input.ike_sa_init_per_source_dropped);
     assert_int_equal(output.ike_sa_init_duplicate, input.ike_sa_init_duplicate);
+    assert_int_equal(output.ike_sa_init_retransmit_dropped,
+                     input.ike_sa_init_retransmit_dropped);
     assert_int_equal(output.ike_sa_table_full_dropped,
                      input.ike_sa_table_full_dropped);
     assert_int_equal(output.ike_sa_active, input.ike_sa_active);
@@ -662,6 +665,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     supervisor.runtime_config.cookie_threshold = 2;
     supervisor.runtime_config.max_half_open_sas = 4;
     supervisor.runtime_config.max_half_open_sas_per_source = 2;
+    supervisor.runtime_config.retransmit_limit = 1;
     supervisor.runtime_config.half_open_timeout_seconds = 1;
 
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
@@ -727,6 +731,8 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     usleep(10000);
     test_send_ikev2_datagram_from(datagram_fd, port, 0x1122334455667788ull);
     usleep(10000);
+    test_send_ikev2_datagram_from(datagram_fd, port, 0x1122334455667788ull);
+    usleep(10000);
     test_send_ikev2_datagram_from(datagram_fd, port, 0x8877665544332211ull);
     usleep(10000);
     test_send_ikev2_datagram_from(datagram_fd, port, 0x1020304050607080ull);
@@ -748,10 +754,11 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 5);
-    assert_true(supervisor.runtime_stats.datagrams_rx >= 5);
-    assert_true(supervisor.runtime_stats.datagrams_parsed >= 5);
+    assert_true(supervisor.runtime_stats.datagrams_rx >= 6);
+    assert_true(supervisor.runtime_stats.datagrams_parsed >= 6);
     assert_true(supervisor.runtime_stats.ike_sa_init_accepted >= 2);
     assert_true(supervisor.runtime_stats.ike_sa_init_duplicate >= 1);
+    assert_true(supervisor.runtime_stats.ike_sa_init_retransmit_dropped >= 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_per_source_dropped >= 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_cookie_required >= 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 2);
