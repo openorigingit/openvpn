@@ -43,6 +43,10 @@ struct ikev2_helper_listener {
     struct provider_helper_listener_fd descriptor;
 };
 
+struct ikev2_helper_anti_dos {
+    uint32_t half_open_sas;
+};
+
 static void
 ikev2_helper_signal_handler(int signum)
 {
@@ -317,6 +321,7 @@ ikev2_helper_read_listener_fd(int fd, const struct provider_helper_msg_header *h
 static void
 ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                              const struct provider_helper_runtime_config *config,
+                             struct ikev2_helper_anti_dos *anti_dos,
                              struct provider_helper_runtime_stats *counters)
 {
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE + 1];
@@ -350,6 +355,23 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
     if (result == PROVIDER_HELPER_IKEV2_PARSE_OK)
     {
         ++counters->datagrams_parsed;
+        if (header.exchange_type == PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT
+            && !(header.flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE))
+        {
+            if (anti_dos->half_open_sas >= config->max_half_open_sas)
+            {
+                ++counters->ike_sa_init_half_open_dropped;
+            }
+            else if (anti_dos->half_open_sas >= config->cookie_threshold)
+            {
+                ++counters->ike_sa_init_cookie_required;
+            }
+            else
+            {
+                ++anti_dos->half_open_sas;
+                ++counters->ike_sa_init_accepted;
+            }
+        }
     }
     else
     {
@@ -366,9 +388,11 @@ ikev2_helper_loop(int fd)
     struct ikev2_helper_listener listeners[IKEV2_HELPER_MAX_LISTENERS];
     size_t listener_count = 0;
     struct provider_helper_runtime_stats counters;
+    struct ikev2_helper_anti_dos anti_dos;
     struct provider_helper_runtime_config config;
     provider_helper_runtime_config_default(&config);
     CLEAR(counters);
+    CLEAR(anti_dos);
     CLEAR(listeners);
     for (size_t i = 0; i < SIZE(listeners); ++i)
     {
@@ -423,7 +447,8 @@ ikev2_helper_loop(int fd)
             }
             if (pfds[i].revents & POLLIN)
             {
-                ikev2_helper_handle_datagram(&listeners[i - 1], &config, &counters);
+                ikev2_helper_handle_datagram(&listeners[i - 1], &config, &anti_dos,
+                                             &counters);
             }
         }
 

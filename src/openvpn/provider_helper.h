@@ -35,7 +35,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 28
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  32
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  56
 #define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
 #define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE 4
 
@@ -149,6 +149,9 @@ struct provider_helper_runtime_stats {
     uint64_t datagrams_parsed;
     uint64_t datagrams_malformed;
     uint64_t datagrams_oversize;
+    uint64_t ike_sa_init_accepted;
+    uint64_t ike_sa_init_cookie_required;
+    uint64_t ike_sa_init_half_open_dropped;
 };
 
 struct provider_helper_ikev2_header {
