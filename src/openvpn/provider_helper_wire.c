@@ -51,6 +51,8 @@ provider_helper_runtime_config_default(struct provider_helper_runtime_config *co
     config->max_cert_chain_bytes = PROVIDER_HELPER_DEFAULT_MAX_CERT_BYTES;
     config->retransmit_limit = PROVIDER_HELPER_DEFAULT_RETRANSMIT_LIMIT;
     config->worker_limit = PROVIDER_HELPER_DEFAULT_WORKER_LIMIT;
+    config->half_open_timeout_seconds =
+        PROVIDER_HELPER_DEFAULT_HALF_OPEN_TIMEOUT;
 }
 
 static void
@@ -105,6 +107,12 @@ provider_helper_runtime_config_valid(const struct provider_helper_runtime_config
     if (config->worker_limit == 0)
     {
         provider_helper_config_reason(reason, reason_size, "worker_limit must be nonzero");
+        return false;
+    }
+    if (config->half_open_timeout_seconds == 0)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "half_open_timeout_seconds must be nonzero");
         return false;
     }
 
@@ -265,6 +273,7 @@ provider_helper_ipc_encode_runtime_config(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u32(&pos, config->max_cert_chain_bytes);
     provider_helper_wire_write_u32(&pos, config->retransmit_limit);
     provider_helper_wire_write_u32(&pos, config->worker_limit);
+    provider_helper_wire_write_u32(&pos, config->half_open_timeout_seconds);
 
     return (size_t)(pos - dst) == PROVIDER_HELPER_RUNTIME_CONFIG_SIZE;
 }
@@ -287,6 +296,7 @@ provider_helper_ipc_decode_runtime_config(const uint8_t *src, size_t src_len,
     config->max_cert_chain_bytes = provider_helper_wire_read_u32(&pos);
     config->retransmit_limit = provider_helper_wire_read_u32(&pos);
     config->worker_limit = provider_helper_wire_read_u32(&pos);
+    config->half_open_timeout_seconds = provider_helper_wire_read_u32(&pos);
 
     return (size_t)(pos - src) == PROVIDER_HELPER_RUNTIME_CONFIG_SIZE;
 }
@@ -352,6 +362,7 @@ provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_duplicate);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_table_full_dropped);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_active);
+    provider_helper_wire_write_u64(&pos, stats->ike_sa_expired);
 
     return (size_t)(pos - dst) == PROVIDER_HELPER_RUNTIME_STATS_SIZE;
 }
@@ -377,6 +388,7 @@ provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
     stats->ike_sa_init_duplicate = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_table_full_dropped = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_active = provider_helper_wire_read_u64(&pos);
+    stats->ike_sa_expired = provider_helper_wire_read_u64(&pos);
 
     return (size_t)(pos - src) == PROVIDER_HELPER_RUNTIME_STATS_SIZE;
 }

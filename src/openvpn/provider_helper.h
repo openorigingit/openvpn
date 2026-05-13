@@ -33,9 +33,9 @@
 #define PROVIDER_HELPER_IPC_MAX_MESSAGE   (64 * 1024)
 #define PROVIDER_HELPER_CHILD_FD          3
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
-#define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 28
+#define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 32
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  80
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  88
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
 #define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE 4
@@ -63,6 +63,7 @@
 #define PROVIDER_HELPER_DEFAULT_MAX_CERT_BYTES    (64 * 1024)
 #define PROVIDER_HELPER_DEFAULT_RETRANSMIT_LIMIT  5
 #define PROVIDER_HELPER_DEFAULT_WORKER_LIMIT      4
+#define PROVIDER_HELPER_DEFAULT_HALF_OPEN_TIMEOUT 30
 
 enum provider_helper_state {
     PROVIDER_HELPER_STATE_DISABLED = 0,
@@ -166,6 +167,7 @@ struct provider_helper_runtime_config {
     uint32_t max_cert_chain_bytes;
     uint32_t retransmit_limit;
     uint32_t worker_limit;
+    uint32_t half_open_timeout_seconds;
 };
 
 struct provider_helper_listener_fd {
@@ -188,6 +190,7 @@ struct provider_helper_runtime_stats {
     uint64_t ike_sa_init_duplicate;
     uint64_t ike_sa_table_full_dropped;
     uint64_t ike_sa_active;
+    uint64_t ike_sa_expired;
 };
 
 struct provider_helper_xfrm_lease {

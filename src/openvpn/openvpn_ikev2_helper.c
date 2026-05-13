@@ -448,6 +448,48 @@ ikev2_helper_add_ike_sa(struct ikev2_helper_ike_sa_table *table,
 }
 
 static void
+ikev2_helper_clear_ike_sa(struct ikev2_helper_ike_sa_table *table,
+                          struct ikev2_helper_ike_sa *sa)
+{
+    if (!table || !sa || !sa->active)
+    {
+        return;
+    }
+
+    CLEAR(*sa);
+    if (table->active > 0)
+    {
+        --table->active;
+    }
+}
+
+static void
+ikev2_helper_expire_ike_sas(struct ikev2_helper_ike_sa_table *table,
+                            struct provider_helper_runtime_stats *counters,
+                            time_t now,
+                            uint32_t timeout_seconds)
+{
+    if (!table || !counters || timeout_seconds == 0)
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        if (!sa->active || sa->updated > now
+            || now - sa->updated < (time_t)timeout_seconds)
+        {
+            continue;
+        }
+
+        ikev2_helper_clear_ike_sa(table, sa);
+        ++counters->ike_sa_expired;
+    }
+    counters->ike_sa_active = table->active;
+}
+
+static void
 ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                              const struct provider_helper_runtime_config *config,
                              struct ikev2_helper_ike_sa_table *sa_table,
@@ -496,6 +538,10 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 return;
             }
 
+            const time_t now = time(NULL);
+            ikev2_helper_expire_ike_sas(sa_table, counters, now,
+                                        config->half_open_timeout_seconds);
+
             uint32_t max_half_open_sas = config->max_half_open_sas;
             if (max_half_open_sas > SIZE(sa_table->entries))
             {
@@ -506,7 +552,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 ikev2_helper_find_ike_sa(sa_table, listener, &header, &peer, peer_len);
             if (existing)
             {
-                existing->updated = time(NULL);
+                existing->updated = now;
                 ++counters->ike_sa_init_duplicate;
                 counters->ike_sa_active = sa_table->active;
                 return;
@@ -698,6 +744,8 @@ ikev2_helper_loop(int fd)
                 {
                     return 7;
                 }
+                ikev2_helper_expire_ike_sas(&sa_table, &counters, time(NULL),
+                                            config.half_open_timeout_seconds);
                 counters.ike_sa_active = sa_table.active;
                 if (!ikev2_helper_send_stats(fd, tx_sequence++, header.sequence,
                                              &counters))
