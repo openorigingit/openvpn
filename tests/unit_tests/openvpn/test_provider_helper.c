@@ -251,6 +251,7 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_sa_init_invalid_ke_response_failed = 21,
         .ike_sa_init_response_tx = 23,
         .ike_sa_init_response_failed = 24,
+        .ike_sa_init_keymat_ready = 25,
         .ike_sa_init_half_open_dropped = 3,
         .ike_sa_init_per_source_dropped = 9,
         .ike_sa_init_duplicate = 2,
@@ -298,6 +299,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_sa_init_response_tx);
     assert_int_equal(output.ike_sa_init_response_failed,
                      input.ike_sa_init_response_failed);
+    assert_int_equal(output.ike_sa_init_keymat_ready,
+                     input.ike_sa_init_keymat_ready);
     assert_int_equal(output.ike_sa_init_half_open_dropped,
                      input.ike_sa_init_half_open_dropped);
     assert_int_equal(output.ike_sa_init_per_source_dropped,
@@ -1693,6 +1696,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_true(supervisor.runtime_stats.datagrams_parsed >= 18);
     assert_true(supervisor.runtime_stats.ike_sa_init_accepted >= 4);
     assert_true(supervisor.runtime_stats.ike_sa_init_state_failed >= 1);
+    assert_true(supervisor.runtime_stats.ike_sa_init_keymat_ready >= 4);
     assert_true(supervisor.runtime_stats.ike_sa_init_response_tx >= 5);
     assert_int_equal(supervisor.runtime_stats.ike_sa_init_response_failed, 0);
     assert_true(supervisor.runtime_stats.ike_sa_init_duplicate >= 1);

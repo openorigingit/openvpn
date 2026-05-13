@@ -446,6 +446,7 @@ provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
                                    stats->ike_sa_init_invalid_ke_response_failed);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_response_tx);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_response_failed);
+    provider_helper_wire_write_u64(&pos, stats->ike_sa_init_keymat_ready);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_half_open_dropped);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_per_source_dropped);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_duplicate);
@@ -494,6 +495,7 @@ provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
         provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_response_tx = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_response_failed = provider_helper_wire_read_u64(&pos);
+    stats->ike_sa_init_keymat_ready = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_half_open_dropped = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_per_source_dropped = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_duplicate = provider_helper_wire_read_u64(&pos);

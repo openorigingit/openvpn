@@ -38,6 +38,7 @@
 #include <openssl/opensslv.h>
 #include <openssl/rand.h>
 #elif defined(ENABLE_CRYPTO_MBEDTLS)
+#include <mbedtls/ecdh.h>
 #include <mbedtls/ecp.h>
 #include <mbedtls/md.h>
 #include <mbedtls/version.h>
@@ -63,6 +64,8 @@
 #define IKEV2_HELPER_RESPONDER_NONCE_BYTES 32
 #define IKEV2_HELPER_ECP_256_COORD_BYTES 32
 #define IKEV2_HELPER_ECP_256_PRIVATE_BYTES 32
+#define IKEV2_HELPER_ECP_256_SHARED_SECRET_BYTES 32
+#define IKEV2_HELPER_PRF_SHA256_BYTES 32
 
 static volatile sig_atomic_t helper_stop;
 
@@ -89,6 +92,10 @@ struct ikev2_helper_ike_sa {
     uint8_t responder_ke[PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES];
     size_t responder_private_key_len;
     uint8_t responder_private_key[IKEV2_HELPER_ECP_256_PRIVATE_BYTES];
+    size_t shared_secret_len;
+    uint8_t shared_secret[IKEV2_HELPER_ECP_256_SHARED_SECRET_BYTES];
+    size_t skeyseed_len;
+    uint8_t skeyseed[IKEV2_HELPER_PRF_SHA256_BYTES];
     time_t created;
     time_t updated;
     struct provider_helper_ikev2_sa_selection selection;
@@ -141,6 +148,10 @@ ikev2_helper_secure_zero(void *data, size_t len)
         *pos++ = 0;
     }
 }
+
+static bool ikev2_helper_hmac_sha256(const uint8_t *key, size_t key_len,
+                                     const uint8_t *input, size_t input_len,
+                                     uint8_t *tag, size_t tag_len);
 
 static bool
 ikev2_helper_random_bytes(uint8_t *dst, size_t dst_len)
@@ -374,6 +385,156 @@ ikev2_helper_ecp256_public_key_valid(const uint8_t *public_key,
     (void)public_key;
     (void)public_key_len;
 #endif
+    return ret;
+}
+
+static bool
+ikev2_helper_compute_ecp256_shared_secret(const uint8_t *peer_public_key,
+                                          size_t peer_public_key_len,
+                                          const uint8_t *private_key,
+                                          size_t private_key_len,
+                                          uint8_t *shared_secret,
+                                          size_t shared_secret_len)
+{
+    if (!peer_public_key
+        || peer_public_key_len != PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES
+        || !private_key
+        || private_key_len != IKEV2_HELPER_ECP_256_PRIVATE_BYTES
+        || !shared_secret
+        || shared_secret_len != IKEV2_HELPER_ECP_256_SHARED_SECRET_BYTES
+        || !ikev2_helper_ecp256_public_key_valid(peer_public_key,
+                                                 peer_public_key_len))
+    {
+        return false;
+    }
+
+    memset(shared_secret, 0, shared_secret_len);
+    bool ret = false;
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    EC_GROUP *group = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
+    EC_POINT *peer = group ? EC_POINT_new(group) : NULL;
+    EC_POINT *shared = group ? EC_POINT_new(group) : NULL;
+    BIGNUM *priv =
+        BN_bin2bn(private_key, IKEV2_HELPER_ECP_256_PRIVATE_BYTES, NULL);
+    BIGNUM *x = BN_bin2bn(peer_public_key, IKEV2_HELPER_ECP_256_COORD_BYTES,
+                          NULL);
+    BIGNUM *y =
+        BN_bin2bn(peer_public_key + IKEV2_HELPER_ECP_256_COORD_BYTES,
+                  IKEV2_HELPER_ECP_256_COORD_BYTES, NULL);
+    BIGNUM *shared_x = BN_new();
+    BIGNUM *shared_y = BN_new();
+
+    ret = group && peer && shared && priv && x && y && shared_x && shared_y
+          && EC_POINT_set_affine_coordinates(group, peer, x, y, NULL) == 1
+          && EC_POINT_mul(group, shared, NULL, peer, priv, NULL) == 1
+          && !EC_POINT_is_at_infinity(group, shared)
+          && EC_POINT_get_affine_coordinates(group, shared, shared_x, shared_y,
+                                             NULL) == 1
+          && BN_bn2binpad(shared_x, shared_secret,
+                          IKEV2_HELPER_ECP_256_SHARED_SECRET_BYTES)
+             == IKEV2_HELPER_ECP_256_SHARED_SECRET_BYTES;
+
+    BN_clear_free(priv);
+    BN_free(x);
+    BN_free(y);
+    BN_clear_free(shared_x);
+    BN_clear_free(shared_y);
+    EC_POINT_free(shared);
+    EC_POINT_free(peer);
+    EC_GROUP_free(group);
+#elif defined(ENABLE_CRYPTO_MBEDTLS)
+    mbedtls_entropy_context entropy;
+    mbedtls_ctr_drbg_context ctr_drbg;
+    mbedtls_ecp_group group;
+    mbedtls_ecp_point peer;
+    mbedtls_mpi priv;
+    mbedtls_mpi shared;
+    const unsigned char personalization[] =
+        "openvpn-ikev2-helper-ecp256-shared";
+
+    mbedtls_entropy_init(&entropy);
+    mbedtls_ctr_drbg_init(&ctr_drbg);
+    mbedtls_ecp_group_init(&group);
+    mbedtls_ecp_point_init(&peer);
+    mbedtls_mpi_init(&priv);
+    mbedtls_mpi_init(&shared);
+
+    if (mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+                              personalization,
+                              sizeof(personalization) - 1) == 0
+        && mbedtls_ecp_group_load(&group, MBEDTLS_ECP_DP_SECP256R1) == 0
+        && mbedtls_mpi_read_binary(&peer.X, peer_public_key,
+                                   IKEV2_HELPER_ECP_256_COORD_BYTES) == 0
+        && mbedtls_mpi_read_binary(
+               &peer.Y, peer_public_key + IKEV2_HELPER_ECP_256_COORD_BYTES,
+               IKEV2_HELPER_ECP_256_COORD_BYTES) == 0
+        && mbedtls_mpi_lset(&peer.Z, 1) == 0
+        && mbedtls_mpi_read_binary(&priv, private_key, private_key_len) == 0
+        && mbedtls_ecp_check_pubkey(&group, &peer) == 0
+        && mbedtls_ecdh_compute_shared(&group, &shared, &peer, &priv,
+                                       mbedtls_ctr_drbg_random,
+                                       &ctr_drbg) == 0)
+    {
+        ret = mbedtls_mpi_write_binary(&shared, shared_secret,
+                                       shared_secret_len) == 0;
+    }
+
+    mbedtls_mpi_free(&shared);
+    mbedtls_mpi_free(&priv);
+    mbedtls_ecp_point_free(&peer);
+    mbedtls_ecp_group_free(&group);
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+    mbedtls_entropy_free(&entropy);
+#else
+    (void)peer_public_key;
+    (void)peer_public_key_len;
+    (void)private_key;
+    (void)private_key_len;
+#endif
+
+    if (!ret)
+    {
+        ikev2_helper_secure_zero(shared_secret, shared_secret_len);
+    }
+    return ret;
+}
+
+static bool
+ikev2_helper_derive_skeyseed(const uint8_t *initiator_nonce,
+                             size_t initiator_nonce_len,
+                             const uint8_t *responder_nonce,
+                             size_t responder_nonce_len,
+                             const uint8_t *shared_secret,
+                             size_t shared_secret_len,
+                             uint8_t *skeyseed,
+                             size_t skeyseed_len)
+{
+    if (!initiator_nonce
+        || initiator_nonce_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+        || initiator_nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES
+        || !responder_nonce
+        || responder_nonce_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+        || responder_nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES
+        || !shared_secret
+        || shared_secret_len != IKEV2_HELPER_ECP_256_SHARED_SECRET_BYTES
+        || !skeyseed || skeyseed_len != IKEV2_HELPER_PRF_SHA256_BYTES)
+    {
+        return false;
+    }
+
+    uint8_t nonce_key[2 * PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES];
+    memcpy(nonce_key, initiator_nonce, initiator_nonce_len);
+    memcpy(nonce_key + initiator_nonce_len, responder_nonce,
+           responder_nonce_len);
+
+    const bool ret = ikev2_helper_hmac_sha256(
+        nonce_key, initiator_nonce_len + responder_nonce_len,
+        shared_secret, shared_secret_len, skeyseed, skeyseed_len);
+    ikev2_helper_secure_zero(nonce_key, sizeof(nonce_key));
+    if (!ret)
+    {
+        ikev2_helper_secure_zero(skeyseed, skeyseed_len);
+    }
     return ret;
 }
 
@@ -929,6 +1090,23 @@ ikev2_helper_store_ike_sa_init_material(
     {
         return false;
     }
+    sa->shared_secret_len = sizeof(sa->shared_secret);
+    if (!ikev2_helper_compute_ecp256_shared_secret(
+            sa->initiator_ke, sa->initiator_ke_len,
+            sa->responder_private_key, sa->responder_private_key_len,
+            sa->shared_secret, sa->shared_secret_len))
+    {
+        return false;
+    }
+    sa->skeyseed_len = sizeof(sa->skeyseed);
+    if (!ikev2_helper_derive_skeyseed(
+            sa->initiator_nonce, sa->initiator_nonce_len,
+            sa->responder_nonce, sa->responder_nonce_len,
+            sa->shared_secret, sa->shared_secret_len,
+            sa->skeyseed, sa->skeyseed_len))
+    {
+        return false;
+    }
     return true;
 }
 
@@ -1340,6 +1518,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 else
                 {
                     ++counters->ike_sa_init_accepted;
+                    ++counters->ike_sa_init_keymat_ready;
                     if (ikev2_helper_send_sa_init_response(
                             listener, &peer, peer_len, &header, sa))
                     {

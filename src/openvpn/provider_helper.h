@@ -35,7 +35,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 36
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  216
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  224
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
 #define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE 4
@@ -238,6 +238,7 @@ struct provider_helper_runtime_stats {
     uint64_t ike_sa_init_invalid_ke_response_failed;
     uint64_t ike_sa_init_response_tx;
     uint64_t ike_sa_init_response_failed;
+    uint64_t ike_sa_init_keymat_ready;
     uint64_t ike_sa_init_half_open_dropped;
     uint64_t ike_sa_init_per_source_dropped;
     uint64_t ike_sa_init_duplicate;
