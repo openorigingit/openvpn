@@ -743,6 +743,31 @@ ikev2_helper_send_no_proposal_response(
     return sent == (ssize_t)response_len;
 }
 
+static bool
+ikev2_helper_send_invalid_ke_response(
+    const struct ikev2_helper_listener *listener,
+    const struct sockaddr_storage *peer,
+    socklen_t peer_len,
+    const struct provider_helper_ikev2_header *header)
+{
+    uint8_t response[PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE
+                     + PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                     + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE + 2];
+    size_t response_len = 0;
+
+    if (!listener || !peer || !header
+        || !provider_helper_ikev2_build_invalid_ke_response(
+            response, sizeof(response), header,
+            PROVIDER_HELPER_IKEV2_DH_ECP_256, &response_len))
+    {
+        return false;
+    }
+
+    const ssize_t sent = sendto(listener->fd, response, response_len, 0,
+                                (const struct sockaddr *)peer, peer_len);
+    return sent == (ssize_t)response_len;
+}
+
 static void
 ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                              const struct provider_helper_runtime_config *config,
@@ -867,7 +892,23 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 const enum provider_helper_ikev2_parse_result select_result =
                     provider_helper_ikev2_select_ike_sa_init_proposal(
                         packet, (size_t)n, &summary, &selection);
-                if (select_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+                if (select_result
+                    == PROVIDER_HELPER_IKEV2_PARSE_INVALID_KE_PAYLOAD)
+                {
+                    ++counters->ike_sa_init_invalid_ke;
+                    if (ikev2_helper_send_invalid_ke_response(
+                            listener, &peer, peer_len, &header))
+                    {
+                        ++counters->ike_sa_init_invalid_ke_response_tx;
+                    }
+                    else
+                    {
+                        ++counters->ike_sa_init_invalid_ke_response_failed;
+                    }
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+                else if (select_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
                 {
                     ++counters->ike_sa_init_no_proposal;
                     if (ikev2_helper_send_no_proposal_response(

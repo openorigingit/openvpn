@@ -439,6 +439,11 @@ provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
                                    stats->ike_sa_init_no_proposal_response_tx);
     provider_helper_wire_write_u64(&pos,
                                    stats->ike_sa_init_no_proposal_response_failed);
+    provider_helper_wire_write_u64(&pos, stats->ike_sa_init_invalid_ke);
+    provider_helper_wire_write_u64(&pos,
+                                   stats->ike_sa_init_invalid_ke_response_tx);
+    provider_helper_wire_write_u64(&pos,
+                                   stats->ike_sa_init_invalid_ke_response_failed);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_half_open_dropped);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_per_source_dropped);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_duplicate);
@@ -478,6 +483,11 @@ provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
     stats->ike_sa_init_no_proposal_response_tx =
         provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_no_proposal_response_failed =
+        provider_helper_wire_read_u64(&pos);
+    stats->ike_sa_init_invalid_ke = provider_helper_wire_read_u64(&pos);
+    stats->ike_sa_init_invalid_ke_response_tx =
+        provider_helper_wire_read_u64(&pos);
+    stats->ike_sa_init_invalid_ke_response_failed =
         provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_half_open_dropped = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_per_source_dropped = provider_helper_wire_read_u64(&pos);
@@ -586,6 +596,9 @@ provider_helper_ikev2_parse_result_name(enum provider_helper_ikev2_parse_result 
 
         case PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN:
             return "no-proposal-chosen";
+
+        case PROVIDER_HELPER_IKEV2_PARSE_INVALID_KE_PAYLOAD:
+            return "invalid-ke-payload";
 
         default:
             return "unknown";
@@ -1333,6 +1346,7 @@ provider_helper_ikev2_select_ike_sa_init_proposal(
                 *selection = candidate;
                 return PROVIDER_HELPER_IKEV2_PARSE_OK;
             }
+            return PROVIDER_HELPER_IKEV2_PARSE_INVALID_KE_PAYLOAD;
         }
 
         pos += proposal_len;
@@ -1553,6 +1567,31 @@ provider_helper_ikev2_build_no_proposal_response(
     return provider_helper_ikev2_build_notify_response(
         dst, dst_len, request, PROVIDER_HELPER_IKEV2_NOTIFY_NO_PROPOSAL_CHOSEN,
         NULL, 0, out_len);
+}
+
+bool
+provider_helper_ikev2_build_invalid_ke_response(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_ikev2_header *request,
+    uint16_t dh_group,
+    size_t *out_len)
+{
+    if (!dh_group)
+    {
+        if (out_len)
+        {
+            *out_len = 0;
+        }
+        return false;
+    }
+
+    uint8_t data[2];
+    uint8_t *pos = data;
+    provider_helper_wire_write_u16(&pos, dh_group);
+    return provider_helper_ikev2_build_notify_response(
+        dst, dst_len, request, PROVIDER_HELPER_IKEV2_NOTIFY_INVALID_KE_PAYLOAD,
+        data, sizeof(data), out_len);
 }
 
 static bool
