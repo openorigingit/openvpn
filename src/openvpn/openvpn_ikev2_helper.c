@@ -349,12 +349,9 @@ ikev2_helper_read_xfrm_lease(int fd, const struct provider_helper_msg_header *he
 }
 
 static bool
-ikev2_helper_peer_equal(const struct sockaddr_storage *a, socklen_t a_len,
-                        const struct sockaddr_storage *b, socklen_t b_len)
+ikev2_helper_peer_address_equal(const struct sockaddr_storage *a,
+                                const struct sockaddr_storage *b)
 {
-    (void)a_len;
-    (void)b_len;
-
     if (!a || !b || a->ss_family != b->ss_family)
     {
         return false;
@@ -366,16 +363,14 @@ ikev2_helper_peer_equal(const struct sockaddr_storage *a, socklen_t a_len,
         {
             const struct sockaddr_in *a4 = (const struct sockaddr_in *)a;
             const struct sockaddr_in *b4 = (const struct sockaddr_in *)b;
-            return a4->sin_port == b4->sin_port
-                   && a4->sin_addr.s_addr == b4->sin_addr.s_addr;
+            return a4->sin_addr.s_addr == b4->sin_addr.s_addr;
         }
 
         case AF_INET6:
         {
             const struct sockaddr_in6 *a6 = (const struct sockaddr_in6 *)a;
             const struct sockaddr_in6 *b6 = (const struct sockaddr_in6 *)b;
-            return a6->sin6_port == b6->sin6_port
-                   && a6->sin6_scope_id == b6->sin6_scope_id
+            return a6->sin6_scope_id == b6->sin6_scope_id
                    && memcmp(&a6->sin6_addr, &b6->sin6_addr,
                              sizeof(a6->sin6_addr)) == 0;
         }
@@ -383,6 +378,56 @@ ikev2_helper_peer_equal(const struct sockaddr_storage *a, socklen_t a_len,
         default:
             return false;
     }
+}
+
+static bool
+ikev2_helper_peer_equal(const struct sockaddr_storage *a, socklen_t a_len,
+                        const struct sockaddr_storage *b, socklen_t b_len)
+{
+    (void)a_len;
+    (void)b_len;
+
+    if (!ikev2_helper_peer_address_equal(a, b))
+    {
+        return false;
+    }
+
+    switch (a->ss_family)
+    {
+        case AF_INET:
+            return ((const struct sockaddr_in *)a)->sin_port
+                   == ((const struct sockaddr_in *)b)->sin_port;
+
+        case AF_INET6:
+            return ((const struct sockaddr_in6 *)a)->sin6_port
+                   == ((const struct sockaddr_in6 *)b)->sin6_port;
+
+        default:
+            return false;
+    }
+}
+
+static uint32_t
+ikev2_helper_count_ike_sas_for_source(
+    const struct ikev2_helper_ike_sa_table *table,
+    const struct sockaddr_storage *peer)
+{
+    if (!table || !peer)
+    {
+        return 0;
+    }
+
+    uint32_t count = 0;
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        const struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        if (sa->active && ikev2_helper_peer_address_equal(&sa->peer, peer))
+        {
+            ++count;
+        }
+    }
+
+    return count;
 }
 
 static struct ikev2_helper_ike_sa *
@@ -561,6 +606,11 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
             if (sa_table->active >= max_half_open_sas)
             {
                 ++counters->ike_sa_init_half_open_dropped;
+            }
+            else if (ikev2_helper_count_ike_sas_for_source(sa_table, &peer)
+                     >= config->max_half_open_sas_per_source)
+            {
+                ++counters->ike_sa_init_per_source_dropped;
             }
             else if (sa_table->active >= config->cookie_threshold)
             {

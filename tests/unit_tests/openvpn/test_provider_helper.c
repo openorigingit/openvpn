@@ -145,6 +145,8 @@ test_provider_helper_runtime_config_roundtrip(void **state)
     assert_int_equal(output.worker_limit, input.worker_limit);
     assert_int_equal(output.half_open_timeout_seconds,
                      input.half_open_timeout_seconds);
+    assert_int_equal(output.max_half_open_sas_per_source,
+                     input.max_half_open_sas_per_source);
 
     input.cookie_threshold = input.max_half_open_sas + 1;
     assert_false(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
@@ -153,6 +155,10 @@ test_provider_helper_runtime_config_roundtrip(void **state)
     input.half_open_timeout_seconds = 0;
     assert_false(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
     assert_non_null(strstr(reason, "half_open_timeout_seconds"));
+    input.half_open_timeout_seconds = PROVIDER_HELPER_DEFAULT_HALF_OPEN_TIMEOUT;
+    input.max_half_open_sas_per_source = input.max_half_open_sas + 1;
+    assert_false(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "max_half_open_sas_per_source"));
 }
 
 static void
@@ -200,6 +206,7 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_sa_init_accepted = 5,
         .ike_sa_init_cookie_required = 4,
         .ike_sa_init_half_open_dropped = 3,
+        .ike_sa_init_per_source_dropped = 9,
         .ike_sa_init_duplicate = 2,
         .ike_sa_table_full_dropped = 1,
         .ike_sa_active = 8,
@@ -219,6 +226,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_sa_init_cookie_required);
     assert_int_equal(output.ike_sa_init_half_open_dropped,
                      input.ike_sa_init_half_open_dropped);
+    assert_int_equal(output.ike_sa_init_per_source_dropped,
+                     input.ike_sa_init_per_source_dropped);
     assert_int_equal(output.ike_sa_init_duplicate, input.ike_sa_init_duplicate);
     assert_int_equal(output.ike_sa_table_full_dropped,
                      input.ike_sa_table_full_dropped);
@@ -601,6 +610,24 @@ test_create_udp_listener(uint16_t *port)
     return fd;
 }
 
+static int
+test_create_udp_sender(uint32_t source_addr)
+{
+    int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    assert_true(fd >= 0);
+    if (source_addr)
+    {
+        struct sockaddr_in addr;
+        CLEAR(addr);
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(source_addr);
+        addr.sin_port = 0;
+        assert_int_equal(bind(fd, (struct sockaddr *)&addr, sizeof(addr)), 0);
+    }
+
+    return fd;
+}
+
 static void
 write_helper_header_fd(int fd, uint32_t type, uint64_t sequence,
                        uint64_t correlation_id)
@@ -633,7 +660,8 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     struct provider_helper_supervisor supervisor;
     provider_helper_supervisor_init(&supervisor);
     supervisor.runtime_config.cookie_threshold = 2;
-    supervisor.runtime_config.max_half_open_sas = 3;
+    supervisor.runtime_config.max_half_open_sas = 4;
+    supervisor.runtime_config.max_half_open_sas_per_source = 2;
     supervisor.runtime_config.half_open_timeout_seconds = 1;
 
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
@@ -693,8 +721,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 4);
 
-    int datagram_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    assert_true(datagram_fd >= 0);
+    int datagram_fd = test_create_udp_sender(0);
 
     test_send_ikev2_datagram_from(datagram_fd, port, 0x1122334455667788ull);
     usleep(10000);
@@ -705,6 +732,11 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     test_send_ikev2_datagram_from(datagram_fd, port, 0x1020304050607080ull);
     usleep(10000);
     close(datagram_fd);
+
+    int cookie_fd = test_create_udp_sender(0x7f000002u);
+    test_send_ikev2_datagram_from(cookie_fd, port, 0x0102030405060708ull);
+    usleep(10000);
+    close(cookie_fd);
     close(listener_fd);
 
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST, 4, 90);
@@ -716,10 +748,11 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 5);
-    assert_true(supervisor.runtime_stats.datagrams_rx >= 4);
-    assert_true(supervisor.runtime_stats.datagrams_parsed >= 4);
+    assert_true(supervisor.runtime_stats.datagrams_rx >= 5);
+    assert_true(supervisor.runtime_stats.datagrams_parsed >= 5);
     assert_true(supervisor.runtime_stats.ike_sa_init_accepted >= 2);
     assert_true(supervisor.runtime_stats.ike_sa_init_duplicate >= 1);
+    assert_true(supervisor.runtime_stats.ike_sa_init_per_source_dropped >= 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_cookie_required >= 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 2);
 
