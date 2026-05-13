@@ -120,6 +120,19 @@ provider_helper_supervisor_set_state(struct provider_helper_supervisor *supervis
 }
 
 void
+provider_helper_supervisor_set_auth_callback(
+    struct provider_helper_supervisor *supervisor,
+    provider_helper_auth_request_cb cb,
+    void *arg)
+{
+    if (supervisor)
+    {
+        supervisor->auth_request_cb = cb;
+        supervisor->auth_request_arg = arg;
+    }
+}
+
+void
 provider_helper_supervisor_free(struct provider_helper_supervisor *supervisor)
 {
     if (!supervisor)
@@ -183,26 +196,79 @@ provider_helper_supervisor_send_config(struct provider_helper_supervisor *superv
 }
 
 static bool
-provider_helper_supervisor_send_auth_deny(
+provider_helper_auth_response_set_reason(
+    struct provider_helper_auth_response *response,
+    const char *reason)
+{
+    if (!response || !reason)
+    {
+        return false;
+    }
+    const size_t reason_len = strlen(reason);
+    if (!reason_len || reason_len >= sizeof(response->reason))
+    {
+        return false;
+    }
+    memcpy(response->reason, reason, reason_len);
+    response->reason_len = (uint32_t)reason_len;
+    return true;
+}
+
+static bool
+provider_helper_supervisor_default_auth_deny(
+    const struct provider_helper_auth_request *request,
+    const char *reason,
+    struct provider_helper_auth_response *response)
+{
+    if (!request || !response)
+    {
+        return false;
+    }
+    CLEAR(*response);
+    response->request_id = request->request_id;
+    response->decision = PROVIDER_HELPER_AUTH_DENY;
+    return provider_helper_auth_response_set_reason(response, reason);
+}
+
+static bool
+provider_helper_supervisor_build_auth_response(
     struct provider_helper_supervisor *supervisor,
     const struct provider_helper_auth_request *request,
-    uint64_t correlation_id)
+    struct provider_helper_auth_response *response)
 {
-    if (!supervisor || supervisor->ipc_fd < 0 || !request
-        || supervisor->state != PROVIDER_HELPER_STATE_READY)
+    if (!supervisor || !request || !response)
     {
         return false;
     }
 
-    struct provider_helper_auth_response response = {
-        .request_id = request->request_id,
-        .decision = PROVIDER_HELPER_AUTH_DENY,
-    };
-    const char reason[] = "provider auth policy bridge not wired";
-    static_assert(sizeof(reason) <= PROVIDER_HELPER_AUTH_REASON_SIZE,
-                  "auth deny reason fits");
-    memcpy(response.reason, reason, sizeof(reason) - 1);
-    response.reason_len = (uint32_t)strlen(reason);
+    if (supervisor->auth_request_cb
+        && supervisor->auth_request_cb(supervisor->auth_request_arg, request,
+                                       response)
+        && provider_helper_auth_response_valid(response, NULL, 0))
+    {
+        return true;
+    }
+
+    return provider_helper_supervisor_default_auth_deny(
+        request,
+        supervisor->auth_request_cb ? "provider auth policy callback failed"
+                                    : "provider auth policy bridge not wired",
+        response)
+           && provider_helper_auth_response_valid(response, NULL, 0);
+}
+
+static bool
+provider_helper_supervisor_send_auth_response(
+    struct provider_helper_supervisor *supervisor,
+    const struct provider_helper_auth_response *response,
+    uint64_t correlation_id)
+{
+    if (!supervisor || supervisor->ipc_fd < 0 || !response
+        || supervisor->state != PROVIDER_HELPER_STATE_READY
+        || !provider_helper_auth_response_valid(response, NULL, 0))
+    {
+        return false;
+    }
 
     struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE
                                   + PROVIDER_HELPER_AUTH_RESPONSE_SIZE);
@@ -218,7 +284,7 @@ provider_helper_supervisor_send_auth_deny(
 
     const bool encoded = provider_helper_ipc_write_header(&buf, &header)
                          && provider_helper_ipc_write_auth_response(
-                             &buf, &response);
+                             &buf, response);
     const bool written = encoded
                          && provider_helper_write_all(supervisor->ipc_fd, BPTR(&buf),
                                                       (size_t)BLEN(&buf));
@@ -545,10 +611,13 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
             && supervisor->state == PROVIDER_HELPER_STATE_READY)
         {
             struct provider_helper_auth_request request;
+            struct provider_helper_auth_response response;
             if (!provider_helper_ipc_decode_auth_request(
                     supervisor->payload_buf, payload_len, &request)
-                || !provider_helper_supervisor_send_auth_deny(
-                    supervisor, &request, header.sequence))
+                || !provider_helper_supervisor_build_auth_response(
+                    supervisor, &request, &response)
+                || !provider_helper_supervisor_send_auth_response(
+                    supervisor, &response, header.sequence))
             {
                 provider_helper_supervisor_set_state(
                     supervisor, PROVIDER_HELPER_STATE_FAILED);

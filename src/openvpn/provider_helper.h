@@ -237,6 +237,11 @@ struct provider_helper_auth_response {
     char reason[PROVIDER_HELPER_AUTH_REASON_SIZE];
 };
 
+typedef bool (*provider_helper_auth_request_cb)(
+    void *arg,
+    const struct provider_helper_auth_request *request,
+    struct provider_helper_auth_response *response);
+
 struct provider_helper_runtime_config {
     uint32_t flags;
     uint32_t max_half_open_sas;
@@ -405,6 +410,8 @@ struct provider_helper_supervisor {
     uint8_t payload_buf[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     size_t payload_len;
     size_t payload_received;
+    provider_helper_auth_request_cb auth_request_cb;
+    void *auth_request_arg;
 };
 
 const char *provider_helper_state_name(enum provider_helper_state state);
@@ -416,6 +423,10 @@ void provider_helper_supervisor_init(struct provider_helper_supervisor *supervis
 void provider_helper_supervisor_free(struct provider_helper_supervisor *supervisor);
 void provider_helper_supervisor_set_state(struct provider_helper_supervisor *supervisor,
                                           enum provider_helper_state state);
+void provider_helper_supervisor_set_auth_callback(
+    struct provider_helper_supervisor *supervisor,
+    provider_helper_auth_request_cb cb,
+    void *arg);
 void provider_helper_runtime_config_default(struct provider_helper_runtime_config *config);
 bool provider_helper_runtime_config_valid(const struct provider_helper_runtime_config *config,
                                           char *reason,

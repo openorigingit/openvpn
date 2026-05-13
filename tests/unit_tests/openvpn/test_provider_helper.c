@@ -2076,6 +2076,120 @@ write_helper_header_fd(int fd, uint32_t type, uint64_t sequence,
 }
 
 static void
+write_helper_auth_request_fd(int fd, uint64_t sequence, uint64_t correlation_id,
+                             const struct provider_helper_auth_request *request)
+{
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE
+                                  + PROVIDER_HELPER_AUTH_REQUEST_SIZE);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_AUTH_REQUEST,
+        .sequence = sequence,
+        .correlation_id = correlation_id,
+        .payload_len = PROVIDER_HELPER_AUTH_REQUEST_SIZE,
+    };
+
+    assert_true(provider_helper_ipc_write_header(&buf, &header));
+    assert_true(provider_helper_ipc_write_auth_request(&buf, request));
+    assert_int_equal(write(fd, BPTR(&buf), (size_t)BLEN(&buf)), BLEN(&buf));
+    free_buf(&buf);
+}
+
+struct test_provider_helper_auth_cb_state {
+    unsigned int calls;
+    uint64_t request_id;
+};
+
+static bool
+test_provider_helper_auth_cb(void *arg,
+                             const struct provider_helper_auth_request *request,
+                             struct provider_helper_auth_response *response)
+{
+    struct test_provider_helper_auth_cb_state *state = arg;
+    assert_non_null(state);
+    assert_non_null(request);
+    assert_non_null(response);
+
+    ++state->calls;
+    state->request_id = request->request_id;
+    CLEAR(*response);
+    response->request_id = request->request_id;
+    response->decision = PROVIDER_HELPER_AUTH_DENY;
+    snprintf(response->reason, sizeof(response->reason), "%s",
+             "unit test deny");
+    response->reason_len = (uint32_t)strlen(response->reason);
+    return true;
+}
+
+static void
+test_provider_helper_auth_request_callback(void **state)
+{
+    (void)state;
+
+    int fds[2] = { -1, -1 };
+    assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.ipc_fd = fds[0];
+    provider_helper_supervisor_set_state(&supervisor, PROVIDER_HELPER_STATE_READY);
+
+    struct test_provider_helper_auth_cb_state cb_state;
+    CLEAR(cb_state);
+    provider_helper_supervisor_set_auth_callback(
+        &supervisor, test_provider_helper_auth_cb, &cb_state);
+
+    struct provider_helper_auth_request request = {
+        .request_id = 101,
+        .initiator_spi = 0x1122334455667788ull,
+        .responder_spi = 0x8877665544332211ull,
+        .listener_id = 1,
+        .profile = PROVIDER_HELPER_AUTH_PROFILE_EAP_TLS,
+        .ikev2_id_type = PROVIDER_HELPER_IKEV2_ID_RFC822,
+    };
+    snprintf(request.claimed_principal, sizeof(request.claimed_principal),
+             "%s", "alice@example.test");
+    request.claimed_principal_len =
+        (uint32_t)strlen(request.claimed_principal);
+
+    write_helper_auth_request_fd(fds[1], 1, 77, &request);
+    provider_helper_process_event(&supervisor);
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 1);
+    assert_int_equal(cb_state.calls, 1);
+    assert_int_equal(cb_state.request_id, request.request_id);
+
+    uint8_t header_buf[PROVIDER_HELPER_IPC_HEADER_SIZE];
+    assert_int_equal(read(fds[1], header_buf, sizeof(header_buf)),
+                     sizeof(header_buf));
+    struct provider_helper_msg_header header;
+    uint64_t last_sequence = 0;
+    assert_int_equal(provider_helper_ipc_decode_header(
+                         header_buf, sizeof(header_buf), &header,
+                         PROVIDER_HELPER_IPC_MAX_MESSAGE, &last_sequence),
+                     PROVIDER_HELPER_IPC_OK);
+    assert_int_equal(header.type, PROVIDER_HELPER_MSG_AUTH_RESPONSE);
+    assert_int_equal(header.correlation_id, 1);
+    assert_int_equal(header.payload_len, PROVIDER_HELPER_AUTH_RESPONSE_SIZE);
+
+    uint8_t payload[PROVIDER_HELPER_AUTH_RESPONSE_SIZE];
+    assert_int_equal(read(fds[1], payload, sizeof(payload)), sizeof(payload));
+    struct provider_helper_auth_response response;
+    assert_true(provider_helper_ipc_decode_auth_response(
+                    payload, sizeof(payload), &response));
+    assert_int_equal(response.request_id, request.request_id);
+    assert_int_equal(response.decision, PROVIDER_HELPER_AUTH_DENY);
+    assert_memory_equal(response.reason, "unit test deny",
+                        strlen("unit test deny"));
+
+    close(fds[1]);
+    provider_helper_supervisor_free(&supervisor);
+}
+
+static void
 test_provider_helper_spawn_ikev2_scaffold(void **state)
 {
     (void)state;
@@ -2406,6 +2520,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_ikev2_sa_init_response),
         cmocka_unit_test(test_provider_helper_ikev2_cookie_builder),
         cmocka_unit_test(test_provider_helper_processes_partial_header),
+        cmocka_unit_test(test_provider_helper_auth_request_callback),
         cmocka_unit_test(test_provider_helper_spawn_noop),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_scaffold),
     };
