@@ -210,6 +210,9 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_sa_init_cookie_unverified_dropped = 12,
         .ike_sa_init_cookie_response_tx = 14,
         .ike_sa_init_cookie_response_failed = 15,
+        .ike_sa_init_no_proposal = 16,
+        .ike_sa_init_no_proposal_response_tx = 17,
+        .ike_sa_init_no_proposal_response_failed = 18,
         .ike_sa_init_half_open_dropped = 3,
         .ike_sa_init_per_source_dropped = 9,
         .ike_sa_init_duplicate = 2,
@@ -240,6 +243,12 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_sa_init_cookie_response_tx);
     assert_int_equal(output.ike_sa_init_cookie_response_failed,
                      input.ike_sa_init_cookie_response_failed);
+    assert_int_equal(output.ike_sa_init_no_proposal,
+                     input.ike_sa_init_no_proposal);
+    assert_int_equal(output.ike_sa_init_no_proposal_response_tx,
+                     input.ike_sa_init_no_proposal_response_tx);
+    assert_int_equal(output.ike_sa_init_no_proposal_response_failed,
+                     input.ike_sa_init_no_proposal_response_failed);
     assert_int_equal(output.ike_sa_init_half_open_dropped,
                      input.ike_sa_init_half_open_dropped);
     assert_int_equal(output.ike_sa_init_per_source_dropped,
@@ -521,6 +530,26 @@ test_send_ikev2_datagram_from(int fd, uint16_t port, uint64_t initiator_spi)
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     const size_t packet_len = test_make_ike_sa_init_packet(packet, sizeof(packet));
     test_write_be64(packet, initiator_spi);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    assert_int_equal(sendto(fd, packet, packet_len, 0,
+                            (struct sockaddr *)&addr, sizeof(addr)),
+                     packet_len);
+}
+
+static void
+test_send_ikev2_unsupported_prf_datagram_from(int fd, uint16_t port,
+                                              uint64_t initiator_spi)
+{
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t packet_len = test_make_ike_sa_init_packet(packet, sizeof(packet));
+    test_write_be64(packet, initiator_spi);
+    test_write_be16(packet + test_ike_sa_init_prf_transform_offset() + 6, 999);
 
     struct sockaddr_in addr;
     CLEAR(addr);
@@ -1019,6 +1048,25 @@ test_provider_helper_ikev2_cookie_response(void **state)
                      response, sizeof(response), &header, large_cookie,
                      sizeof(large_cookie), &response_len));
 
+    assert_true(provider_helper_ikev2_build_no_proposal_response(
+                    response, sizeof(response), &header, &response_len));
+    assert_int_equal(response_len,
+                     PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                     + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         response, response_len,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, false,
+                         &response_header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_parse_payloads(
+                         response, response_len, &response_header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_true(summary.saw_notify);
+    assert_false(summary.saw_cookie_notify);
+    assert_int_equal((((uint16_t)response[notify + 6]) << 8)
+                     | response[notify + 7],
+                     PROVIDER_HELPER_IKEV2_NOTIFY_NO_PROPOSAL_CHOSEN);
+
     test_make_ikev2_header(packet, true,
                            PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT,
                            PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
@@ -1250,6 +1298,9 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     int datagram_fd = test_create_udp_sender(0);
 
+    test_send_ikev2_unsupported_prf_datagram_from(datagram_fd, port,
+                                                  0x9988776655443322ull);
+    usleep(10000);
     for (int i = 0; i < 8; ++i)
     {
         test_send_ikev2_datagram_from(datagram_fd, port, 0x1122334455667788ull);
@@ -1260,6 +1311,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     test_send_ikev2_datagram_from(datagram_fd, port, 0x1020304050607080ull);
     usleep(10000);
     close(datagram_fd);
+    usleep(250000);
 
     int cookie_fd = test_create_udp_sender(0x7f000002u);
     uint8_t cookie[PROVIDER_HELPER_IKEV2_COOKIE_MAX_BYTES];
@@ -1288,8 +1340,8 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 5);
-    assert_true(supervisor.runtime_stats.datagrams_rx >= 13);
-    assert_true(supervisor.runtime_stats.datagrams_parsed >= 13);
+    assert_true(supervisor.runtime_stats.datagrams_rx >= 14);
+    assert_true(supervisor.runtime_stats.datagrams_parsed >= 14);
     assert_true(supervisor.runtime_stats.ike_sa_init_accepted >= 3);
     assert_true(supervisor.runtime_stats.ike_sa_init_duplicate >= 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_retransmit_dropped >= 1);
@@ -1298,6 +1350,10 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_true(supervisor.runtime_stats.ike_sa_init_cookie_response_tx >= 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_init_cookie_response_failed,
                      0);
+    assert_true(supervisor.runtime_stats.ike_sa_init_no_proposal >= 1);
+    assert_true(supervisor.runtime_stats.ike_sa_init_no_proposal_response_tx >= 1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_sa_init_no_proposal_response_failed, 0);
     assert_true(supervisor.runtime_stats.ike_sa_init_cookie_present >= 2);
     assert_true(supervisor.runtime_stats.ike_sa_init_cookie_verified >= 1);
     assert_true(

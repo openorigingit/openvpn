@@ -385,6 +385,11 @@ provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_cookie_response_tx);
     provider_helper_wire_write_u64(&pos,
                                    stats->ike_sa_init_cookie_response_failed);
+    provider_helper_wire_write_u64(&pos, stats->ike_sa_init_no_proposal);
+    provider_helper_wire_write_u64(&pos,
+                                   stats->ike_sa_init_no_proposal_response_tx);
+    provider_helper_wire_write_u64(&pos,
+                                   stats->ike_sa_init_no_proposal_response_failed);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_half_open_dropped);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_per_source_dropped);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_duplicate);
@@ -419,6 +424,11 @@ provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
         provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_cookie_response_tx = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_cookie_response_failed =
+        provider_helper_wire_read_u64(&pos);
+    stats->ike_sa_init_no_proposal = provider_helper_wire_read_u64(&pos);
+    stats->ike_sa_init_no_proposal_response_tx =
+        provider_helper_wire_read_u64(&pos);
+    stats->ike_sa_init_no_proposal_response_failed =
         provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_half_open_dropped = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_per_source_dropped = provider_helper_wire_read_u64(&pos);
@@ -1343,22 +1353,22 @@ provider_helper_ikev2_validate_ike_sa_init_request(
                                                            out);
 }
 
-bool
-provider_helper_ikev2_build_cookie_response(
+static bool
+provider_helper_ikev2_build_notify_response(
     uint8_t *dst,
     size_t dst_len,
     const struct provider_helper_ikev2_header *request,
-    const uint8_t *cookie,
-    size_t cookie_len,
+    uint16_t notify_type,
+    const uint8_t *data,
+    size_t data_len,
     size_t *out_len)
 {
     if (out_len)
     {
         *out_len = 0;
     }
-    if (!dst || !request || !cookie
-        || cookie_len < PROVIDER_HELPER_IKEV2_COOKIE_MIN_BYTES
-        || cookie_len > PROVIDER_HELPER_IKEV2_COOKIE_MAX_BYTES
+    if (!dst || !request || (!data && data_len)
+        || data_len > UINT16_MAX - PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE
         || request->exchange_type != PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT
         || request->message_id != 0
         || request->responder_spi != 0
@@ -1370,7 +1380,7 @@ provider_helper_ikev2_build_cookie_response(
 
     const uint32_t ike_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE
                              + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE
-                             + (uint32_t)cookie_len;
+                             + (uint32_t)data_len;
     const size_t offset = request->natt
                           ? PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE : 0;
     const size_t packet_len = offset + ike_len;
@@ -1394,12 +1404,15 @@ provider_helper_ikev2_build_cookie_response(
     *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
     *pos++ = 0;
     provider_helper_wire_write_u16(
-        &pos, PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE + (uint16_t)cookie_len);
-    *pos++ = 0; /* Protocol ID: none for COOKIE. */
-    *pos++ = 0; /* SPI size: no SPI for COOKIE. */
-    provider_helper_wire_write_u16(&pos, PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE);
-    memcpy(pos, cookie, cookie_len);
-    pos += cookie_len;
+        &pos, PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE + (uint16_t)data_len);
+    *pos++ = 0; /* Protocol ID: none for IKE SA INIT notifies. */
+    *pos++ = 0; /* SPI size: no SPI for IKE SA INIT notifies. */
+    provider_helper_wire_write_u16(&pos, notify_type);
+    if (data_len)
+    {
+        memcpy(pos, data, data_len);
+        pos += data_len;
+    }
 
     if ((size_t)(pos - dst) != packet_len)
     {
@@ -1410,6 +1423,41 @@ provider_helper_ikev2_build_cookie_response(
         *out_len = packet_len;
     }
     return true;
+}
+
+bool
+provider_helper_ikev2_build_cookie_response(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_ikev2_header *request,
+    const uint8_t *cookie,
+    size_t cookie_len,
+    size_t *out_len)
+{
+    if (!cookie || cookie_len < PROVIDER_HELPER_IKEV2_COOKIE_MIN_BYTES
+        || cookie_len > PROVIDER_HELPER_IKEV2_COOKIE_MAX_BYTES)
+    {
+        if (out_len)
+        {
+            *out_len = 0;
+        }
+        return false;
+    }
+    return provider_helper_ikev2_build_notify_response(
+        dst, dst_len, request, PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE, cookie,
+        cookie_len, out_len);
+}
+
+bool
+provider_helper_ikev2_build_no_proposal_response(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_ikev2_header *request,
+    size_t *out_len)
+{
+    return provider_helper_ikev2_build_notify_response(
+        dst, dst_len, request, PROVIDER_HELPER_IKEV2_NOTIFY_NO_PROPOSAL_CHOSEN,
+        NULL, 0, out_len);
 }
 
 static bool

@@ -35,7 +35,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 36
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  144
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  168
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
 #define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE 4
@@ -161,6 +161,7 @@ enum provider_helper_ikev2_payload_type {
     PROVIDER_HELPER_IKEV2_PAYLOAD_SKF = 53,
 };
 
+#define PROVIDER_HELPER_IKEV2_NOTIFY_NO_PROPOSAL_CHOSEN 14
 #define PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE 16390
 
 enum provider_helper_ikev2_parse_result {
@@ -226,6 +227,9 @@ struct provider_helper_runtime_stats {
     uint64_t ike_sa_init_cookie_unverified_dropped;
     uint64_t ike_sa_init_cookie_response_tx;
     uint64_t ike_sa_init_cookie_response_failed;
+    uint64_t ike_sa_init_no_proposal;
+    uint64_t ike_sa_init_no_proposal_response_tx;
+    uint64_t ike_sa_init_no_proposal_response_failed;
     uint64_t ike_sa_init_half_open_dropped;
     uint64_t ike_sa_init_per_source_dropped;
     uint64_t ike_sa_init_duplicate;
@@ -415,6 +419,11 @@ bool provider_helper_ikev2_build_cookie_response(
     const struct provider_helper_ikev2_header *request,
     const uint8_t *cookie,
     size_t cookie_len,
+    size_t *out_len);
+bool provider_helper_ikev2_build_no_proposal_response(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_ikev2_header *request,
     size_t *out_len);
 bool provider_helper_ikev2_build_cookie(
     uint8_t *dst,
