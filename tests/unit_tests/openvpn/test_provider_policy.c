@@ -222,6 +222,30 @@ test_provider_policy_ignores_disabled_push_entry(void **state)
     assert_int_equal(result.status, PROVIDER_POLICY_PREFLIGHT_OK);
 }
 
+static void
+test_provider_policy_authorize_fails_closed(void **state)
+{
+    (void)state;
+
+    struct provider_policy_auth_result result;
+    assert_false(provider_policy_authorize(NULL, &result));
+    assert_int_equal(result.status, PROVIDER_POLICY_AUTH_DENIED);
+    assert_non_null(strstr(result.reason, "missing"));
+
+    struct provider_policy_auth_context context = {
+        .profile_mode = PROVIDER_POLICY_PROFILE_EAP_TLS,
+        .principal = "alice@example.test",
+    };
+    assert_false(provider_policy_authorize(&context, &result));
+    assert_int_equal(result.status, PROVIDER_POLICY_AUTH_DENIED);
+    assert_non_null(strstr(result.reason, "fingerprint"));
+
+    context.credential_fingerprint = "sha256:abcd";
+    assert_false(provider_policy_authorize(&context, &result));
+    assert_int_equal(result.status, PROVIDER_POLICY_AUTH_DENIED);
+    assert_non_null(strstr(result.reason, "lease authorization"));
+}
+
 int
 main(void)
 {
@@ -234,6 +258,7 @@ main(void)
         cmocka_unit_test(test_provider_policy_builds_route_dns_artifacts),
         cmocka_unit_test(test_provider_policy_rejects_ambiguous_route_artifact),
         cmocka_unit_test(test_provider_policy_ignores_disabled_push_entry),
+        cmocka_unit_test(test_provider_policy_authorize_fails_closed),
     };
 
     return cmocka_run_group_tests_name("provider_policy", tests, NULL, NULL);

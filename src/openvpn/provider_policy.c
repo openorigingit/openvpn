@@ -131,6 +131,21 @@ provider_policy_set_result(struct provider_policy_preflight *result,
     snprintf(result->reason, sizeof(result->reason), "%s", reason);
 }
 
+static void
+provider_policy_set_auth_result(struct provider_policy_auth_result *result,
+                                enum provider_policy_auth_status status,
+                                const char *reason)
+{
+    if (!result)
+    {
+        return;
+    }
+
+    result->status = status;
+    result->policy_revision = 0;
+    snprintf(result->reason, sizeof(result->reason), "%s", reason);
+}
+
 const char *
 provider_policy_preflight_status_name(enum provider_policy_preflight_status status)
 {
@@ -180,6 +195,13 @@ provider_policy_artifacts_init(struct provider_policy_artifacts *artifacts)
     {
         CLEAR(*artifacts);
     }
+}
+
+void
+provider_policy_auth_result_init(struct provider_policy_auth_result *result)
+{
+    provider_policy_set_auth_result(result, PROVIDER_POLICY_AUTH_DENIED,
+                                    "provider auth not evaluated");
 }
 
 bool
@@ -474,4 +496,42 @@ provider_policy_preflight(const struct options *options,
     }
 
     return provider_policy_validate_push_list(&options->push_list, result);
+}
+
+bool
+provider_policy_authorize(const struct provider_policy_auth_context *context,
+                          struct provider_policy_auth_result *result)
+{
+    provider_policy_auth_result_init(result);
+
+    if (!context)
+    {
+        provider_policy_set_auth_result(result, PROVIDER_POLICY_AUTH_DENIED,
+                                        "provider auth context is missing");
+        return false;
+    }
+    if (context->profile_mode != PROVIDER_POLICY_PROFILE_EAP_TLS)
+    {
+        provider_policy_set_auth_result(result, PROVIDER_POLICY_AUTH_DENIED,
+                                        "unsupported provider auth profile");
+        return false;
+    }
+    if (!context->principal || !*context->principal)
+    {
+        provider_policy_set_auth_result(result, PROVIDER_POLICY_AUTH_DENIED,
+                                        "provider principal is missing");
+        return false;
+    }
+    if (!context->credential_fingerprint || !*context->credential_fingerprint)
+    {
+        provider_policy_set_auth_result(
+            result, PROVIDER_POLICY_AUTH_DENIED,
+            "provider credential fingerprint is required");
+        return false;
+    }
+
+    provider_policy_set_auth_result(
+        result, PROVIDER_POLICY_AUTH_DENIED,
+        "provider revocation and lease authorization are not implemented");
+    return false;
 }

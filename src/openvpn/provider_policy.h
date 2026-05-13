@@ -74,11 +74,23 @@ struct provider_policy_artifacts {
     char dns_servers[PROVIDER_POLICY_MAX_DNS_SERVERS][PROVIDER_POLICY_DNS_SIZE];
 };
 
+enum provider_policy_auth_status {
+    PROVIDER_POLICY_AUTH_DENIED = 0,
+    PROVIDER_POLICY_AUTH_AUTHORIZED,
+};
+
+struct provider_policy_auth_result {
+    enum provider_policy_auth_status status;
+    uint64_t policy_revision;
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+};
+
 const char *provider_policy_preflight_status_name(
     enum provider_policy_preflight_status status);
 
 void provider_policy_preflight_init(struct provider_policy_preflight *result);
 void provider_policy_artifacts_init(struct provider_policy_artifacts *artifacts);
+void provider_policy_auth_result_init(struct provider_policy_auth_result *result);
 
 bool provider_policy_push_option_supported(const char *option);
 
@@ -92,5 +104,7 @@ bool provider_policy_build_artifacts(const struct push_list *push_list,
 bool provider_policy_preflight(const struct options *options,
                                const struct plugin_list *plugins,
                                struct provider_policy_preflight *result);
+bool provider_policy_authorize(const struct provider_policy_auth_context *context,
+                               struct provider_policy_auth_result *result);
 
 #endif /* PROVIDER_POLICY_H */

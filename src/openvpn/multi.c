@@ -265,6 +265,68 @@ int_compare_function(const void *key1, const void *key2)
 #endif
 
 static void
+multi_ikev2_helper_auth_deny(struct provider_helper_auth_response *response,
+                             uint64_t request_id,
+                             const char *reason)
+{
+    CLEAR(*response);
+    response->request_id = request_id;
+    response->decision = PROVIDER_HELPER_AUTH_DENY;
+    snprintf(response->reason, sizeof(response->reason), "%s",
+             reason && *reason ? reason : "provider auth denied");
+    response->reason_len = (uint32_t)strlen(response->reason);
+}
+
+static enum provider_policy_profile_mode
+multi_ikev2_helper_policy_profile(uint32_t profile)
+{
+    switch (profile)
+    {
+        case PROVIDER_HELPER_AUTH_PROFILE_EAP_TLS:
+            return PROVIDER_POLICY_PROFILE_EAP_TLS;
+
+        default:
+            return PROVIDER_POLICY_PROFILE_UNDEF;
+    }
+}
+
+static bool
+multi_ikev2_helper_auth_request(void *arg,
+                                const struct provider_helper_auth_request *request,
+                                struct provider_helper_auth_response *response)
+{
+    struct multi_context *m = arg;
+    (void)m;
+
+    if (!request || !response)
+    {
+        return false;
+    }
+
+    char principal[PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE];
+    CLEAR(principal);
+    if (request->claimed_principal_len >= sizeof(principal))
+    {
+        multi_ikev2_helper_auth_deny(response, request->request_id,
+                                     "provider principal is invalid");
+        return true;
+    }
+    memcpy(principal, request->claimed_principal,
+           request->claimed_principal_len);
+
+    const struct provider_policy_auth_context context = {
+        .profile_mode = multi_ikev2_helper_policy_profile(request->profile),
+        .principal = principal,
+    };
+    struct provider_policy_auth_result result;
+    provider_policy_authorize(&context, &result);
+
+    multi_ikev2_helper_auth_deny(response, request->request_id,
+                                 result.reason);
+    return true;
+}
+
+static void
 multi_start_ikev2_helper(struct context *t)
 {
     struct multi_context *m = t->multi;
@@ -288,6 +350,9 @@ multi_start_ikev2_helper(struct context *t)
     {
         msg(M_FATAL | M_ERRNO, "IKEv2 helper is not executable: %s", helper_path);
     }
+
+    provider_helper_supervisor_set_auth_callback(
+        &m->provider_helper, multi_ikev2_helper_auth_request, m);
 
     char *const argv[] = { (char *)helper_path, NULL };
     if (!provider_helper_supervisor_spawn(&m->provider_helper, helper_path, argv))
