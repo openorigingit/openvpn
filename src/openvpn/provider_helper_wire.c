@@ -1108,6 +1108,39 @@ provider_helper_ikev2_selection_supported(
            && selection->dh_id == PROVIDER_HELPER_IKEV2_DH_ECP_256;
 }
 
+static size_t
+provider_helper_ikev2_dh_public_bytes(uint16_t dh_id)
+{
+    switch (dh_id)
+    {
+        case PROVIDER_HELPER_IKEV2_DH_ECP_256:
+            return PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES;
+
+        default:
+            return 0;
+    }
+}
+
+static bool
+provider_helper_ikev2_selection_matches_ke(
+    size_t packet_len,
+    const struct provider_helper_ikev2_payload_summary *summary,
+    const struct provider_helper_ikev2_sa_selection *selection)
+{
+    if (!summary || !selection || !selection->selected
+        || !summary->ke_dh_group || selection->dh_id != summary->ke_dh_group
+        || !provider_helper_ikev2_body_inside(packet_len,
+                                              summary->ke_data_offset,
+                                              summary->ke_data_len))
+    {
+        return false;
+    }
+
+    const size_t public_bytes =
+        provider_helper_ikev2_dh_public_bytes(selection->dh_id);
+    return public_bytes && summary->ke_data_len == public_bytes;
+}
+
 static enum provider_helper_ikev2_parse_result
 provider_helper_ikev2_select_transform(
     const uint8_t *packet,
@@ -1294,8 +1327,12 @@ provider_helper_ikev2_select_ike_sa_init_proposal(
                 &candidate, has_encr, has_prf, has_integ, has_dh))
         {
             candidate.selected = true;
-            *selection = candidate;
-            return PROVIDER_HELPER_IKEV2_PARSE_OK;
+            if (provider_helper_ikev2_selection_matches_ke(packet_len,
+                                                           summary, &candidate))
+            {
+                *selection = candidate;
+                return PROVIDER_HELPER_IKEV2_PARSE_OK;
+            }
         }
 
         pos += proposal_len;
@@ -1308,7 +1345,8 @@ static enum provider_helper_ikev2_parse_result
 provider_helper_ikev2_validate_ke_payload(const uint8_t *packet,
                                           size_t packet_len,
                                           size_t body_offset,
-                                          size_t body_len)
+                                          size_t body_len,
+                                          struct provider_helper_ikev2_payload_summary *summary)
 {
     if (!provider_helper_ikev2_body_inside(packet_len, body_offset, body_len)
         || body_len < PROVIDER_HELPER_IKEV2_KE_MIN_BYTES
@@ -1316,6 +1354,13 @@ provider_helper_ikev2_validate_ke_payload(const uint8_t *packet,
         || packet[body_offset + 2] || packet[body_offset + 3])
     {
         return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    if (summary)
+    {
+        summary->ke_dh_group = provider_helper_wire_peek_u16(packet + body_offset);
+        summary->ke_data_offset = body_offset + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE;
+        summary->ke_data_len = body_len - PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE;
     }
 
     return PROVIDER_HELPER_IKEV2_PARSE_OK;
@@ -1340,7 +1385,7 @@ static enum provider_helper_ikev2_parse_result
 provider_helper_ikev2_validate_sa_init_payloads(
     const uint8_t *packet,
     size_t packet_len,
-    const struct provider_helper_ikev2_payload_summary *summary)
+    struct provider_helper_ikev2_payload_summary *summary)
 {
     if (!summary || !summary->saw_sa || !summary->saw_ke
         || !summary->saw_nonce)
@@ -1363,7 +1408,8 @@ provider_helper_ikev2_validate_sa_init_payloads(
     }
     result = provider_helper_ikev2_validate_ke_payload(packet, packet_len,
                                                        summary->ke_offset,
-                                                       summary->ke_len);
+                                                       summary->ke_len,
+                                                       summary);
     if (result != PROVIDER_HELPER_IKEV2_PARSE_OK)
     {
         return result;

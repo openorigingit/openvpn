@@ -85,6 +85,7 @@
 #define PROVIDER_HELPER_IKEV2_PRF_HMAC_SHA2_256 5
 #define PROVIDER_HELPER_IKEV2_DH_ECP_256 19
 #define PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH 14
+#define PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES 64
 
 #define PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_SAS 1024
 #define PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_PER_SOURCE 32
@@ -285,6 +286,9 @@ struct provider_helper_ikev2_payload_summary {
     size_t sa_len;
     size_t ke_offset;
     size_t ke_len;
+    uint16_t ke_dh_group;
+    size_t ke_data_offset;
+    size_t ke_data_len;
     size_t nonce_offset;
     size_t nonce_len;
     size_t cookie_offset;
