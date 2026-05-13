@@ -85,6 +85,17 @@
 #define IKEV2_HELPER_CLAIMED_PRINCIPAL_SIZE 256
 #define IKEV2_HELPER_CERT_ENCODING_X509_SIGNATURE 4
 #define IKEV2_HELPER_SHA256_DIGEST_BYTES 32
+#define IKEV2_HELPER_EAP_HEADER_SIZE 4
+#define IKEV2_HELPER_EAP_TYPE_HEADER_SIZE 5
+#define IKEV2_HELPER_EAP_TLS_HEADER_SIZE 6
+#define IKEV2_HELPER_EAP_TLS_LENGTH_SIZE 4
+#define IKEV2_HELPER_EAP_CODE_REQUEST 1
+#define IKEV2_HELPER_EAP_CODE_RESPONSE 2
+#define IKEV2_HELPER_EAP_CODE_SUCCESS 3
+#define IKEV2_HELPER_EAP_CODE_FAILURE 4
+#define IKEV2_HELPER_EAP_TYPE_TLS 13
+#define IKEV2_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED 0x80
+#define IKEV2_HELPER_EAP_TLS_FLAGS_ALLOWED 0xe0
 
 static volatile sig_atomic_t helper_stop;
 
@@ -1265,8 +1276,103 @@ ikev2_helper_ike_auth_inner_payload_supported(uint8_t payload_type)
 }
 
 static enum provider_helper_ikev2_parse_result
+ikev2_helper_validate_eap_tls_payload(
+    const uint8_t *body,
+    size_t body_len,
+    const struct provider_helper_runtime_config *config)
+{
+    if (!body || body_len < IKEV2_HELPER_EAP_TLS_HEADER_SIZE || !config)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    const uint8_t flags = body[5];
+    if (flags & ~IKEV2_HELPER_EAP_TLS_FLAGS_ALLOWED)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD;
+    }
+
+    size_t fragment_offset = IKEV2_HELPER_EAP_TLS_HEADER_SIZE;
+    uint32_t tls_message_len = 0;
+    if (flags & IKEV2_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED)
+    {
+        if (body_len < IKEV2_HELPER_EAP_TLS_HEADER_SIZE
+                       + IKEV2_HELPER_EAP_TLS_LENGTH_SIZE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+        tls_message_len = ((uint32_t)body[6] << 24)
+                          | ((uint32_t)body[7] << 16)
+                          | ((uint32_t)body[8] << 8)
+                          | body[9];
+        if (!tls_message_len || tls_message_len > config->max_cert_chain_bytes)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+        fragment_offset += IKEV2_HELPER_EAP_TLS_LENGTH_SIZE;
+    }
+
+    const size_t fragment_len = body_len - fragment_offset;
+    if (fragment_len > config->max_cert_chain_bytes)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+    if (tls_message_len && fragment_len > tls_message_len)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    return PROVIDER_HELPER_IKEV2_PARSE_OK;
+}
+
+static enum provider_helper_ikev2_parse_result
+ikev2_helper_validate_eap_payload(
+    const uint8_t *body,
+    size_t body_len,
+    const struct provider_helper_runtime_config *config)
+{
+    if (!body || body_len < IKEV2_HELPER_EAP_HEADER_SIZE)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    const uint8_t code = body[0];
+    const uint16_t eap_len = ((uint16_t)body[2] << 8) | body[3];
+    if (eap_len != body_len)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    switch (code)
+    {
+        case IKEV2_HELPER_EAP_CODE_REQUEST:
+        case IKEV2_HELPER_EAP_CODE_RESPONSE:
+            if (body_len < IKEV2_HELPER_EAP_TYPE_HEADER_SIZE)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+            if (body[4] != IKEV2_HELPER_EAP_TYPE_TLS)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD;
+            }
+            return ikev2_helper_validate_eap_tls_payload(body, body_len,
+                                                         config);
+
+        case IKEV2_HELPER_EAP_CODE_SUCCESS:
+        case IKEV2_HELPER_EAP_CODE_FAILURE:
+            return body_len == IKEV2_HELPER_EAP_HEADER_SIZE
+                       ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                       : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+
+        default:
+            return PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD;
+    }
+}
+
+static enum provider_helper_ikev2_parse_result
 ikev2_helper_validate_ike_auth_inner_payload(
     uint8_t payload_type,
+    const uint8_t *body,
     size_t body_len,
     const struct provider_helper_runtime_config *config)
 {
@@ -1283,9 +1389,11 @@ ikev2_helper_validate_ike_auth_inner_payload(
         case PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY:
         case PROVIDER_HELPER_IKEV2_PAYLOAD_DELETE:
         case PROVIDER_HELPER_IKEV2_PAYLOAD_CP:
-        case PROVIDER_HELPER_IKEV2_PAYLOAD_EAP:
             return body_len >= 4 ? PROVIDER_HELPER_IKEV2_PARSE_OK
                                  : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_EAP:
+            return ikev2_helper_validate_eap_payload(body, body_len, config);
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_TSI:
         case PROVIDER_HELPER_IKEV2_PAYLOAD_TSR:
@@ -1368,6 +1476,12 @@ ikev2_helper_record_ike_auth_inner_payload(
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_EAP:
             summary->saw_eap = true;
+            ++summary->eap_count;
+            if (summary->eap_count == 1)
+            {
+                summary->eap_offset = body_offset;
+                summary->eap_len = body_len;
+            }
             break;
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_TSI:
@@ -1436,8 +1550,10 @@ ikev2_helper_parse_ike_auth_inner_payloads(
         const size_t body_len =
             payload_len - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
         const enum provider_helper_ikev2_parse_result payload_result =
-            ikev2_helper_validate_ike_auth_inner_payload(payload_type, body_len,
-                                                         config);
+            ikev2_helper_validate_ike_auth_inner_payload(
+                payload_type,
+                plaintext + pos + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE,
+                body_len, config);
         if (payload_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
         {
             return payload_result;

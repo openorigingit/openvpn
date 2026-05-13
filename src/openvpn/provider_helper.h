@@ -365,6 +365,7 @@ struct provider_helper_ikev2_payload_summary {
     uint32_t nonce_count;
     uint32_t idi_count;
     uint32_t cert_count;
+    uint32_t eap_count;
     uint32_t sk_count;
     size_t sa_offset;
     size_t sa_len;
@@ -379,6 +380,8 @@ struct provider_helper_ikev2_payload_summary {
     size_t idi_len;
     size_t cert_offset;
     size_t cert_len;
+    size_t eap_offset;
+    size_t eap_len;
     size_t sk_offset;
     size_t sk_len;
     uint8_t sk_next_payload;

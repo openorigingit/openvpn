@@ -1093,12 +1093,29 @@ test_make_encrypted_ike_auth_packet(
         assert_true(plaintext_len + cert_der_len + 6 <= sizeof(plaintext));
         const uint16_t cert_payload_len = (uint16_t)(cert_der_len + 5);
         plaintext_len = test_add_ikev2_payload(
-            plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+            plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_EAP,
             cert_payload_len, 0);
         const size_t cert_body = plaintext_len - cert_payload_len
                                  + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
         plaintext[cert_body] = 4;
         memcpy(plaintext + cert_body + 1, cert_der, cert_der_len);
+
+        const uint16_t eap_body_len = 11;
+        const uint16_t eap_payload_len =
+            PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + eap_body_len;
+        assert_true(plaintext_len + eap_payload_len + 1 <= sizeof(plaintext));
+        plaintext_len = test_add_ikev2_payload(
+            plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+            eap_payload_len, 0);
+        const size_t eap_body = plaintext_len - eap_payload_len
+                                + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+        plaintext[eap_body] = 2;
+        plaintext[eap_body + 1] = 7;
+        test_write_be16(plaintext + eap_body + 2, eap_body_len);
+        plaintext[eap_body + 4] = 13;
+        plaintext[eap_body + 5] = 0x80;
+        test_write_be32(plaintext + eap_body + 6, 1);
+        plaintext[eap_body + 10] = 0x16;
     }
     plaintext[plaintext_len++] = 0; /* Pad Length. */
 
