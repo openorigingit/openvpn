@@ -115,6 +115,7 @@ openvpn_SOURCES = \
 	ping.c ping.h \
 	plugin.c plugin.h \
 	pool.c pool.h \
+	provider_session.c provider_session.h \
 	proto.c proto.h \
 	proxy.c proxy.h \
 	ps.c ps.h \

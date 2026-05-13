@@ -1,0 +1,247 @@
+/*
+ *  OpenVPN -- An application to securely tunnel IP networks
+ *             over a single UDP port, with support for SSL/TLS-based
+ *             session authentication and key exchange,
+ *             packet encryption, packet authentication, and
+ *             packet compression.
+ *
+ *  Copyright (C) 2026 OpenVPN Inc <sales@openvpn.net>
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License version 2
+ *  as published by the Free Software Foundation.
+ */
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include "syshead.h"
+
+#include <stdarg.h>
+#include <stddef.h>
+#include <setjmp.h>
+#include <cmocka.h>
+
+#include "provider_session.h"
+#include "status.h"
+#include "test_common.h"
+
+struct status_capture
+{
+    char data[4096];
+    size_t len;
+};
+
+static void
+capture_status(void *arg, const unsigned int flags, const char *str)
+{
+    struct status_capture *capture = arg;
+    const size_t remaining = sizeof(capture->data) - capture->len;
+
+    (void)flags;
+    if (remaining <= 1)
+    {
+        return;
+    }
+
+    const int written = snprintf(capture->data + capture->len, remaining, "%s\n", str);
+    if (written > 0)
+    {
+        const size_t used = (size_t)written < remaining ? (size_t)written : remaining - 1;
+        capture->len += used;
+    }
+}
+
+static struct provider_session_create
+default_session_create(void)
+{
+    return (struct provider_session_create) {
+        .provider_name = "ikev2",
+        .principal = "alice@example.test",
+        .credential_fingerprint = "SHA256:01",
+        .assigned_address = "10.88.0.2",
+        .authorized_selectors = "10.88.0.1/32[tcp/443]",
+        .xfrm_lease_id = 42,
+        .policy_revision = 7,
+        .now = 1000,
+    };
+}
+
+static void
+test_provider_session_create_lookup_update(void **state)
+{
+    (void)state;
+
+    struct provider_session_table table;
+    provider_session_table_init(&table);
+
+    struct provider_session_create create = default_session_create();
+    struct provider_session *session = provider_session_create(&table, &create);
+
+    assert_non_null(session);
+    assert_int_equal(session->id, 1);
+    assert_int_equal(session->management_cid, 1);
+    assert_string_equal(session->provider_name, "ikev2");
+    assert_string_equal(session->principal, "alice@example.test");
+    assert_string_equal(session->credential_fingerprint, "SHA256:01");
+    assert_string_equal(session->assigned_address, "10.88.0.2");
+    assert_string_equal(session->authorized_selectors, "10.88.0.1/32[tcp/443]");
+    assert_int_equal(session->xfrm_lease_id, 42);
+    assert_int_equal(session->policy_revision, 7);
+    assert_int_equal(session->created, 1000);
+    assert_int_equal(provider_session_table_count(&table), 1);
+    assert_ptr_equal(provider_session_lookup_by_cid(&table, 1), session);
+
+    const struct provider_session_update update = {
+        .state = PROVIDER_SESSION_STATE_ACTIVE,
+        .helper_state = "ike-established",
+        .child_sa_state = "installed",
+        .bytes_received = 11,
+        .bytes_sent = 22,
+        .packets_received = 3,
+        .packets_sent = 4,
+    };
+
+    assert_true(provider_session_update(session, &update));
+    assert_int_equal(session->state, PROVIDER_SESSION_STATE_ACTIVE);
+    assert_string_equal(session->helper_state, "ike-established");
+    assert_string_equal(session->child_sa_state, "installed");
+    assert_int_equal(session->bytes_received, 11);
+    assert_int_equal(session->bytes_sent, 22);
+    assert_int_equal(session->packets_received, 3);
+    assert_int_equal(session->packets_sent, 4);
+
+    provider_session_table_free(&table);
+}
+
+static void
+test_provider_session_rejects_duplicate_cid_and_kill(void **state)
+{
+    (void)state;
+
+    struct provider_session_table table;
+    provider_session_table_init(&table);
+
+    struct provider_session_create create = default_session_create();
+    create.management_cid = 100;
+
+    struct provider_session *session = provider_session_create(&table, &create);
+    assert_non_null(session);
+    assert_int_equal(session->management_cid, 100);
+    assert_int_equal(provider_session_table_count(&table), 1);
+
+    struct provider_session_create duplicate = default_session_create();
+    duplicate.management_cid = 100;
+    assert_null(provider_session_create(&table, &duplicate));
+
+    assert_true(provider_session_kill_by_cid(&table, 100, "test kill"));
+    assert_int_equal(session->state, PROVIDER_SESSION_STATE_CLOSED);
+    assert_true(session->halt);
+    assert_string_equal(session->disconnect_reason, "test kill");
+    assert_null(provider_session_lookup_by_cid(&table, 100));
+    assert_int_equal(provider_session_table_count(&table), 0);
+    assert_false(provider_session_kill_by_cid(&table, 100, "again"));
+
+    provider_session_table_free(&table);
+}
+
+static void
+test_provider_session_delete_by_cid(void **state)
+{
+    (void)state;
+
+    struct provider_session_table table;
+    provider_session_table_init(&table);
+
+    struct provider_session_create create = default_session_create();
+    create.management_cid = 101;
+
+    struct provider_session *session = provider_session_create(&table, &create);
+    assert_non_null(session);
+    assert_int_equal(provider_session_table_count(&table), 1);
+
+    assert_true(provider_session_delete_by_cid(&table, 101));
+    assert_null(provider_session_lookup_by_cid(&table, 101));
+    assert_int_equal(provider_session_table_count(&table), 0);
+    assert_false(provider_session_delete_by_cid(&table, 101));
+
+    provider_session_table_free(&table);
+}
+
+static void
+test_provider_session_status_output(void **state)
+{
+    (void)state;
+
+    struct provider_session_table table;
+    provider_session_table_init(&table);
+
+    struct provider_session_create create = default_session_create();
+    struct provider_session *session = provider_session_create(&table, &create);
+    assert_non_null(session);
+
+    const struct provider_session_update update = {
+        .state = PROVIDER_SESSION_STATE_ACTIVE,
+        .helper_state = "ike-established",
+        .child_sa_state = "installed",
+        .bytes_received = 55,
+        .bytes_sent = 66,
+    };
+    assert_true(provider_session_update(session, &update));
+
+    struct status_capture capture = { 0 };
+    const struct virtual_output vout = {
+        .arg = &capture,
+        .func = capture_status,
+    };
+    struct status_output *so = status_open(NULL, 0, -1, &vout, 0);
+    assert_non_null(so);
+
+    provider_session_print_status(&table, so, 2);
+    assert_true(status_close(so));
+
+    assert_non_null(strstr(capture.data, "HEADER,PROVIDER_SESSION"));
+    assert_non_null(strstr(capture.data, "PROVIDER_SESSION,ikev2,1,alice@example.test"));
+    assert_non_null(strstr(capture.data, ",10.88.0.2,10.88.0.1/32[tcp/443],55,66,"));
+    assert_non_null(strstr(capture.data, ",active,7,42"));
+
+    provider_session_table_free(&table);
+}
+
+static void
+test_provider_session_empty_status_is_quiet(void **state)
+{
+    (void)state;
+
+    struct provider_session_table table;
+    provider_session_table_init(&table);
+
+    struct status_capture capture = { 0 };
+    const struct virtual_output vout = {
+        .arg = &capture,
+        .func = capture_status,
+    };
+    struct status_output *so = status_open(NULL, 0, -1, &vout, 0);
+    assert_non_null(so);
+
+    provider_session_print_status(&table, so, 2);
+    assert_true(status_close(so));
+    assert_string_equal(capture.data, "");
+
+    provider_session_table_free(&table);
+}
+
+int
+main(void)
+{
+    const struct CMUnitTest tests[] = {
+        cmocka_unit_test(test_provider_session_create_lookup_update),
+        cmocka_unit_test(test_provider_session_rejects_duplicate_cid_and_kill),
+        cmocka_unit_test(test_provider_session_delete_by_cid),
+        cmocka_unit_test(test_provider_session_status_output),
+        cmocka_unit_test(test_provider_session_empty_status_is_quiet),
+    };
+
+    return cmocka_run_group_tests_name("provider_session", tests, NULL, NULL);
+}

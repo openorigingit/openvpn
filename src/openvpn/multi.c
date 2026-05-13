@@ -283,6 +283,7 @@ multi_init(struct context *t)
      * Init our multi_context object.
      */
     CLEAR(*m);
+    provider_session_table_init(&m->provider_sessions);
 
     /*
      * Real address hash table (source port number is
@@ -670,6 +671,8 @@ multi_uninit(struct multi_context *m)
 
         multi_reap_all(m);
 
+        provider_session_table_free(&m->provider_sessions);
+
         hash_free(m->hash);
         hash_free(m->vhash);
 #ifdef ENABLE_MANAGEMENT
@@ -828,6 +831,8 @@ multi_print_status(struct multi_context *m, struct status_output *so, const int 
             }
             hash_iterator_free(&hi);
 
+            provider_session_print_status(&m->provider_sessions, so, version);
+
             status_printf(so, "ROUTING TABLE");
             status_printf(so, "Virtual Address,Common Name,Real Address,Last Ref");
             hash_iterator_init(m->vhash, &hi);
@@ -915,6 +920,8 @@ multi_print_status(struct multi_context *m, struct status_output *so, const int 
                 gc_free(&gc);
             }
             hash_iterator_free(&hi);
+
+            provider_session_print_status(&m->provider_sessions, so, version);
 
             status_printf(
                 so,
@@ -3865,7 +3872,12 @@ static int
 management_callback_n_clients(void *arg)
 {
     struct multi_context *m = (struct multi_context *)arg;
-    return m->n_clients;
+    const size_t provider_count = provider_session_table_count(&m->provider_sessions);
+    if (provider_count > (size_t)(INT_MAX - m->n_clients))
+    {
+        return INT_MAX;
+    }
+    return m->n_clients + (int)provider_count;
 }
 
 static int
@@ -3955,7 +3967,7 @@ management_kill_by_cid(void *arg, const unsigned long cid, const char *kill_msg)
     }
     else
     {
-        return false;
+        return provider_session_kill_by_cid(&m->provider_sessions, cid, kill_msg);
     }
 }
 

@@ -38,6 +38,7 @@
 #include "mudp.h"
 #include "mtcp.h"
 #include "multi_io.h"
+#include "provider_session.h"
 #include "vlan.h"
 #include "reflect_filter.h"
 
@@ -186,6 +187,7 @@ struct multi_context
     int tcp_queue_limit;
     int status_file_version;
     int n_clients; /* current number of authenticated clients */
+    struct provider_session_table provider_sessions;
 
 #ifdef ENABLE_MANAGEMENT
     struct hash *cid_hash;
