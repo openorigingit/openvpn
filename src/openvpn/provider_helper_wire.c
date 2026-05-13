@@ -604,6 +604,10 @@ provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u64(&pos, stats->ike_auth_inner_malformed);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_idi_extracted);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_idi_invalid);
+    provider_helper_wire_write_u64(&pos, stats->ike_auth_request_tx);
+    provider_helper_wire_write_u64(&pos, stats->ike_auth_request_failed);
+    provider_helper_wire_write_u64(&pos, stats->ike_auth_denied);
+    provider_helper_wire_write_u64(&pos, stats->ike_auth_allow_unsupported);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_unsupported);
 
     return (size_t)(pos - dst) == PROVIDER_HELPER_RUNTIME_STATS_SIZE;
@@ -663,6 +667,10 @@ provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
     stats->ike_auth_inner_malformed = provider_helper_wire_read_u64(&pos);
     stats->ike_auth_idi_extracted = provider_helper_wire_read_u64(&pos);
     stats->ike_auth_idi_invalid = provider_helper_wire_read_u64(&pos);
+    stats->ike_auth_request_tx = provider_helper_wire_read_u64(&pos);
+    stats->ike_auth_request_failed = provider_helper_wire_read_u64(&pos);
+    stats->ike_auth_denied = provider_helper_wire_read_u64(&pos);
+    stats->ike_auth_allow_unsupported = provider_helper_wire_read_u64(&pos);
     stats->ike_auth_unsupported = provider_helper_wire_read_u64(&pos);
 
     return (size_t)(pos - src) == PROVIDER_HELPER_RUNTIME_STATS_SIZE;

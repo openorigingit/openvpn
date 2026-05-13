@@ -182,6 +182,56 @@ provider_helper_supervisor_send_config(struct provider_helper_supervisor *superv
     return written;
 }
 
+static bool
+provider_helper_supervisor_send_auth_deny(
+    struct provider_helper_supervisor *supervisor,
+    const struct provider_helper_auth_request *request,
+    uint64_t correlation_id)
+{
+    if (!supervisor || supervisor->ipc_fd < 0 || !request
+        || supervisor->state != PROVIDER_HELPER_STATE_READY)
+    {
+        return false;
+    }
+
+    struct provider_helper_auth_response response = {
+        .request_id = request->request_id,
+        .decision = PROVIDER_HELPER_AUTH_DENY,
+    };
+    const char reason[] = "provider auth policy bridge not wired";
+    static_assert(sizeof(reason) <= PROVIDER_HELPER_AUTH_REASON_SIZE,
+                  "auth deny reason fits");
+    memcpy(response.reason, reason, sizeof(reason) - 1);
+    response.reason_len = (uint32_t)strlen(reason);
+
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE
+                                  + PROVIDER_HELPER_AUTH_RESPONSE_SIZE);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_AUTH_RESPONSE,
+        .sequence = supervisor->next_tx_sequence++,
+        .correlation_id = correlation_id,
+        .payload_len = PROVIDER_HELPER_AUTH_RESPONSE_SIZE,
+    };
+
+    const bool encoded = provider_helper_ipc_write_header(&buf, &header)
+                         && provider_helper_ipc_write_auth_response(
+                             &buf, &response);
+    const bool written = encoded
+                         && provider_helper_write_all(supervisor->ipc_fd, BPTR(&buf),
+                                                      (size_t)BLEN(&buf));
+    free_buf(&buf);
+    if (!written)
+    {
+        provider_helper_supervisor_set_state(supervisor,
+                                             PROVIDER_HELPER_STATE_DEGRADED);
+        provider_helper_close_ipc(supervisor);
+    }
+    return written;
+}
+
 #ifndef _WIN32
 static bool
 provider_helper_send_fd_payload(int ipc_fd, const uint8_t *payload, size_t payload_len,
@@ -481,11 +531,33 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
         supervisor->payload_len = 0;
         supervisor->payload_received = 0;
 
-        if (header.type != PROVIDER_HELPER_MSG_STATS
-            || payload_len != PROVIDER_HELPER_RUNTIME_STATS_SIZE
-            || supervisor->state != PROVIDER_HELPER_STATE_READY
-            || !provider_helper_ipc_decode_runtime_stats(
+        if (header.type == PROVIDER_HELPER_MSG_STATS
+            && payload_len == PROVIDER_HELPER_RUNTIME_STATS_SIZE
+            && supervisor->state == PROVIDER_HELPER_STATE_READY
+            && provider_helper_ipc_decode_runtime_stats(
                 supervisor->payload_buf, payload_len, &supervisor->runtime_stats))
+        {
+            return;
+        }
+
+        if (header.type == PROVIDER_HELPER_MSG_AUTH_REQUEST
+            && payload_len == PROVIDER_HELPER_AUTH_REQUEST_SIZE
+            && supervisor->state == PROVIDER_HELPER_STATE_READY)
+        {
+            struct provider_helper_auth_request request;
+            if (!provider_helper_ipc_decode_auth_request(
+                    supervisor->payload_buf, payload_len, &request)
+                || !provider_helper_supervisor_send_auth_deny(
+                    supervisor, &request, header.sequence))
+            {
+                provider_helper_supervisor_set_state(
+                    supervisor, PROVIDER_HELPER_STATE_FAILED);
+                provider_helper_close_ipc(supervisor);
+            }
+            return;
+        }
+
+        if (supervisor->ipc_fd >= 0)
         {
             provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);
             provider_helper_close_ipc(supervisor);

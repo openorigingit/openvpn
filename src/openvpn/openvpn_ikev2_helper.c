@@ -122,7 +122,9 @@ struct ikev2_helper_ike_sa {
     uint8_t sk_pr[IKEV2_HELPER_PRF_SHA256_BYTES];
     bool claimed_principal_ready;
     size_t claimed_principal_len;
+    uint32_t claimed_principal_id_type;
     char claimed_principal[IKEV2_HELPER_CLAIMED_PRINCIPAL_SIZE];
+    uint64_t pending_auth_request_id;
     time_t created;
     time_t updated;
     struct provider_helper_ikev2_sa_selection selection;
@@ -905,6 +907,44 @@ ikev2_helper_send_stats(int fd, uint64_t sequence, uint64_t correlation_id,
 }
 
 static bool
+ikev2_helper_send_auth_request(
+    int fd,
+    uint64_t *tx_sequence,
+    uint64_t correlation_id,
+    const struct provider_helper_auth_request *request)
+{
+    if (fd < 0 || !tx_sequence || !*tx_sequence || !request)
+    {
+        return false;
+    }
+
+    uint8_t frame[PROVIDER_HELPER_IPC_HEADER_SIZE
+                  + PROVIDER_HELPER_AUTH_REQUEST_SIZE];
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_AUTH_REQUEST,
+        .sequence = *tx_sequence,
+        .correlation_id = correlation_id,
+        .payload_len = PROVIDER_HELPER_AUTH_REQUEST_SIZE,
+    };
+
+    if (!provider_helper_ipc_encode_header(
+            frame, PROVIDER_HELPER_IPC_HEADER_SIZE, &header)
+        || !provider_helper_ipc_encode_auth_request(
+            frame + PROVIDER_HELPER_IPC_HEADER_SIZE,
+            PROVIDER_HELPER_AUTH_REQUEST_SIZE, request)
+        || !ikev2_helper_write_all(fd, frame, sizeof(frame)))
+    {
+        return false;
+    }
+
+    ++*tx_sequence;
+    return true;
+}
+
+static bool
 ikev2_helper_read_all(int fd, uint8_t *data, size_t len)
 {
     while (len > 0 && !helper_stop)
@@ -957,6 +997,23 @@ ikev2_helper_read_runtime_config(int fd, const struct provider_helper_msg_header
 
     return provider_helper_ipc_decode_runtime_config(payload, sizeof(payload), config)
            && provider_helper_runtime_config_valid(config, NULL, 0);
+}
+
+static bool
+ikev2_helper_read_auth_response(
+    int fd,
+    const struct provider_helper_msg_header *header,
+    struct provider_helper_auth_response *response)
+{
+    uint8_t payload[PROVIDER_HELPER_AUTH_RESPONSE_SIZE];
+    if (!header || header->payload_len != sizeof(payload)
+        || !ikev2_helper_read_all(fd, payload, sizeof(payload)))
+    {
+        return false;
+    }
+
+    return provider_helper_ipc_decode_auth_response(payload, sizeof(payload),
+                                                    response);
 }
 
 static bool
@@ -1395,6 +1452,8 @@ ikev2_helper_extract_claimed_idi(
 
     sa->claimed_principal_ready = false;
     sa->claimed_principal_len = 0;
+    sa->claimed_principal_id_type = 0;
+    sa->pending_auth_request_id = 0;
     ikev2_helper_secure_zero(sa->claimed_principal,
                              sizeof(sa->claimed_principal));
 
@@ -1434,6 +1493,7 @@ ikev2_helper_extract_claimed_idi(
     memcpy(sa->claimed_principal, id_data, id_data_len);
     sa->claimed_principal[id_data_len] = '\0';
     sa->claimed_principal_len = id_data_len;
+    sa->claimed_principal_id_type = id_type;
     sa->claimed_principal_ready = true;
     return true;
 }
@@ -1817,6 +1877,89 @@ ikev2_helper_clear_ike_sa(struct ikev2_helper_ike_sa_table *table,
     }
 }
 
+static bool
+ikev2_helper_apply_auth_response(
+    struct ikev2_helper_ike_sa_table *table,
+    const struct provider_helper_auth_response *response,
+    struct provider_helper_runtime_stats *counters)
+{
+    if (!table || !response || !counters)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        if (!sa->active || sa->pending_auth_request_id != response->request_id)
+        {
+            continue;
+        }
+
+        if (response->decision == PROVIDER_HELPER_AUTH_DENY)
+        {
+            sa->pending_auth_request_id = 0;
+            sa->claimed_principal_ready = false;
+            sa->claimed_principal_len = 0;
+            sa->claimed_principal_id_type = 0;
+            ikev2_helper_secure_zero(sa->claimed_principal,
+                                     sizeof(sa->claimed_principal));
+            ++counters->ike_auth_denied;
+        }
+        else
+        {
+            ikev2_helper_clear_ike_sa(table, sa);
+            ++counters->ike_auth_allow_unsupported;
+        }
+        counters->ike_sa_active = table->active;
+        return true;
+    }
+
+    return false;
+}
+
+static bool
+ikev2_helper_queue_auth_request(
+    int ipc_fd,
+    uint64_t *tx_sequence,
+    uint64_t *next_auth_request_id,
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_ike_sa *sa)
+{
+    if (ipc_fd < 0 || !tx_sequence || !next_auth_request_id || !listener
+        || !sa || !sa->active || !sa->claimed_principal_ready
+        || !sa->claimed_principal_len
+        || sa->claimed_principal_len >= PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE
+        || !sa->claimed_principal_id_type || sa->pending_auth_request_id)
+    {
+        return false;
+    }
+    if (!*next_auth_request_id)
+    {
+        *next_auth_request_id = 1;
+    }
+
+    struct provider_helper_auth_request request = {
+        .request_id = (*next_auth_request_id)++,
+        .initiator_spi = sa->initiator_spi,
+        .responder_spi = sa->responder_spi,
+        .listener_id = listener->descriptor.listener_id,
+        .profile = PROVIDER_HELPER_AUTH_PROFILE_EAP_TLS,
+        .ikev2_id_type = sa->claimed_principal_id_type,
+        .claimed_principal_len = (uint32_t)sa->claimed_principal_len,
+    };
+    memcpy(request.claimed_principal, sa->claimed_principal,
+           sa->claimed_principal_len);
+
+    if (!ikev2_helper_send_auth_request(ipc_fd, tx_sequence, request.request_id,
+                                        &request))
+    {
+        return false;
+    }
+    sa->pending_auth_request_id = request.request_id;
+    return true;
+}
+
 static void
 ikev2_helper_clear_ike_sa_table(struct ikev2_helper_ike_sa_table *table)
 {
@@ -1975,7 +2118,10 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                              const struct provider_helper_runtime_config *config,
                              struct ikev2_helper_ike_sa_table *sa_table,
                              struct provider_helper_runtime_stats *counters,
-                             struct ikev2_helper_cookie_context *cookie_ctx)
+                             struct ikev2_helper_cookie_context *cookie_ctx,
+                             int ipc_fd,
+                             uint64_t *tx_sequence,
+                             uint64_t *next_auth_request_id)
 {
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE + 1];
     struct sockaddr_storage peer;
@@ -2223,7 +2369,17 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
             ++counters->ike_auth_idi_extracted;
             ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
 
-            ++counters->ike_auth_unsupported;
+            if (ikev2_helper_queue_auth_request(ipc_fd, tx_sequence,
+                                                next_auth_request_id, listener,
+                                                sa))
+            {
+                ++counters->ike_auth_request_tx;
+            }
+            else
+            {
+                ++counters->ike_auth_request_failed;
+                ++counters->ike_auth_unsupported;
+            }
             counters->ike_sa_active = sa_table->active;
         }
     }
@@ -2239,6 +2395,7 @@ ikev2_helper_loop(int fd)
     int ret = 0;
     uint64_t tx_sequence = 1;
     uint64_t last_rx_sequence = 0;
+    uint64_t next_auth_request_id = 1;
     bool configured = false;
     struct ikev2_helper_listener listeners[IKEV2_HELPER_MAX_LISTENERS];
     struct provider_helper_xfrm_lease xfrm_leases[IKEV2_HELPER_MAX_XFRM_LEASES];
@@ -2313,7 +2470,9 @@ ikev2_helper_loop(int fd)
             if (pfds[i].revents & POLLIN)
             {
                 ikev2_helper_handle_datagram(&listeners[i - 1], &config, &sa_table,
-                                             &counters, &cookie_ctx);
+                                             &counters, &cookie_ctx, fd,
+                                             &tx_sequence,
+                                             &next_auth_request_id);
             }
         }
 
@@ -2378,6 +2537,20 @@ ikev2_helper_loop(int fd)
                     goto done;
                 }
                 xfrm_leases[xfrm_lease_count++] = lease;
+                break;
+            }
+
+            case PROVIDER_HELPER_MSG_AUTH_RESPONSE:
+            {
+                struct provider_helper_auth_response response;
+                if (!configured
+                    || !ikev2_helper_read_auth_response(fd, &header, &response)
+                    || !ikev2_helper_apply_auth_response(&sa_table, &response,
+                                                         &counters))
+                {
+                    ret = 6;
+                    goto done;
+                }
                 break;
             }
 

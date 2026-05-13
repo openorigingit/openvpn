@@ -274,7 +274,11 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_auth_inner_malformed = 32,
         .ike_auth_idi_extracted = 33,
         .ike_auth_idi_invalid = 34,
-        .ike_auth_unsupported = 35,
+        .ike_auth_request_tx = 35,
+        .ike_auth_request_failed = 36,
+        .ike_auth_denied = 37,
+        .ike_auth_allow_unsupported = 38,
+        .ike_auth_unsupported = 39,
     };
     struct provider_helper_runtime_stats output;
     uint8_t payload[PROVIDER_HELPER_RUNTIME_STATS_SIZE];
@@ -342,6 +346,12 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
     assert_int_equal(output.ike_auth_idi_extracted,
                      input.ike_auth_idi_extracted);
     assert_int_equal(output.ike_auth_idi_invalid, input.ike_auth_idi_invalid);
+    assert_int_equal(output.ike_auth_request_tx, input.ike_auth_request_tx);
+    assert_int_equal(output.ike_auth_request_failed,
+                     input.ike_auth_request_failed);
+    assert_int_equal(output.ike_auth_denied, input.ike_auth_denied);
+    assert_int_equal(output.ike_auth_allow_unsupported,
+                     input.ike_auth_allow_unsupported);
     assert_int_equal(output.ike_auth_unsupported, input.ike_auth_unsupported);
 }
 
@@ -2189,7 +2199,13 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     close(datagram_fd);
     usleep(250000);
 
-    uint64_t helper_request_sequence = 4;
+    for (int i = 0; i < 100; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+
     for (int attempt = 0;
          attempt < 20 && supervisor.runtime_stats.ike_sa_active < 3;
          ++attempt)
@@ -2197,7 +2213,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
         const uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
         write_helper_header_fd(supervisor.ipc_fd,
                                PROVIDER_HELPER_MSG_STATS_REQUEST,
-                               helper_request_sequence++, 89);
+                               supervisor.next_tx_sequence++, 89);
         for (int i = 0;
              i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
              ++i)
@@ -2234,7 +2250,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           helper_request_sequence++, 90);
+                           supervisor.next_tx_sequence++, 90);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -2280,13 +2296,20 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_true(supervisor.runtime_stats.ike_auth_inner_malformed >= 1);
     assert_true(supervisor.runtime_stats.ike_auth_idi_extracted >= 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_idi_invalid, 0);
-    assert_true(supervisor.runtime_stats.ike_auth_unsupported >= 1);
+    assert_true(supervisor.runtime_stats.ike_auth_request_tx >= 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_request_failed, 0);
+    assert_true(supervisor.runtime_stats.ike_auth_denied >= 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_allow_unsupported, 0);
 #else
     assert_int_equal(supervisor.runtime_stats.ike_auth_decrypted, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_inner_parsed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_inner_malformed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_idi_extracted, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_idi_invalid, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_request_tx, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_request_failed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_denied, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_allow_unsupported, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 0);
 #endif
     assert_int_equal(supervisor.runtime_stats.ike_auth_malformed, 0);
@@ -2295,7 +2318,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     sleep(4);
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           helper_request_sequence++, 91);
+                           supervisor.next_tx_sequence++, 91);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -2311,7 +2334,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_PING,
-                           helper_request_sequence++, 77);
+                           supervisor.next_tx_sequence++, 77);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
