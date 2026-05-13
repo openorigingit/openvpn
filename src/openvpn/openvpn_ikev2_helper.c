@@ -79,6 +79,7 @@
      + 2 * IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES)
 #define IKEV2_HELPER_PRF_PLUS_SEED_MAX_BYTES \
     (2 * PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES + 2 * sizeof(uint64_t))
+#define IKEV2_HELPER_CLAIMED_PRINCIPAL_SIZE 256
 
 static volatile sig_atomic_t helper_stop;
 
@@ -119,6 +120,9 @@ struct ikev2_helper_ike_sa {
     uint8_t sk_pi[IKEV2_HELPER_PRF_SHA256_BYTES];
     size_t sk_pr_len;
     uint8_t sk_pr[IKEV2_HELPER_PRF_SHA256_BYTES];
+    bool claimed_principal_ready;
+    size_t claimed_principal_len;
+    char claimed_principal[IKEV2_HELPER_CLAIMED_PRINCIPAL_SIZE];
     time_t created;
     time_t updated;
     struct provider_helper_ikev2_sa_selection selection;
@@ -1268,6 +1272,12 @@ ikev2_helper_record_ike_auth_inner_payload(
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_IDI:
             summary->saw_idi = true;
+            ++summary->idi_count;
+            if (summary->idi_count == 1)
+            {
+                summary->idi_offset = body_offset;
+                summary->idi_len = body_len;
+            }
             break;
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_IDR:
@@ -1363,6 +1373,69 @@ ikev2_helper_parse_ike_auth_inner_payloads(
 
     return pos == plaintext_len ? PROVIDER_HELPER_IKEV2_PARSE_OK
                                 : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+}
+
+static bool
+ikev2_helper_principal_byte_allowed(uint8_t c)
+{
+    return c >= 0x21 && c <= 0x7e;
+}
+
+static bool
+ikev2_helper_extract_claimed_idi(
+    struct ikev2_helper_ike_sa *sa,
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    const struct provider_helper_ikev2_payload_summary *summary)
+{
+    if (!sa)
+    {
+        return false;
+    }
+
+    sa->claimed_principal_ready = false;
+    sa->claimed_principal_len = 0;
+    ikev2_helper_secure_zero(sa->claimed_principal,
+                             sizeof(sa->claimed_principal));
+
+    if (!plaintext || !summary || !summary->saw_idi
+        || summary->idi_count != 1
+        || !ikev2_helper_body_inside(plaintext_len, summary->idi_offset,
+                                     summary->idi_len)
+        || summary->idi_len <= 4)
+    {
+        return false;
+    }
+
+    const uint8_t *idi = plaintext + summary->idi_offset;
+    const uint8_t id_type = idi[0];
+    if ((id_type != PROVIDER_HELPER_IKEV2_ID_FQDN
+         && id_type != PROVIDER_HELPER_IKEV2_ID_RFC822)
+        || idi[1] || idi[2] || idi[3])
+    {
+        return false;
+    }
+
+    const uint8_t *id_data = idi + 4;
+    const size_t id_data_len = summary->idi_len - 4;
+    if (id_data_len == 0
+        || id_data_len >= sizeof(sa->claimed_principal))
+    {
+        return false;
+    }
+    for (size_t i = 0; i < id_data_len; ++i)
+    {
+        if (!ikev2_helper_principal_byte_allowed(id_data[i]))
+        {
+            return false;
+        }
+    }
+
+    memcpy(sa->claimed_principal, id_data, id_data_len);
+    sa->claimed_principal[id_data_len] = '\0';
+    sa->claimed_principal_len = id_data_len;
+    sa->claimed_principal_ready = true;
+    return true;
 }
 
 static bool
@@ -2139,6 +2212,15 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 return;
             }
             ++counters->ike_auth_inner_parsed;
+            if (!ikev2_helper_extract_claimed_idi(sa, plaintext, plaintext_len,
+                                                  &inner_summary))
+            {
+                ++counters->ike_auth_idi_invalid;
+                ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
+            ++counters->ike_auth_idi_extracted;
             ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
 
             ++counters->ike_auth_unsupported;

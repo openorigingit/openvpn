@@ -272,7 +272,9 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_auth_decrypt_failed = 30,
         .ike_auth_inner_parsed = 31,
         .ike_auth_inner_malformed = 32,
-        .ike_auth_unsupported = 33,
+        .ike_auth_idi_extracted = 33,
+        .ike_auth_idi_invalid = 34,
+        .ike_auth_unsupported = 35,
     };
     struct provider_helper_runtime_stats output;
     uint8_t payload[PROVIDER_HELPER_RUNTIME_STATS_SIZE];
@@ -337,6 +339,9 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_auth_inner_parsed);
     assert_int_equal(output.ike_auth_inner_malformed,
                      input.ike_auth_inner_malformed);
+    assert_int_equal(output.ike_auth_idi_extracted,
+                     input.ike_auth_idi_extracted);
+    assert_int_equal(output.ike_auth_idi_invalid, input.ike_auth_idi_invalid);
     assert_int_equal(output.ike_auth_unsupported, input.ike_auth_unsupported);
 }
 
@@ -2160,11 +2165,15 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_true(supervisor.runtime_stats.ike_auth_decrypted >= 1);
     assert_true(supervisor.runtime_stats.ike_auth_inner_parsed >= 1);
     assert_true(supervisor.runtime_stats.ike_auth_inner_malformed >= 1);
+    assert_true(supervisor.runtime_stats.ike_auth_idi_extracted >= 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_idi_invalid, 0);
     assert_true(supervisor.runtime_stats.ike_auth_unsupported >= 1);
 #else
     assert_int_equal(supervisor.runtime_stats.ike_auth_decrypted, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_inner_parsed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_inner_malformed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_idi_extracted, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_idi_invalid, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 0);
 #endif
     assert_int_equal(supervisor.runtime_stats.ike_auth_malformed, 0);

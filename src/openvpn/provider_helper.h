@@ -35,7 +35,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 36
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  288
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  304
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
 #define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE 4
@@ -86,6 +86,8 @@
 #define PROVIDER_HELPER_IKEV2_DH_ECP_256 19
 #define PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH 14
 #define PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES 64
+#define PROVIDER_HELPER_IKEV2_ID_FQDN       2
+#define PROVIDER_HELPER_IKEV2_ID_RFC822     3
 
 #define PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_SAS 1024
 #define PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_PER_SOURCE 32
@@ -254,6 +256,8 @@ struct provider_helper_runtime_stats {
     uint64_t ike_auth_decrypt_failed;
     uint64_t ike_auth_inner_parsed;
     uint64_t ike_auth_inner_malformed;
+    uint64_t ike_auth_idi_extracted;
+    uint64_t ike_auth_idi_invalid;
     uint64_t ike_auth_unsupported;
 };
 
@@ -300,6 +304,7 @@ struct provider_helper_ikev2_payload_summary {
     uint32_t sa_count;
     uint32_t ke_count;
     uint32_t nonce_count;
+    uint32_t idi_count;
     uint32_t sk_count;
     size_t sa_offset;
     size_t sa_len;
@@ -310,6 +315,8 @@ struct provider_helper_ikev2_payload_summary {
     size_t ke_data_len;
     size_t nonce_offset;
     size_t nonce_len;
+    size_t idi_offset;
+    size_t idi_len;
     size_t sk_offset;
     size_t sk_len;
     uint8_t sk_next_payload;
