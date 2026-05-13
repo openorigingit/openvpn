@@ -328,6 +328,56 @@ ikev2_helper_generate_ecp256_keypair(uint8_t *public_key,
 }
 
 static bool
+ikev2_helper_ecp256_public_key_valid(const uint8_t *public_key,
+                                     size_t public_key_len)
+{
+    if (!public_key
+        || public_key_len != PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES)
+    {
+        return false;
+    }
+
+    bool ret = false;
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    EC_GROUP *group = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
+    EC_POINT *point = group ? EC_POINT_new(group) : NULL;
+    BIGNUM *x = BN_bin2bn(public_key, IKEV2_HELPER_ECP_256_COORD_BYTES, NULL);
+    BIGNUM *y =
+        BN_bin2bn(public_key + IKEV2_HELPER_ECP_256_COORD_BYTES,
+                  IKEV2_HELPER_ECP_256_COORD_BYTES, NULL);
+    ret = group && point && x && y
+          && EC_POINT_set_affine_coordinates(group, point, x, y, NULL) == 1
+          && !EC_POINT_is_at_infinity(group, point)
+          && EC_POINT_is_on_curve(group, point, NULL) == 1;
+    BN_free(x);
+    BN_free(y);
+    EC_POINT_free(point);
+    EC_GROUP_free(group);
+#elif defined(ENABLE_CRYPTO_MBEDTLS)
+    mbedtls_ecp_group group;
+    mbedtls_ecp_point point;
+    mbedtls_ecp_group_init(&group);
+    mbedtls_ecp_point_init(&point);
+    if (mbedtls_ecp_group_load(&group, MBEDTLS_ECP_DP_SECP256R1) == 0
+        && mbedtls_mpi_read_binary(&point.X, public_key,
+                                   IKEV2_HELPER_ECP_256_COORD_BYTES) == 0
+        && mbedtls_mpi_read_binary(
+               &point.Y, public_key + IKEV2_HELPER_ECP_256_COORD_BYTES,
+               IKEV2_HELPER_ECP_256_COORD_BYTES) == 0
+        && mbedtls_mpi_lset(&point.Z, 1) == 0)
+    {
+        ret = mbedtls_ecp_check_pubkey(&group, &point) == 0;
+    }
+    mbedtls_ecp_point_free(&point);
+    mbedtls_ecp_group_free(&group);
+#else
+    (void)public_key;
+    (void)public_key_len;
+#endif
+    return ret;
+}
+
+static bool
 ikev2_helper_hmac_sha256(const uint8_t *key, size_t key_len,
                          const uint8_t *input, size_t input_len,
                          uint8_t *tag, size_t tag_len)
@@ -850,7 +900,9 @@ ikev2_helper_store_ike_sa_init_material(
         || !ikev2_helper_body_inside(packet_len, summary->ke_data_offset,
                                      summary->ke_data_len)
         || !ikev2_helper_body_inside(packet_len, summary->nonce_offset,
-                                     summary->nonce_len))
+                                     summary->nonce_len)
+        || !ikev2_helper_ecp256_public_key_valid(
+            packet + summary->ke_data_offset, summary->ke_data_len))
     {
         return false;
     }

@@ -417,6 +417,18 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
 #define TEST_IKEV2_SA_PAYLOAD_LEN \
     (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + TEST_IKEV2_SA_PROPOSAL_LEN)
 
+static const uint8_t test_ikev2_ecp256_generator[
+    PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES] = {
+    0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47,
+    0xf8, 0xbc, 0xe6, 0xe5, 0x63, 0xa4, 0x40, 0xf2,
+    0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb, 0x33, 0xa0,
+    0xf4, 0xa1, 0x39, 0x45, 0xd8, 0x98, 0xc2, 0x96,
+    0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b,
+    0x8e, 0xe7, 0xeb, 0x4a, 0x7c, 0x0f, 0x9e, 0x16,
+    0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e, 0xce,
+    0xcb, 0xb6, 0x40, 0x68, 0x37, 0xbf, 0x51, 0xf5,
+};
+
 static size_t
 test_ike_sa_init_encr_transform_offset(void)
 {
@@ -501,11 +513,8 @@ test_make_ike_sa_init_packet(uint8_t *packet, size_t packet_size)
     pos = test_add_ikev2_payload(packet, pos, PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE,
                                  ke_len, 0);
     test_write_be16(packet + ke, 19); /* ECP-256. */
-    for (size_t i = 0; i < PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES; ++i)
-    {
-        packet[ke + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE + i] =
-            (uint8_t)(0xa0 + i);
-    }
+    memcpy(packet + ke + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE,
+           test_ikev2_ecp256_generator, sizeof(test_ikev2_ecp256_generator));
 
     const size_t nonce = pos + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
     pos = test_add_ikev2_payload(packet, pos, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
@@ -630,6 +639,28 @@ test_send_ikev2_invalid_ke_datagram_from(int fd, uint16_t port,
     const size_t packet_len = test_make_ike_sa_init_packet(packet, sizeof(packet));
     test_write_be64(packet, initiator_spi);
     test_write_be16(packet + test_ike_sa_init_ke_offset(), 20);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    assert_int_equal(sendto(fd, packet, packet_len, 0,
+                            (struct sockaddr *)&addr, sizeof(addr)),
+                     packet_len);
+}
+
+static void
+test_send_ikev2_invalid_point_datagram_from(int fd, uint16_t port,
+                                            uint64_t initiator_spi)
+{
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t packet_len = test_make_ike_sa_init_packet(packet, sizeof(packet));
+    test_write_be64(packet, initiator_spi);
+    memset(packet + test_ike_sa_init_ke_offset()
+               + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE,
+           0, PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES);
 
     struct sockaddr_in addr;
     CLEAR(addr);
@@ -1584,6 +1615,9 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     test_send_ikev2_invalid_ke_datagram_from(datagram_fd, port,
                                              0x8899aabbccddeeffull);
     usleep(10000);
+    test_send_ikev2_invalid_point_datagram_from(datagram_fd, port,
+                                                0x7766554433221100ull);
+    usleep(10000);
     for (int i = 0; i < 8; ++i)
     {
         test_send_ikev2_datagram_from(datagram_fd, port, 0x1122334455667788ull);
@@ -1652,10 +1686,10 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
-    assert_true(supervisor.runtime_stats.datagrams_rx >= 16);
-    assert_true(supervisor.runtime_stats.datagrams_parsed >= 16);
+    assert_true(supervisor.runtime_stats.datagrams_rx >= 17);
+    assert_true(supervisor.runtime_stats.datagrams_parsed >= 17);
     assert_true(supervisor.runtime_stats.ike_sa_init_accepted >= 4);
-    assert_int_equal(supervisor.runtime_stats.ike_sa_init_state_failed, 0);
+    assert_true(supervisor.runtime_stats.ike_sa_init_state_failed >= 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_response_tx >= 4);
     assert_int_equal(supervisor.runtime_stats.ike_sa_init_response_failed, 0);
     assert_true(supervisor.runtime_stats.ike_sa_init_duplicate >= 1);
