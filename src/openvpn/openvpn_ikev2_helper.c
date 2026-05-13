@@ -55,6 +55,7 @@
 #define IKEV2_HELPER_MAX_IKE_SAS PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_SAS
 #define IKEV2_HELPER_COOKIE_KEY_BYTES 32
 #define IKEV2_HELPER_COOKIE_MAX_PAST_EPOCHS 1
+#define IKEV2_HELPER_SPI_GENERATE_ATTEMPTS 16
 
 static volatile sig_atomic_t helper_stop;
 
@@ -70,6 +71,11 @@ struct ikev2_helper_ike_sa {
     uint32_t listener_id;
     uint32_t message_id;
     uint32_t retransmits;
+    uint16_t initiator_ke_group;
+    size_t initiator_ke_len;
+    uint8_t initiator_ke[PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES];
+    size_t initiator_nonce_len;
+    uint8_t initiator_nonce[PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES];
     time_t created;
     time_t updated;
     struct provider_helper_ikev2_sa_selection selection;
@@ -85,6 +91,12 @@ struct ikev2_helper_ike_sa_table {
 struct ikev2_helper_cookie_context {
     bool ready;
     uint8_t key[IKEV2_HELPER_COOKIE_KEY_BYTES];
+};
+
+enum ikev2_helper_add_sa_result {
+    IKEV2_HELPER_ADD_SA_OK = 0,
+    IKEV2_HELPER_ADD_SA_TABLE_FULL,
+    IKEV2_HELPER_ADD_SA_STATE_FAILED,
 };
 
 static void
@@ -150,6 +162,32 @@ ikev2_helper_random_bytes(uint8_t *dst, size_t dst_len)
     (void)dst_len;
     return false;
 #endif
+}
+
+static bool
+ikev2_helper_random_nonzero_u64(uint64_t *value)
+{
+    if (!value)
+    {
+        return false;
+    }
+
+    for (int i = 0; i < IKEV2_HELPER_SPI_GENERATE_ATTEMPTS; ++i)
+    {
+        uint64_t candidate = 0;
+        if (!ikev2_helper_random_bytes((uint8_t *)&candidate,
+                                       sizeof(candidate)))
+        {
+            return false;
+        }
+        if (candidate)
+        {
+            *value = candidate;
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static bool
@@ -577,6 +615,61 @@ ikev2_helper_count_ike_sas_for_source(
     return count;
 }
 
+static bool
+ikev2_helper_body_inside(size_t packet_len, size_t offset, size_t len)
+{
+    return offset <= packet_len && len <= packet_len - offset;
+}
+
+static bool
+ikev2_helper_responder_spi_exists(
+    const struct ikev2_helper_ike_sa_table *table,
+    uint64_t responder_spi)
+{
+    if (!table || !responder_spi)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        const struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        if (sa->active && sa->responder_spi == responder_spi)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool
+ikev2_helper_generate_responder_spi(
+    const struct ikev2_helper_ike_sa_table *table,
+    uint64_t *responder_spi)
+{
+    if (!table || !responder_spi)
+    {
+        return false;
+    }
+
+    for (int i = 0; i < IKEV2_HELPER_SPI_GENERATE_ATTEMPTS; ++i)
+    {
+        uint64_t candidate = 0;
+        if (!ikev2_helper_random_nonzero_u64(&candidate))
+        {
+            return false;
+        }
+        if (!ikev2_helper_responder_spi_exists(table, candidate))
+        {
+            *responder_spi = candidate;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static struct ikev2_helper_ike_sa *
 ikev2_helper_find_ike_sa(struct ikev2_helper_ike_sa_table *table,
                          const struct ikev2_helper_listener *listener,
@@ -605,17 +698,50 @@ ikev2_helper_find_ike_sa(struct ikev2_helper_ike_sa_table *table,
 }
 
 static bool
+ikev2_helper_store_ike_sa_init_material(
+    struct ikev2_helper_ike_sa *sa,
+    const uint8_t *packet,
+    size_t packet_len,
+    const struct provider_helper_ikev2_payload_summary *summary)
+{
+    if (!sa || !packet || !summary
+        || !summary->ke_dh_group
+        || !summary->ke_data_len
+        || summary->ke_data_len > sizeof(sa->initiator_ke)
+        || summary->nonce_len > sizeof(sa->initiator_nonce)
+        || !ikev2_helper_body_inside(packet_len, summary->ke_data_offset,
+                                     summary->ke_data_len)
+        || !ikev2_helper_body_inside(packet_len, summary->nonce_offset,
+                                     summary->nonce_len))
+    {
+        return false;
+    }
+
+    sa->initiator_ke_group = summary->ke_dh_group;
+    sa->initiator_ke_len = summary->ke_data_len;
+    memcpy(sa->initiator_ke, packet + summary->ke_data_offset,
+           summary->ke_data_len);
+    sa->initiator_nonce_len = summary->nonce_len;
+    memcpy(sa->initiator_nonce, packet + summary->nonce_offset,
+           summary->nonce_len);
+    return true;
+}
+
+static enum ikev2_helper_add_sa_result
 ikev2_helper_add_ike_sa(struct ikev2_helper_ike_sa_table *table,
                         const struct ikev2_helper_listener *listener,
                         const struct provider_helper_ikev2_header *header,
                         const struct sockaddr_storage *peer,
                         socklen_t peer_len,
+                        const uint8_t *packet,
+                        size_t packet_len,
+                        const struct provider_helper_ikev2_payload_summary *summary,
                         const struct provider_helper_ikev2_sa_selection *selection)
 {
     if (!table || !listener || !header || !peer || !selection
-        || !selection->selected)
+        || !selection->selected || !packet || !summary)
     {
-        return false;
+        return IKEV2_HELPER_ADD_SA_STATE_FAILED;
     }
 
     for (size_t i = 0; i < SIZE(table->entries); ++i)
@@ -623,10 +749,15 @@ ikev2_helper_add_ike_sa(struct ikev2_helper_ike_sa_table *table,
         struct ikev2_helper_ike_sa *sa = &table->entries[i];
         if (!sa->active)
         {
+            uint64_t responder_spi = 0;
+            if (!ikev2_helper_generate_responder_spi(table, &responder_spi))
+            {
+                return IKEV2_HELPER_ADD_SA_STATE_FAILED;
+            }
             CLEAR(*sa);
             sa->active = true;
             sa->initiator_spi = header->initiator_spi;
-            sa->responder_spi = header->responder_spi;
+            sa->responder_spi = responder_spi;
             sa->listener_id = listener->descriptor.listener_id;
             sa->message_id = header->message_id;
             sa->created = time(NULL);
@@ -634,12 +765,18 @@ ikev2_helper_add_ike_sa(struct ikev2_helper_ike_sa_table *table,
             sa->selection = *selection;
             sa->peer = *peer;
             sa->peer_len = peer_len;
+            if (!ikev2_helper_store_ike_sa_init_material(sa, packet, packet_len,
+                                                         summary))
+            {
+                ikev2_helper_secure_zero(sa, sizeof(*sa));
+                return IKEV2_HELPER_ADD_SA_STATE_FAILED;
+            }
             ++table->active;
-            return true;
+            return IKEV2_HELPER_ADD_SA_OK;
         }
     }
 
-    return false;
+    return IKEV2_HELPER_ADD_SA_TABLE_FULL;
 }
 
 static void
@@ -651,10 +788,20 @@ ikev2_helper_clear_ike_sa(struct ikev2_helper_ike_sa_table *table,
         return;
     }
 
-    CLEAR(*sa);
-    if (table->active > 0)
+    const bool decrement_active = table->active > 0;
+    ikev2_helper_secure_zero(sa, sizeof(*sa));
+    if (decrement_active)
     {
         --table->active;
+    }
+}
+
+static void
+ikev2_helper_clear_ike_sa_table(struct ikev2_helper_ike_sa_table *table)
+{
+    if (table)
+    {
+        ikev2_helper_secure_zero(table, sizeof(*table));
     }
 }
 
@@ -923,10 +1070,17 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
-                if (!ikev2_helper_add_ike_sa(sa_table, listener, &header, &peer,
-                                             peer_len, &selection))
+                const enum ikev2_helper_add_sa_result add_result =
+                    ikev2_helper_add_ike_sa(sa_table, listener, &header, &peer,
+                                            peer_len, packet, (size_t)n,
+                                            &summary, &selection);
+                if (add_result == IKEV2_HELPER_ADD_SA_TABLE_FULL)
                 {
                     ++counters->ike_sa_table_full_dropped;
+                }
+                else if (add_result == IKEV2_HELPER_ADD_SA_STATE_FAILED)
+                {
+                    ++counters->ike_sa_init_state_failed;
                 }
                 else
                 {
@@ -1142,6 +1296,7 @@ done:
         close(listeners[i].fd);
         listeners[i].fd = -1;
     }
+    ikev2_helper_clear_ike_sa_table(&sa_table);
     ikev2_helper_cookie_context_free(&cookie_ctx);
 
     return ret;

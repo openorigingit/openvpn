@@ -254,6 +254,7 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_sa_init_duplicate = 2,
         .ike_sa_init_retransmit_dropped = 7,
         .ike_sa_table_full_dropped = 1,
+        .ike_sa_init_state_failed = 22,
         .ike_sa_active = 8,
         .ike_sa_expired = 6,
     };
@@ -300,6 +301,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_sa_init_retransmit_dropped);
     assert_int_equal(output.ike_sa_table_full_dropped,
                      input.ike_sa_table_full_dropped);
+    assert_int_equal(output.ike_sa_init_state_failed,
+                     input.ike_sa_init_state_failed);
     assert_int_equal(output.ike_sa_active, input.ike_sa_active);
     assert_int_equal(output.ike_sa_expired, input.ike_sa_expired);
 }
@@ -1467,6 +1470,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_true(supervisor.runtime_stats.datagrams_rx >= 15);
     assert_true(supervisor.runtime_stats.datagrams_parsed >= 15);
     assert_true(supervisor.runtime_stats.ike_sa_init_accepted >= 3);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_init_state_failed, 0);
     assert_true(supervisor.runtime_stats.ike_sa_init_duplicate >= 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_retransmit_dropped >= 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_per_source_dropped >= 1);
