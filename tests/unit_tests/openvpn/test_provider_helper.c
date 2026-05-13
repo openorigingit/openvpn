@@ -270,7 +270,9 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_auth_no_state = 28,
         .ike_auth_decrypted = 29,
         .ike_auth_decrypt_failed = 30,
-        .ike_auth_unsupported = 31,
+        .ike_auth_inner_parsed = 31,
+        .ike_auth_inner_malformed = 32,
+        .ike_auth_unsupported = 33,
     };
     struct provider_helper_runtime_stats output;
     uint8_t payload[PROVIDER_HELPER_RUNTIME_STATS_SIZE];
@@ -331,6 +333,10 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
     assert_int_equal(output.ike_auth_decrypted, input.ike_auth_decrypted);
     assert_int_equal(output.ike_auth_decrypt_failed,
                      input.ike_auth_decrypt_failed);
+    assert_int_equal(output.ike_auth_inner_parsed,
+                     input.ike_auth_inner_parsed);
+    assert_int_equal(output.ike_auth_inner_malformed,
+                     input.ike_auth_inner_malformed);
     assert_int_equal(output.ike_auth_unsupported, input.ike_auth_unsupported);
 }
 
@@ -837,7 +843,8 @@ test_make_encrypted_ike_auth_packet(
     uint8_t *packet,
     size_t packet_size,
     uint64_t initiator_spi,
-    const struct test_ikev2_sa_init_response_material *material)
+    const struct test_ikev2_sa_init_response_material *material,
+    bool malformed_inner)
 {
     uint8_t sk_ei[TEST_IKEV2_AES_GCM_KEYMAT_BYTES];
     assert_true(test_derive_ike_auth_keymat(initiator_spi, material, sk_ei,
@@ -848,13 +855,20 @@ test_make_encrypted_ike_auth_packet(
         2, 0, 0, 0, 'a',
         0, /* Pad Length. */
     };
-    const size_t plaintext_len = 10;
-    const uint16_t sk_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
-                            + TEST_IKEV2_AES_GCM_IV_BYTES
-                            + plaintext_len
-                            + TEST_IKEV2_AES_GCM_TAG_BYTES;
+    uint8_t malformed_plaintext[8] = {
+        PROVIDER_HELPER_IKEV2_PAYLOAD_NONE, 0, 0, 3,
+        0, /* Pad Length. */
+    };
+    const uint8_t *selected_plaintext =
+        malformed_inner ? malformed_plaintext : plaintext;
+    const size_t plaintext_len = malformed_inner ? 5 : 10;
+    const size_t sk_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                          + TEST_IKEV2_AES_GCM_IV_BYTES
+                          + plaintext_len
+                          + TEST_IKEV2_AES_GCM_TAG_BYTES;
     const size_t packet_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE + sk_len;
     assert_true(packet_size >= packet_len);
+    assert_true(sk_len <= UINT16_MAX);
 
     memset(packet, 0, packet_size);
     test_make_ikev2_header(packet, false,
@@ -866,29 +880,37 @@ test_make_encrypted_ike_auth_packet(
     test_write_be32(packet + 20, 1);
     size_t pos = PROVIDER_HELPER_IKEV2_HEADER_SIZE;
     test_add_ikev2_payload(packet, pos, PROVIDER_HELPER_IKEV2_PAYLOAD_IDI,
-                           sk_len, 0);
+                           (uint16_t)sk_len, 0);
     pos += PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
 
     const uint8_t iv[TEST_IKEV2_AES_GCM_IV_BYTES] = {
         0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
     };
     memcpy(packet + pos, iv, sizeof(iv));
+    if (malformed_inner)
+    {
+        packet[pos + sizeof(iv) - 1] ^= 0x01;
+    }
     pos += sizeof(iv);
 
     uint8_t nonce[TEST_IKEV2_AES_GCM_SALT_BYTES + TEST_IKEV2_AES_GCM_IV_BYTES];
     memcpy(nonce, sk_ei + 32, TEST_IKEV2_AES_GCM_SALT_BYTES);
-    memcpy(nonce + TEST_IKEV2_AES_GCM_SALT_BYTES, iv, sizeof(iv));
+    memcpy(nonce + TEST_IKEV2_AES_GCM_SALT_BYTES,
+           packet + PROVIDER_HELPER_IKEV2_HEADER_SIZE
+           + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE,
+           sizeof(iv));
 
     uint8_t *ciphertext = packet + pos;
     uint8_t *tag = packet + pos + plaintext_len;
     assert_true(test_aes_gcm_encrypt(sk_ei, 32, nonce, sizeof(nonce), packet,
                                      PROVIDER_HELPER_IKEV2_HEADER_SIZE
                                      + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE,
-                                     plaintext, plaintext_len, ciphertext,
-                                     tag));
+                                     selected_plaintext, plaintext_len,
+                                     ciphertext, tag));
 
     secure_memzero(sk_ei, sizeof(sk_ei));
     secure_memzero(plaintext, sizeof(plaintext));
+    secure_memzero(malformed_plaintext, sizeof(malformed_plaintext));
     secure_memzero(nonce, sizeof(nonce));
     return packet_len;
 }
@@ -939,11 +961,12 @@ test_send_ikev2_encrypted_ike_auth_datagram_from(
     int fd,
     uint16_t port,
     uint64_t initiator_spi,
-    const struct test_ikev2_sa_init_response_material *material)
+    const struct test_ikev2_sa_init_response_material *material,
+    bool malformed_inner)
 {
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     const size_t packet_len = test_make_encrypted_ike_auth_packet(
-        packet, sizeof(packet), initiator_spi, material);
+        packet, sizeof(packet), initiator_spi, material, malformed_inner);
 
     struct sockaddr_in addr;
     CLEAR(addr);
@@ -2010,7 +2033,10 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
                      responder_spi);
 #if defined(ENABLE_CRYPTO_OPENSSL)
     test_send_ikev2_encrypted_ike_auth_datagram_from(
-        response_fd, port, 0xfeedfacecafebeefull, &sa_init_material);
+        response_fd, port, 0xfeedfacecafebeefull, &sa_init_material, false);
+    usleep(10000);
+    test_send_ikev2_encrypted_ike_auth_datagram_from(
+        response_fd, port, 0xfeedfacecafebeefull, &sa_init_material, true);
     usleep(10000);
 #endif
     test_send_ikev2_ike_auth_datagram_from(response_fd, port,
@@ -2132,9 +2158,13 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_true(supervisor.runtime_stats.ike_auth_decrypt_failed >= 1);
 #if defined(ENABLE_CRYPTO_OPENSSL)
     assert_true(supervisor.runtime_stats.ike_auth_decrypted >= 1);
+    assert_true(supervisor.runtime_stats.ike_auth_inner_parsed >= 1);
+    assert_true(supervisor.runtime_stats.ike_auth_inner_malformed >= 1);
     assert_true(supervisor.runtime_stats.ike_auth_unsupported >= 1);
 #else
     assert_int_equal(supervisor.runtime_stats.ike_auth_decrypted, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_inner_parsed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_inner_malformed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 0);
 #endif
     assert_int_equal(supervisor.runtime_stats.ike_auth_malformed, 0);

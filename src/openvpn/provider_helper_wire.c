@@ -460,6 +460,8 @@ provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u64(&pos, stats->ike_auth_no_state);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_decrypted);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_decrypt_failed);
+    provider_helper_wire_write_u64(&pos, stats->ike_auth_inner_parsed);
+    provider_helper_wire_write_u64(&pos, stats->ike_auth_inner_malformed);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_unsupported);
 
     return (size_t)(pos - dst) == PROVIDER_HELPER_RUNTIME_STATS_SIZE;
@@ -515,6 +517,8 @@ provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
     stats->ike_auth_no_state = provider_helper_wire_read_u64(&pos);
     stats->ike_auth_decrypted = provider_helper_wire_read_u64(&pos);
     stats->ike_auth_decrypt_failed = provider_helper_wire_read_u64(&pos);
+    stats->ike_auth_inner_parsed = provider_helper_wire_read_u64(&pos);
+    stats->ike_auth_inner_malformed = provider_helper_wire_read_u64(&pos);
     stats->ike_auth_unsupported = provider_helper_wire_read_u64(&pos);
 
     return (size_t)(pos - src) == PROVIDER_HELPER_RUNTIME_STATS_SIZE;
@@ -747,6 +751,7 @@ static void
 provider_helper_ikev2_record_payload(
     struct provider_helper_ikev2_payload_summary *summary,
     uint8_t payload_type,
+    uint8_t next_payload,
     size_t pos,
     uint16_t payload_len)
 {
@@ -827,6 +832,7 @@ provider_helper_ikev2_record_payload(
             {
                 summary->sk_offset = body_offset;
                 summary->sk_len = body_len;
+                summary->sk_next_payload = next_payload;
             }
             break;
     }
@@ -935,7 +941,8 @@ provider_helper_ikev2_parse_payloads(
             }
         }
 
-        provider_helper_ikev2_record_payload(summary, payload_type, pos,
+        provider_helper_ikev2_record_payload(summary, payload_type,
+                                             next_payload, pos,
                                              payload_len);
         pos += payload_len;
         if (payload_type == PROVIDER_HELPER_IKEV2_PAYLOAD_SK

@@ -1168,6 +1168,204 @@ ikev2_helper_body_inside(size_t packet_len, size_t offset, size_t len)
 }
 
 static bool
+ikev2_helper_ike_auth_inner_payload_supported(uint8_t payload_type)
+{
+    switch (payload_type)
+    {
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_SA:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_IDI:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_IDR:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_CERT:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_CERTREQ:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_AUTH:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_DELETE:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_VENDOR:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_TSI:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_TSR:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_CP:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_EAP:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+static enum provider_helper_ikev2_parse_result
+ikev2_helper_validate_ike_auth_inner_payload(
+    uint8_t payload_type,
+    size_t body_len,
+    const struct provider_helper_runtime_config *config)
+{
+    switch (payload_type)
+    {
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_SA:
+            return body_len >= PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                   ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                   : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_IDI:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_IDR:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_AUTH:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_DELETE:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_CP:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_EAP:
+            return body_len >= 4 ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                                 : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_TSI:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_TSR:
+            return body_len >= 4 ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                                 : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_CERT:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_CERTREQ:
+            if (body_len < 1 || !config
+                || body_len > config->max_cert_chain_bytes)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+            return PROVIDER_HELPER_IKEV2_PARSE_OK;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_VENDOR:
+            return PROVIDER_HELPER_IKEV2_PARSE_OK;
+
+        default:
+            return PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD;
+    }
+}
+
+static void
+ikev2_helper_record_ike_auth_inner_payload(
+    struct provider_helper_ikev2_payload_summary *summary,
+    uint8_t payload_type,
+    size_t pos,
+    uint16_t payload_len)
+{
+    if (!summary)
+    {
+        return;
+    }
+
+    const size_t body_offset = pos + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    const size_t body_len = payload_len
+                            - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+
+    ++summary->payload_count;
+    switch (payload_type)
+    {
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_SA:
+            summary->saw_sa = true;
+            ++summary->sa_count;
+            if (summary->sa_count == 1)
+            {
+                summary->sa_offset = body_offset;
+                summary->sa_len = body_len;
+            }
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_IDI:
+            summary->saw_idi = true;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_IDR:
+            summary->saw_idr = true;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_AUTH:
+            summary->saw_auth = true;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_EAP:
+            summary->saw_eap = true;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_TSI:
+            summary->saw_tsi = true;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_TSR:
+            summary->saw_tsr = true;
+            break;
+    }
+}
+
+static enum provider_helper_ikev2_parse_result
+ikev2_helper_parse_ike_auth_inner_payloads(
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    uint8_t first_payload,
+    const struct provider_helper_runtime_config *config,
+    struct provider_helper_ikev2_payload_summary *summary)
+{
+    if (summary)
+    {
+        CLEAR(*summary);
+    }
+    if ((!plaintext && plaintext_len) || !config)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_TOO_SHORT;
+    }
+    if (first_payload == PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
+    {
+        return plaintext_len == 0 ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                                  : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    size_t pos = 0;
+    uint8_t payload_type = first_payload;
+    uint32_t payload_count = 0;
+    while (payload_type != PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
+    {
+        if (++payload_count > PROVIDER_HELPER_IKEV2_MAX_PAYLOADS)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_PAYLOAD_LIMIT;
+        }
+        if (plaintext_len - pos < PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const uint8_t next_payload = plaintext[pos];
+        const uint8_t payload_flags = plaintext[pos + 1];
+        const uint16_t payload_len = ((uint16_t)plaintext[pos + 2] << 8)
+                                     | plaintext[pos + 3];
+        const bool critical = (payload_flags & 0x80) != 0;
+        if (payload_len < PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+            || payload_len > plaintext_len - pos)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+        if (!ikev2_helper_ike_auth_inner_payload_supported(payload_type))
+        {
+            return critical
+                   ? PROVIDER_HELPER_IKEV2_PARSE_UNSUPPORTED_CRITICAL_PAYLOAD
+                   : PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD;
+        }
+
+        const size_t body_len =
+            payload_len - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+        const enum provider_helper_ikev2_parse_result payload_result =
+            ikev2_helper_validate_ike_auth_inner_payload(payload_type, body_len,
+                                                         config);
+        if (payload_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+        {
+            return payload_result;
+        }
+
+        ikev2_helper_record_ike_auth_inner_payload(summary, payload_type, pos,
+                                                   payload_len);
+        pos += payload_len;
+        payload_type = next_payload;
+    }
+
+    return pos == plaintext_len ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                                : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+}
+
+static bool
 ikev2_helper_aes_gcm_decrypt(const uint8_t *key, size_t key_len,
                              const uint8_t *nonce, size_t nonce_len,
                              const uint8_t *aad, size_t aad_len,
@@ -1928,6 +2126,19 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 return;
             }
             ++counters->ike_auth_decrypted;
+            struct provider_helper_ikev2_payload_summary inner_summary;
+            const enum provider_helper_ikev2_parse_result inner_result =
+                ikev2_helper_parse_ike_auth_inner_payloads(
+                    plaintext, plaintext_len, summary.sk_next_payload, config,
+                    &inner_summary);
+            if (inner_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+            {
+                ++counters->ike_auth_inner_malformed;
+                ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
+            ++counters->ike_auth_inner_parsed;
             ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
 
             ++counters->ike_auth_unsupported;
