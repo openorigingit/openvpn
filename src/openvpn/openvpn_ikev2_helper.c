@@ -374,6 +374,15 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
         if (header.exchange_type == PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT
             && !(header.flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE))
         {
+            const enum provider_helper_ikev2_parse_result init_result =
+                provider_helper_ikev2_validate_ike_sa_init_request(
+                    packet, (size_t)n, &header, NULL);
+            if (init_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+            {
+                ++counters->datagrams_malformed;
+                return;
+            }
+
             if (anti_dos->half_open_sas >= config->max_half_open_sas)
             {
                 ++counters->ike_sa_init_half_open_dropped;

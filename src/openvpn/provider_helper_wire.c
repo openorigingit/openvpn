@@ -454,6 +454,18 @@ provider_helper_ikev2_parse_result_name(enum provider_helper_ikev2_parse_result 
         case PROVIDER_HELPER_IKEV2_PARSE_BAD_SPI:
             return "bad-spi";
 
+        case PROVIDER_HELPER_IKEV2_PARSE_PAYLOAD_LIMIT:
+            return "payload-limit";
+
+        case PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH:
+            return "bad-payload-length";
+
+        case PROVIDER_HELPER_IKEV2_PARSE_UNSUPPORTED_CRITICAL_PAYLOAD:
+            return "unsupported-critical-payload";
+
+        case PROVIDER_HELPER_IKEV2_PARSE_MISSING_REQUIRED_PAYLOAD:
+            return "missing-required-payload";
+
         default:
             return "unknown";
     }
@@ -545,6 +557,185 @@ provider_helper_ikev2_parse_header(const uint8_t *packet,
     }
 
     return PROVIDER_HELPER_IKEV2_PARSE_OK;
+}
+
+static bool
+provider_helper_ikev2_payload_supported(uint8_t payload_type)
+{
+    switch (payload_type)
+    {
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_NONE:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_SA:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_KE:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_IDI:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_IDR:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_CERT:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_CERTREQ:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_AUTH:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_DELETE:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_VENDOR:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_TSI:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_TSR:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_SK:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_CP:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_EAP:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_SKF:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+static void
+provider_helper_ikev2_record_payload(
+    struct provider_helper_ikev2_payload_summary *summary,
+    uint8_t payload_type)
+{
+    if (!summary)
+    {
+        return;
+    }
+
+    ++summary->payload_count;
+    switch (payload_type)
+    {
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_SA:
+            summary->saw_sa = true;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_KE:
+            summary->saw_ke = true;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE:
+            summary->saw_nonce = true;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY:
+            summary->saw_notify = true;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_IDI:
+            summary->saw_idi = true;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_IDR:
+            summary->saw_idr = true;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_AUTH:
+            summary->saw_auth = true;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_EAP:
+            summary->saw_eap = true;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_TSI:
+            summary->saw_tsi = true;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_TSR:
+            summary->saw_tsr = true;
+            break;
+    }
+}
+
+enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_parse_payloads(
+    const uint8_t *packet,
+    size_t packet_len,
+    const struct provider_helper_ikev2_header *header,
+    struct provider_helper_ikev2_payload_summary *summary)
+{
+    if (summary)
+    {
+        CLEAR(*summary);
+    }
+    if (!packet || !header)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_TOO_SHORT;
+    }
+
+    const size_t payload_start = header->header_offset
+                                 + PROVIDER_HELPER_IKEV2_HEADER_SIZE;
+    const size_t payload_end = header->header_offset + header->ike_length;
+    if (payload_start > packet_len || payload_end > packet_len
+        || payload_start > payload_end)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_LENGTH;
+    }
+
+    size_t pos = payload_start;
+    uint8_t payload_type = header->next_payload;
+    uint32_t payload_count = 0;
+    while (payload_type != PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
+    {
+        if (++payload_count > PROVIDER_HELPER_IKEV2_MAX_PAYLOADS)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_PAYLOAD_LIMIT;
+        }
+        if (payload_end - pos < PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const uint8_t next_payload = packet[pos];
+        const uint8_t payload_flags = packet[pos + 1];
+        const uint16_t payload_len = ((uint16_t)packet[pos + 2] << 8)
+                                     | packet[pos + 3];
+        const bool critical = (payload_flags & 0x80) != 0;
+
+        if (payload_len < PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+            || payload_len > payload_end - pos)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+        if (critical && !provider_helper_ikev2_payload_supported(payload_type))
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_UNSUPPORTED_CRITICAL_PAYLOAD;
+        }
+
+        provider_helper_ikev2_record_payload(summary, payload_type);
+        pos += payload_len;
+        payload_type = next_payload;
+    }
+
+    return pos == payload_end ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                              : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+}
+
+enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_validate_ike_sa_init_request(
+    const uint8_t *packet,
+    size_t packet_len,
+    const struct provider_helper_ikev2_header *header,
+    struct provider_helper_ikev2_payload_summary *summary)
+{
+    if (!header || header->exchange_type != PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT
+        || (header->flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE)
+        || !(header->flags & PROVIDER_HELPER_IKEV2_FLAG_INITIATOR)
+        || header->responder_spi || header->message_id != 0)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_SPI;
+    }
+
+    struct provider_helper_ikev2_payload_summary local_summary;
+    struct provider_helper_ikev2_payload_summary *out =
+        summary ? summary : &local_summary;
+    const enum provider_helper_ikev2_parse_result result =
+        provider_helper_ikev2_parse_payloads(packet, packet_len, header, out);
+    if (result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+    {
+        return result;
+    }
+
+    return out->saw_sa && out->saw_ke && out->saw_nonce
+           ? PROVIDER_HELPER_IKEV2_PARSE_OK
+           : PROVIDER_HELPER_IKEV2_PARSE_MISSING_REQUIRED_PAYLOAD;
 }
 
 bool

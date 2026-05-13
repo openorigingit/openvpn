@@ -39,6 +39,8 @@
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
 #define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE 4
+#define PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE 4
+#define PROVIDER_HELPER_IKEV2_MAX_PAYLOADS  32
 
 #define PROVIDER_HELPER_CONFIG_FORCE_NATT (1u << 0)
 #define PROVIDER_HELPER_CONFIG_IPV4_ONLY  (1u << 1)
@@ -107,6 +109,27 @@ enum provider_helper_ikev2_exchange_type {
     PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL = 37,
 };
 
+enum provider_helper_ikev2_payload_type {
+    PROVIDER_HELPER_IKEV2_PAYLOAD_NONE = 0,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_SA = 33,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_KE = 34,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_IDI = 35,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_IDR = 36,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_CERT = 37,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_CERTREQ = 38,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_AUTH = 39,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE = 40,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY = 41,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_DELETE = 42,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_VENDOR = 43,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_TSI = 44,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_TSR = 45,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_SK = 46,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_CP = 47,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_EAP = 48,
+    PROVIDER_HELPER_IKEV2_PAYLOAD_SKF = 53,
+};
+
 enum provider_helper_ikev2_parse_result {
     PROVIDER_HELPER_IKEV2_PARSE_OK = 0,
     PROVIDER_HELPER_IKEV2_PARSE_TOO_SHORT,
@@ -117,6 +140,10 @@ enum provider_helper_ikev2_parse_result {
     PROVIDER_HELPER_IKEV2_PARSE_BAD_LENGTH,
     PROVIDER_HELPER_IKEV2_PARSE_UNSUPPORTED_EXCHANGE,
     PROVIDER_HELPER_IKEV2_PARSE_BAD_SPI,
+    PROVIDER_HELPER_IKEV2_PARSE_PAYLOAD_LIMIT,
+    PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH,
+    PROVIDER_HELPER_IKEV2_PARSE_UNSUPPORTED_CRITICAL_PAYLOAD,
+    PROVIDER_HELPER_IKEV2_PARSE_MISSING_REQUIRED_PAYLOAD,
 };
 
 struct provider_helper_msg_header {
@@ -184,6 +211,20 @@ struct provider_helper_ikev2_header {
     uint8_t flags;
     bool natt;
     size_t header_offset;
+};
+
+struct provider_helper_ikev2_payload_summary {
+    uint32_t payload_count;
+    bool saw_sa;
+    bool saw_ke;
+    bool saw_nonce;
+    bool saw_notify;
+    bool saw_idi;
+    bool saw_idr;
+    bool saw_auth;
+    bool saw_eap;
+    bool saw_tsi;
+    bool saw_tsr;
 };
 
 struct provider_helper_supervisor {
@@ -273,6 +314,18 @@ provider_helper_ikev2_parse_header(const uint8_t *packet,
                                    uint32_t max_packet_size,
                                    bool expect_natt,
                                    struct provider_helper_ikev2_header *header);
+enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_parse_payloads(
+    const uint8_t *packet,
+    size_t packet_len,
+    const struct provider_helper_ikev2_header *header,
+    struct provider_helper_ikev2_payload_summary *summary);
+enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_validate_ike_sa_init_request(
+    const uint8_t *packet,
+    size_t packet_len,
+    const struct provider_helper_ikev2_header *header,
+    struct provider_helper_ikev2_payload_summary *summary);
 bool provider_helper_negotiate_features(uint64_t supported_features,
                                         uint64_t remote_mandatory_features,
                                         uint64_t remote_optional_features,
