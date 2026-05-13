@@ -773,6 +773,75 @@ provider_helper_ikev2_validate_ike_sa_init_request(
 }
 
 bool
+provider_helper_ikev2_build_cookie_response(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_ikev2_header *request,
+    const uint8_t *cookie,
+    size_t cookie_len,
+    size_t *out_len)
+{
+    if (out_len)
+    {
+        *out_len = 0;
+    }
+    if (!dst || !request || !cookie
+        || cookie_len < PROVIDER_HELPER_IKEV2_COOKIE_MIN_BYTES
+        || cookie_len > PROVIDER_HELPER_IKEV2_COOKIE_MAX_BYTES
+        || request->exchange_type != PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT
+        || request->message_id != 0
+        || request->responder_spi != 0
+        || !(request->flags & PROVIDER_HELPER_IKEV2_FLAG_INITIATOR)
+        || (request->flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE))
+    {
+        return false;
+    }
+
+    const uint32_t ike_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                             + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE
+                             + (uint32_t)cookie_len;
+    const size_t offset = request->natt
+                          ? PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE : 0;
+    const size_t packet_len = offset + ike_len;
+    if (dst_len < packet_len)
+    {
+        return false;
+    }
+
+    memset(dst, 0, packet_len);
+    uint8_t *pos = dst + offset;
+    provider_helper_wire_write_u64(&pos, request->initiator_spi);
+    provider_helper_wire_write_u64(&pos, 0);
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY;
+    *pos++ = (PROVIDER_HELPER_IKEV2_MAJOR_VERSION << 4)
+             | PROVIDER_HELPER_IKEV2_MINOR_VERSION;
+    *pos++ = PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT;
+    *pos++ = PROVIDER_HELPER_IKEV2_FLAG_RESPONSE;
+    provider_helper_wire_write_u32(&pos, 0);
+    provider_helper_wire_write_u32(&pos, ike_len);
+
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+    *pos++ = 0;
+    provider_helper_wire_write_u16(
+        &pos, PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE + (uint16_t)cookie_len);
+    *pos++ = 0; /* Protocol ID: none for COOKIE. */
+    *pos++ = 0; /* SPI size: no SPI for COOKIE. */
+    provider_helper_wire_write_u16(&pos, PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE);
+    memcpy(pos, cookie, cookie_len);
+    pos += cookie_len;
+
+    if ((size_t)(pos - dst) != packet_len)
+    {
+        return false;
+    }
+    if (out_len)
+    {
+        *out_len = packet_len;
+    }
+    return true;
+}
+
+bool
 provider_helper_ipc_encode_header(uint8_t *dst, size_t dst_len,
                                   const struct provider_helper_msg_header *header)
 {

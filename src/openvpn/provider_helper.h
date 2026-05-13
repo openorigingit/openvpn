@@ -40,7 +40,10 @@
 #define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
 #define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE 4
 #define PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE 4
+#define PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE 8
 #define PROVIDER_HELPER_IKEV2_MAX_PAYLOADS  32
+#define PROVIDER_HELPER_IKEV2_COOKIE_MIN_BYTES 1
+#define PROVIDER_HELPER_IKEV2_COOKIE_MAX_BYTES 64
 
 #define PROVIDER_HELPER_CONFIG_FORCE_NATT (1u << 0)
 #define PROVIDER_HELPER_CONFIG_IPV4_ONLY  (1u << 1)
@@ -131,6 +134,8 @@ enum provider_helper_ikev2_payload_type {
     PROVIDER_HELPER_IKEV2_PAYLOAD_EAP = 48,
     PROVIDER_HELPER_IKEV2_PAYLOAD_SKF = 53,
 };
+
+#define PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE 16390
 
 enum provider_helper_ikev2_parse_result {
     PROVIDER_HELPER_IKEV2_PARSE_OK = 0,
@@ -336,6 +341,13 @@ provider_helper_ikev2_validate_ike_sa_init_request(
     size_t packet_len,
     const struct provider_helper_ikev2_header *header,
     struct provider_helper_ikev2_payload_summary *summary);
+bool provider_helper_ikev2_build_cookie_response(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_ikev2_header *request,
+    const uint8_t *cookie,
+    size_t cookie_len,
+    size_t *out_len);
 bool provider_helper_negotiate_features(uint64_t supported_features,
                                         uint64_t remote_mandatory_features,
                                         uint64_t remote_optional_features,

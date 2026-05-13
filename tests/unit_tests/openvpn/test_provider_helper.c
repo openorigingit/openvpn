@@ -527,6 +527,103 @@ test_provider_helper_ikev2_payload_parser(void **state)
 }
 
 static void
+test_provider_helper_ikev2_cookie_response(void **state)
+{
+    (void)state;
+
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    uint8_t response[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const uint8_t cookie[] = { 0x63, 0x6f, 0x6f, 0x6b,
+                               0x69, 0x65, 0x31, 0x32 };
+    struct provider_helper_ikev2_header header;
+    struct provider_helper_ikev2_header response_header;
+    struct provider_helper_ikev2_payload_summary summary;
+    size_t packet_len = test_make_ike_sa_init_packet(packet, sizeof(packet));
+    size_t response_len = 0;
+
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, packet_len, PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE,
+                         false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_true(provider_helper_ikev2_build_cookie_response(
+                    response, sizeof(response), &header, cookie, sizeof(cookie),
+                    &response_len));
+    assert_int_equal(response_len,
+                     PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                     + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE
+                     + sizeof(cookie));
+
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         response, response_len,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, false,
+                         &response_header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(response_header.initiator_spi, header.initiator_spi);
+    assert_int_equal(response_header.responder_spi, 0);
+    assert_int_equal(response_header.next_payload,
+                     PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY);
+    assert_int_equal(response_header.flags, PROVIDER_HELPER_IKEV2_FLAG_RESPONSE);
+    assert_int_equal(provider_helper_ikev2_parse_payloads(
+                         response, response_len, &response_header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(summary.payload_count, 1);
+    assert_true(summary.saw_notify);
+
+    const size_t notify = PROVIDER_HELPER_IKEV2_HEADER_SIZE;
+    assert_int_equal(response[notify], PROVIDER_HELPER_IKEV2_PAYLOAD_NONE);
+    assert_int_equal(response[notify + 1], 0);
+    assert_int_equal(response[notify + 2], 0);
+    assert_int_equal(response[notify + 3],
+                     PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE + sizeof(cookie));
+    assert_int_equal(response[notify + 4], 0);
+    assert_int_equal(response[notify + 5], 0);
+    assert_int_equal((((uint16_t)response[notify + 6]) << 8)
+                     | response[notify + 7],
+                     PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE);
+    assert_memory_equal(response + notify + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE,
+                        cookie, sizeof(cookie));
+
+    assert_false(provider_helper_ikev2_build_cookie_response(
+                     response, sizeof(response), &header, cookie, 0, &response_len));
+    assert_int_equal(response_len, 0);
+
+    uint8_t large_cookie[PROVIDER_HELPER_IKEV2_COOKIE_MAX_BYTES + 1];
+    memset(large_cookie, 0xa5, sizeof(large_cookie));
+    assert_false(provider_helper_ikev2_build_cookie_response(
+                     response, sizeof(response), &header, large_cookie,
+                     sizeof(large_cookie), &response_len));
+
+    test_make_ikev2_header(packet, true,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT,
+                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+                           0, PROVIDER_HELPER_IKEV2_HEADER_SIZE);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet,
+                         PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE
+                         + PROVIDER_HELPER_IKEV2_HEADER_SIZE,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, true, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_true(provider_helper_ikev2_build_cookie_response(
+                    response, sizeof(response), &header, cookie, sizeof(cookie),
+                    &response_len));
+    assert_int_equal(response_len,
+                     PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE
+                     + PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                     + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE
+                     + sizeof(cookie));
+    assert_int_equal(response[0], 0);
+    assert_int_equal(response[1], 0);
+    assert_int_equal(response[2], 0);
+    assert_int_equal(response[3], 0);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         response, response_len,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, true,
+                         &response_header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_true(response_header.natt);
+}
+
+static void
 test_provider_helper_processes_partial_header(void **state)
 {
     (void)state;
@@ -830,6 +927,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_xfrm_lease_roundtrip),
         cmocka_unit_test(test_provider_helper_ikev2_parser),
         cmocka_unit_test(test_provider_helper_ikev2_payload_parser),
+        cmocka_unit_test(test_provider_helper_ikev2_cookie_response),
         cmocka_unit_test(test_provider_helper_processes_partial_header),
         cmocka_unit_test(test_provider_helper_spawn_noop),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_scaffold),
