@@ -2805,6 +2805,11 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
             }
             counters->ike_sa_active = sa_table->active;
         }
+        else if (!(header.flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE))
+        {
+            ++counters->ike_exchange_unsupported;
+            counters->ike_sa_active = sa_table->active;
+        }
     }
     else
     {

@@ -243,6 +243,7 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .datagrams_parsed = 7,
         .datagrams_malformed = 2,
         .datagrams_oversize = 1,
+        .ike_exchange_unsupported = 44,
         .ike_sa_init_accepted = 5,
         .ike_sa_init_cookie_required = 4,
         .ike_sa_init_cookie_present = 11,
@@ -295,6 +296,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
     assert_int_equal(output.datagrams_parsed, input.datagrams_parsed);
     assert_int_equal(output.datagrams_malformed, input.datagrams_malformed);
     assert_int_equal(output.datagrams_oversize, input.datagrams_oversize);
+    assert_int_equal(output.ike_exchange_unsupported,
+                     input.ike_exchange_unsupported);
     assert_int_equal(output.ike_sa_init_accepted, input.ike_sa_init_accepted);
     assert_int_equal(output.ike_sa_init_cookie_required,
                      input.ike_sa_init_cookie_required);
@@ -1244,6 +1247,31 @@ test_send_ikev2_natt_datagram_from(int fd, uint16_t port,
     assert_int_equal(sendto(fd, packet, packet_len, 0,
                             (struct sockaddr *)&addr, sizeof(addr)),
                      packet_len);
+}
+
+static void
+test_send_ikev2_exchange_header_from(int fd, uint16_t port,
+                                     uint8_t exchange_type,
+                                     uint64_t initiator_spi,
+                                     uint64_t responder_spi,
+                                     uint32_t message_id)
+{
+    uint8_t packet[PROVIDER_HELPER_IKEV2_HEADER_SIZE];
+    test_make_ikev2_header(packet, false, exchange_type,
+                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+                           responder_spi, PROVIDER_HELPER_IKEV2_HEADER_SIZE);
+    test_write_be64(packet, initiator_spi);
+    test_write_be32(packet + 20, message_id);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    assert_int_equal(sendto(fd, packet, sizeof(packet), 0,
+                            (struct sockaddr *)&addr, sizeof(addr)),
+                     sizeof(packet));
 }
 
 static void
@@ -2369,6 +2397,88 @@ test_provider_helper_spawn_ikev2_natt_listener(void **state)
 }
 
 static void
+test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
+{
+    (void)state;
+
+    if (!ikev2_helper_path)
+    {
+        skip();
+    }
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+
+    char *const argv[] = { (char *)ikev2_helper_path, NULL };
+    assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path, argv));
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STARTING);
+
+    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 2);
+
+    uint16_t port = 0;
+    int listener_fd = test_create_udp_listener(&port);
+    const struct provider_helper_listener_fd listener = {
+        .listener_id = 1,
+        .family = AF_INET,
+        .socket_type = SOCK_DGRAM,
+        .protocol = IPPROTO_UDP,
+        .local_port = port,
+        .flags = PROVIDER_HELPER_LISTENER_FD_IKE,
+    };
+    assert_true(provider_helper_supervisor_send_listener_fd(&supervisor, listener_fd,
+                                                            &listener, 88));
+
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 3; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 3);
+
+    int datagram_fd = test_create_udp_sender(0x7f000007u);
+    test_send_ikev2_exchange_header_from(
+        datagram_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA,
+        0x0102030405060708ull, 0x8877665544332211ull, 2);
+    test_send_ikev2_exchange_header_from(
+        datagram_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
+        0x0102030405060708ull, 0x8877665544332211ull, 3);
+    usleep(10000);
+    close(datagram_fd);
+    close(listener_fd);
+
+    const uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 89);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+    assert_int_equal(supervisor.runtime_stats.datagrams_rx, 2);
+    assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_exchange_unsupported, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
+
+    provider_helper_supervisor_stop(&supervisor);
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
+    assert_int_equal(supervisor.ipc_fd, -1);
+}
+
+static void
 write_helper_auth_request_fd(int fd, uint64_t sequence, uint64_t correlation_id,
                              const struct provider_helper_auth_request *request)
 {
@@ -2844,6 +2954,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_auth_request_callback),
         cmocka_unit_test(test_provider_helper_spawn_noop),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_natt_listener),
+        cmocka_unit_test(test_provider_helper_spawn_ikev2_unsupported_exchange),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_scaffold),
     };
 

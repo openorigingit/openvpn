@@ -627,6 +627,7 @@ provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u64(&pos, stats->datagrams_parsed);
     provider_helper_wire_write_u64(&pos, stats->datagrams_malformed);
     provider_helper_wire_write_u64(&pos, stats->datagrams_oversize);
+    provider_helper_wire_write_u64(&pos, stats->ike_exchange_unsupported);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_accepted);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_cookie_required);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_cookie_present);
@@ -695,6 +696,7 @@ provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
     stats->datagrams_parsed = provider_helper_wire_read_u64(&pos);
     stats->datagrams_malformed = provider_helper_wire_read_u64(&pos);
     stats->datagrams_oversize = provider_helper_wire_read_u64(&pos);
+    stats->ike_exchange_unsupported = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_accepted = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_cookie_required = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_cookie_present = provider_helper_wire_read_u64(&pos);
