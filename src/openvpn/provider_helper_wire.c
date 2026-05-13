@@ -264,6 +264,67 @@ provider_helper_xfrm_lease_valid(const struct provider_helper_xfrm_lease *lease,
     return true;
 }
 
+static bool
+provider_helper_principal_byte_allowed(uint8_t c)
+{
+    return c >= 0x21 && c <= 0x7e;
+}
+
+bool
+provider_helper_auth_request_valid(
+    const struct provider_helper_auth_request *request,
+    char *reason,
+    size_t reason_size)
+{
+    if (!request)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "missing auth request");
+        return false;
+    }
+    if (!request->request_id || !request->initiator_spi
+        || !request->responder_spi || !request->listener_id)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "auth request ids must be nonzero");
+        return false;
+    }
+    if (request->profile != PROVIDER_HELPER_AUTH_PROFILE_EAP_TLS)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "unsupported auth profile");
+        return false;
+    }
+    if (request->ikev2_id_type != PROVIDER_HELPER_IKEV2_ID_FQDN
+        && request->ikev2_id_type != PROVIDER_HELPER_IKEV2_ID_RFC822)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "unsupported IKEv2 identity type");
+        return false;
+    }
+    if (!request->claimed_principal_len
+        || request->claimed_principal_len >= sizeof(request->claimed_principal))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "invalid claimed principal length");
+        return false;
+    }
+    for (uint32_t i = 0; i < request->claimed_principal_len; ++i)
+    {
+        if (!provider_helper_principal_byte_allowed(
+                (uint8_t)request->claimed_principal[i]))
+        {
+            provider_helper_config_reason(
+                reason, reason_size,
+                "claimed principal contains invalid characters");
+            return false;
+        }
+    }
+
+    provider_helper_config_reason(reason, reason_size, "ok");
+    return true;
+}
+
 static void
 provider_helper_wire_write_u16(uint8_t **pos, uint16_t value)
 {
@@ -573,6 +634,61 @@ provider_helper_ipc_decode_xfrm_lease(const uint8_t *src, size_t src_len,
     lease->flags = provider_helper_wire_read_u32(&pos);
 
     return (size_t)(pos - src) == PROVIDER_HELPER_XFRM_LEASE_SIZE;
+}
+
+bool
+provider_helper_ipc_encode_auth_request(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_auth_request *request)
+{
+    if (!dst || dst_len < PROVIDER_HELPER_AUTH_REQUEST_SIZE
+        || !provider_helper_auth_request_valid(request, NULL, 0))
+    {
+        return false;
+    }
+
+    uint8_t *pos = dst;
+    provider_helper_wire_write_u64(&pos, request->request_id);
+    provider_helper_wire_write_u64(&pos, request->initiator_spi);
+    provider_helper_wire_write_u64(&pos, request->responder_spi);
+    provider_helper_wire_write_u32(&pos, request->listener_id);
+    provider_helper_wire_write_u32(&pos, request->profile);
+    provider_helper_wire_write_u32(&pos, request->ikev2_id_type);
+    provider_helper_wire_write_u32(&pos, request->claimed_principal_len);
+    memcpy(pos, request->claimed_principal,
+           sizeof(request->claimed_principal));
+    pos += sizeof(request->claimed_principal);
+
+    return (size_t)(pos - dst) == PROVIDER_HELPER_AUTH_REQUEST_SIZE;
+}
+
+bool
+provider_helper_ipc_decode_auth_request(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_auth_request *request)
+{
+    if (!src || src_len != PROVIDER_HELPER_AUTH_REQUEST_SIZE || !request)
+    {
+        return false;
+    }
+
+    const uint8_t *pos = src;
+    CLEAR(*request);
+    request->request_id = provider_helper_wire_read_u64(&pos);
+    request->initiator_spi = provider_helper_wire_read_u64(&pos);
+    request->responder_spi = provider_helper_wire_read_u64(&pos);
+    request->listener_id = provider_helper_wire_read_u32(&pos);
+    request->profile = provider_helper_wire_read_u32(&pos);
+    request->ikev2_id_type = provider_helper_wire_read_u32(&pos);
+    request->claimed_principal_len = provider_helper_wire_read_u32(&pos);
+    memcpy(request->claimed_principal, pos,
+           sizeof(request->claimed_principal));
+    pos += sizeof(request->claimed_principal);
+
+    return (size_t)(pos - src) == PROVIDER_HELPER_AUTH_REQUEST_SIZE
+           && provider_helper_auth_request_valid(request, NULL, 0);
 }
 
 const char *

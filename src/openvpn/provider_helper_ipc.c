@@ -130,6 +130,22 @@ provider_helper_ipc_write_xfrm_lease(struct buffer *buf,
            && buf_write(buf, payload, sizeof(payload));
 }
 
+bool
+provider_helper_ipc_write_auth_request(
+    struct buffer *buf,
+    const struct provider_helper_auth_request *request)
+{
+    if (!buf || !request)
+    {
+        return false;
+    }
+
+    uint8_t payload[PROVIDER_HELPER_AUTH_REQUEST_SIZE];
+    return provider_helper_ipc_encode_auth_request(payload, sizeof(payload),
+                                                   request)
+           && buf_write(buf, payload, sizeof(payload));
+}
+
 enum provider_helper_ipc_result
 provider_helper_ipc_read_header(struct buffer *buf,
                                 struct provider_helper_msg_header *header,

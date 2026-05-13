@@ -384,6 +384,64 @@ test_provider_helper_xfrm_lease_roundtrip(void **state)
 }
 
 static void
+test_provider_helper_auth_request_roundtrip(void **state)
+{
+    (void)state;
+
+    struct provider_helper_auth_request input = {
+        .request_id = 101,
+        .initiator_spi = 0x1122334455667788ull,
+        .responder_spi = 0x8877665544332211ull,
+        .listener_id = 3,
+        .profile = PROVIDER_HELPER_AUTH_PROFILE_EAP_TLS,
+        .ikev2_id_type = PROVIDER_HELPER_IKEV2_ID_RFC822,
+    };
+    const char principal[] = "alice@example.test";
+    snprintf(input.claimed_principal, sizeof(input.claimed_principal), "%s",
+             principal);
+    assert_true(strlen(input.claimed_principal) <= UINT32_MAX);
+    input.claimed_principal_len = (uint32_t)strlen(input.claimed_principal);
+
+    struct provider_helper_auth_request output;
+    char reason[128];
+    uint8_t payload[PROVIDER_HELPER_AUTH_REQUEST_SIZE];
+
+    assert_true(provider_helper_auth_request_valid(&input, reason,
+                                                   sizeof(reason)));
+    assert_true(provider_helper_ipc_encode_auth_request(payload,
+                                                        sizeof(payload),
+                                                        &input));
+    assert_true(provider_helper_ipc_decode_auth_request(payload,
+                                                        sizeof(payload),
+                                                        &output));
+    assert_int_equal(output.request_id, input.request_id);
+    assert_int_equal(output.initiator_spi, input.initiator_spi);
+    assert_int_equal(output.responder_spi, input.responder_spi);
+    assert_int_equal(output.listener_id, input.listener_id);
+    assert_int_equal(output.profile, input.profile);
+    assert_int_equal(output.ikev2_id_type, input.ikev2_id_type);
+    assert_int_equal(output.claimed_principal_len,
+                     input.claimed_principal_len);
+    assert_memory_equal(output.claimed_principal, input.claimed_principal,
+                        input.claimed_principal_len);
+
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_AUTH_REQUEST_SIZE);
+    assert_true(provider_helper_ipc_write_auth_request(&buf, &input));
+    assert_int_equal(BLEN(&buf), PROVIDER_HELPER_AUTH_REQUEST_SIZE);
+    free_buf(&buf);
+
+    input.claimed_principal[1] = '\n';
+    assert_false(provider_helper_auth_request_valid(&input, reason,
+                                                    sizeof(reason)));
+    assert_non_null(strstr(reason, "principal"));
+    input.claimed_principal[1] = 'l';
+    input.profile = 0;
+    assert_false(provider_helper_auth_request_valid(&input, reason,
+                                                    sizeof(reason)));
+    assert_non_null(strstr(reason, "profile"));
+}
+
+static void
 test_write_be16(uint8_t *dst, uint16_t value)
 {
     dst[0] = (uint8_t)(value >> 8);
@@ -2252,6 +2310,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_listener_fd_roundtrip),
         cmocka_unit_test(test_provider_helper_runtime_stats_roundtrip),
         cmocka_unit_test(test_provider_helper_xfrm_lease_roundtrip),
+        cmocka_unit_test(test_provider_helper_auth_request_roundtrip),
         cmocka_unit_test(test_provider_helper_ikev2_parser),
         cmocka_unit_test(test_provider_helper_ikev2_payload_parser),
         cmocka_unit_test(test_provider_helper_ikev2_cookie_response),
