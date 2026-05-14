@@ -1080,7 +1080,11 @@ provider_helper_ikev2_parse_header(const uint8_t *packet,
     {
         return PROVIDER_HELPER_IKEV2_PARSE_BAD_VERSION;
     }
-    if (header->flags & PROVIDER_HELPER_IKEV2_FLAG_VERSION)
+    const uint8_t allowed_flags = PROVIDER_HELPER_IKEV2_FLAG_INITIATOR
+                                  | PROVIDER_HELPER_IKEV2_FLAG_VERSION
+                                  | PROVIDER_HELPER_IKEV2_FLAG_RESPONSE;
+    if ((header->flags & PROVIDER_HELPER_IKEV2_FLAG_VERSION)
+        || (header->flags & ~allowed_flags))
     {
         return PROVIDER_HELPER_IKEV2_PARSE_BAD_FLAGS;
     }

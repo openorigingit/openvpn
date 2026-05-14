@@ -1951,6 +1951,15 @@ test_provider_helper_ikev2_parser(void **state)
 
     test_make_ikev2_header(packet, false,
                            PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT,
+                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR | 0x01,
+                           0, PROVIDER_HELPER_IKEV2_HEADER_SIZE);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, PROVIDER_HELPER_IKEV2_HEADER_SIZE,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_BAD_FLAGS);
+
+    test_make_ikev2_header(packet, false,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT,
                            PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
                            0, PROVIDER_HELPER_IKEV2_HEADER_SIZE + 1);
     assert_int_equal(provider_helper_ikev2_parse_header(
