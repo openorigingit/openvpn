@@ -354,6 +354,9 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_informational_empty_rx = 55,
         .ike_informational_empty_response_tx = 56,
         .ike_informational_empty_response_failed = 57,
+        .ike_informational_delete_rx = 58,
+        .ike_informational_delete_response_tx = 59,
+        .ike_informational_delete_response_failed = 60,
         .ike_auth_rx = 26,
         .ike_auth_malformed = 27,
         .ike_auth_no_state = 28,
@@ -444,6 +447,12 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_informational_empty_response_tx);
     assert_int_equal(output.ike_informational_empty_response_failed,
                      input.ike_informational_empty_response_failed);
+    assert_int_equal(output.ike_informational_delete_rx,
+                     input.ike_informational_delete_rx);
+    assert_int_equal(output.ike_informational_delete_response_tx,
+                     input.ike_informational_delete_response_tx);
+    assert_int_equal(output.ike_informational_delete_response_failed,
+                     input.ike_informational_delete_response_failed);
     assert_int_equal(output.ike_auth_rx, input.ike_auth_rx);
     assert_int_equal(output.ike_auth_malformed, input.ike_auth_malformed);
     assert_int_equal(output.ike_auth_no_state, input.ike_auth_no_state);
@@ -1813,6 +1822,45 @@ test_send_ikev2_encrypted_protected_exchange_from(
     assert_int_equal(sendto(fd, packet, packet_len, 0,
                             (struct sockaddr *)&addr, sizeof(addr)),
                      packet_len);
+}
+
+static void
+test_send_ikev2_encrypted_ike_delete_from(
+    int fd,
+    uint16_t port,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt,
+    uint32_t message_id)
+{
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    uint8_t plaintext[PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4 + 1];
+    CLEAR(plaintext);
+    size_t plaintext_len = 0;
+    plaintext_len = test_add_ikev2_payload(
+        plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4, 0);
+    const size_t body = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    plaintext[body] = PROVIDER_HELPER_IKEV2_PROTOCOL_IKE;
+    plaintext[body + 1] = 0; /* IKE SA delete carries no SPI list. */
+    test_write_be16(plaintext + body + 2, 0);
+    plaintext[plaintext_len++] = 0; /* Pad Length. */
+
+    const size_t packet_len = test_make_encrypted_ikev2_plaintext_packet(
+        packet, sizeof(packet), initiator_spi, material, natt,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, plaintext,
+        plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_DELETE, message_id);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    assert_int_equal(sendto(fd, packet, packet_len, 0,
+                            (struct sockaddr *)&addr, sizeof(addr)),
+                     packet_len);
+    secure_memzero(plaintext, sizeof(plaintext));
 }
 #endif
 
@@ -3227,6 +3275,11 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     test_recv_ikev2_encrypted_empty_response(
         state_fd, state_initiator_spi, &state_material,
         PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 3, true);
+    test_send_ikev2_encrypted_ike_delete_from(
+        state_fd, natt_port, state_initiator_spi, &state_material, true, 4);
+    test_recv_ikev2_encrypted_empty_response(
+        state_fd, state_initiator_spi, &state_material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 4, true);
 #endif
     test_send_ikev2_exchange_header_fields_from(
         datagram_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA,
@@ -3256,14 +3309,20 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
 #if defined(ENABLE_CRYPTO_OPENSSL)
-    assert_int_equal(supervisor.runtime_stats.datagrams_rx, 9);
-    assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 9);
+    assert_int_equal(supervisor.runtime_stats.datagrams_rx, 10);
+    assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 10);
     assert_int_equal(supervisor.runtime_stats.ike_exchange_unsupported, 3);
     assert_int_equal(supervisor.runtime_stats.ike_informational_empty_rx, 1);
     assert_int_equal(supervisor.runtime_stats.ike_informational_empty_response_tx,
                      1);
     assert_int_equal(
         supervisor.runtime_stats.ike_informational_empty_response_failed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_informational_delete_rx, 1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_informational_delete_response_tx, 1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_informational_delete_response_failed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
 #else
     assert_int_equal(supervisor.runtime_stats.datagrams_rx, 7);
     assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 7);
@@ -3273,9 +3332,14 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
                      0);
     assert_int_equal(
         supervisor.runtime_stats.ike_informational_empty_response_failed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_informational_delete_rx, 0);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_informational_delete_response_tx, 0);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_informational_delete_response_failed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
 #endif
     assert_int_equal(supervisor.runtime_stats.datagrams_malformed, 4);
-    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
 
     provider_helper_supervisor_stop(&supervisor);
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);

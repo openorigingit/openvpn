@@ -745,6 +745,11 @@ provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
                                    stats->ike_informational_empty_response_tx);
     provider_helper_wire_write_u64(
         &pos, stats->ike_informational_empty_response_failed);
+    provider_helper_wire_write_u64(&pos, stats->ike_informational_delete_rx);
+    provider_helper_wire_write_u64(
+        &pos, stats->ike_informational_delete_response_tx);
+    provider_helper_wire_write_u64(
+        &pos, stats->ike_informational_delete_response_failed);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_rx);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_malformed);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_no_state);
@@ -831,6 +836,11 @@ provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
     stats->ike_informational_empty_response_tx =
         provider_helper_wire_read_u64(&pos);
     stats->ike_informational_empty_response_failed =
+        provider_helper_wire_read_u64(&pos);
+    stats->ike_informational_delete_rx = provider_helper_wire_read_u64(&pos);
+    stats->ike_informational_delete_response_tx =
+        provider_helper_wire_read_u64(&pos);
+    stats->ike_informational_delete_response_failed =
         provider_helper_wire_read_u64(&pos);
     stats->ike_auth_rx = provider_helper_wire_read_u64(&pos);
     stats->ike_auth_malformed = provider_helper_wire_read_u64(&pos);
@@ -1278,6 +1288,16 @@ provider_helper_ikev2_record_payload(
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY:
             summary->saw_notify = true;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_DELETE:
+            summary->saw_delete = true;
+            ++summary->delete_count;
+            if (summary->delete_count == 1)
+            {
+                summary->delete_offset = body_offset;
+                summary->delete_len = body_len;
+            }
             break;
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_IDI:

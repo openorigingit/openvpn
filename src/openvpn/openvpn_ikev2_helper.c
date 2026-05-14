@@ -1564,6 +1564,16 @@ ikev2_helper_record_ike_auth_inner_payload(
             }
             break;
 
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_DELETE:
+            summary->saw_delete = true;
+            ++summary->delete_count;
+            if (summary->delete_count == 1)
+            {
+                summary->delete_offset = body_offset;
+                summary->delete_len = body_len;
+            }
+            break;
+
         case PROVIDER_HELPER_IKEV2_PAYLOAD_TSI:
             summary->saw_tsi = true;
             break;
@@ -3179,6 +3189,27 @@ ikev2_helper_find_protected_exchange_sa(
 }
 
 static bool
+ikev2_helper_is_ike_sa_delete_request(
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    const struct provider_helper_ikev2_payload_summary *summary)
+{
+    if (!plaintext || !summary || summary->payload_count != 1
+        || !summary->saw_delete || summary->delete_count != 1
+        || summary->delete_len != 4
+        || !ikev2_helper_body_inside(plaintext_len, summary->delete_offset,
+                                     summary->delete_len))
+    {
+        return false;
+    }
+
+    const uint8_t *body = plaintext + summary->delete_offset;
+    const uint16_t spi_count = ((uint16_t)body[2] << 8) | body[3];
+    return body[0] == PROVIDER_HELPER_IKEV2_PROTOCOL_IKE && body[1] == 0
+           && spi_count == 0;
+}
+
+static bool
 ikev2_helper_ike_auth_listener_allowed(
     const struct ikev2_helper_listener *listener,
     const struct provider_helper_runtime_config *config)
@@ -3588,6 +3619,45 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                     counters->ike_sa_active = sa_table->active;
                     return;
+                }
+                if (header.exchange_type
+                        == PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL
+                    && protected_summary.sk_next_payload
+                           != PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
+                {
+                    struct provider_helper_ikev2_payload_summary inner_summary;
+                    const enum provider_helper_ikev2_parse_result inner_result =
+                        ikev2_helper_parse_ike_auth_inner_payloads(
+                            plaintext, plaintext_len,
+                            protected_summary.sk_next_payload, config,
+                            &inner_summary);
+                    if (inner_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+                    {
+                        ++counters->datagrams_malformed;
+                        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                        counters->ike_sa_active = sa_table->active;
+                        return;
+                    }
+                    if (ikev2_helper_is_ike_sa_delete_request(
+                            plaintext, plaintext_len, &inner_summary))
+                    {
+                        ++counters->ike_informational_delete_rx;
+                        if (ikev2_helper_send_encrypted_empty_response(
+                                listener, sa, header.exchange_type,
+                                header.message_id))
+                        {
+                            ++counters->ike_informational_delete_response_tx;
+                        }
+                        else
+                        {
+                            ++counters
+                                  ->ike_informational_delete_response_failed;
+                        }
+                        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                        ikev2_helper_clear_ike_sa(sa_table, sa);
+                        counters->ike_sa_active = sa_table->active;
+                        return;
+                    }
                 }
                 ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
             }

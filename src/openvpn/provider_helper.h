@@ -36,7 +36,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 36
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  480
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  504
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
 #define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
@@ -326,6 +326,9 @@ struct provider_helper_runtime_stats {
     uint64_t ike_informational_empty_rx;
     uint64_t ike_informational_empty_response_tx;
     uint64_t ike_informational_empty_response_failed;
+    uint64_t ike_informational_delete_rx;
+    uint64_t ike_informational_delete_response_tx;
+    uint64_t ike_informational_delete_response_failed;
     uint64_t ike_auth_rx;
     uint64_t ike_auth_malformed;
     uint64_t ike_auth_no_state;
@@ -389,6 +392,7 @@ struct provider_helper_ikev2_payload_summary {
     bool saw_cert;
     bool saw_auth;
     bool saw_eap;
+    bool saw_delete;
     bool saw_tsi;
     bool saw_tsr;
     bool saw_sk;
@@ -399,6 +403,7 @@ struct provider_helper_ikev2_payload_summary {
     uint32_t idi_count;
     uint32_t cert_count;
     uint32_t eap_count;
+    uint32_t delete_count;
     uint32_t sk_count;
     size_t sa_offset;
     size_t sa_len;
@@ -417,6 +422,8 @@ struct provider_helper_ikev2_payload_summary {
     size_t eap_offset;
     size_t eap_len;
     size_t eap_bytes;
+    size_t delete_offset;
+    size_t delete_len;
     size_t sk_offset;
     size_t sk_len;
     uint8_t sk_next_payload;
