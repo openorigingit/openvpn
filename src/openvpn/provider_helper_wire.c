@@ -354,6 +354,13 @@ provider_helper_auth_request_valid(
             "claimed principal contains invalid characters");
         return false;
     }
+    if (!request->credential_fingerprint_len)
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "credential fingerprint is required");
+        return false;
+    }
     if (!provider_helper_auth_text_field_valid(
             request->credential_fingerprint,
             request->credential_fingerprint_len,
@@ -364,6 +371,12 @@ provider_helper_auth_request_valid(
             "credential fingerprint contains invalid characters");
         return false;
     }
+    if (!request->cert_serial_len)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "certificate serial is required");
+        return false;
+    }
     if (!provider_helper_auth_text_field_valid(
             request->cert_serial, request->cert_serial_len,
             sizeof(request->cert_serial), false))
@@ -371,6 +384,12 @@ provider_helper_auth_request_valid(
         provider_helper_config_reason(
             reason, reason_size,
             "certificate serial contains invalid characters");
+        return false;
+    }
+    if (!request->cert_issuer_len)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "certificate issuer is required");
         return false;
     }
     if (!provider_helper_auth_text_field_valid(

@@ -2836,9 +2836,12 @@ ikev2_helper_queue_auth_request(
         || !sa || !sa->active || !sa->claimed_principal_ready
         || !sa->claimed_principal_len
         || sa->claimed_principal_len >= PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE
+        || !sa->credential_fingerprint_len
         || sa->credential_fingerprint_len
                >= PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE
+        || !sa->cert_serial_len
         || sa->cert_serial_len >= PROVIDER_HELPER_AUTH_SERIAL_SIZE
+        || !sa->cert_issuer_len
         || sa->cert_issuer_len >= PROVIDER_HELPER_AUTH_ISSUER_SIZE
         || !sa->claimed_principal_id_type || sa->pending_auth_request_id)
     {

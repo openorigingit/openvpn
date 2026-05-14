@@ -560,6 +560,23 @@ test_provider_helper_auth_request_roundtrip(void **state)
     assert_int_equal(BLEN(&buf), PROVIDER_HELPER_AUTH_REQUEST_SIZE);
     free_buf(&buf);
 
+    input.credential_fingerprint_len = 0;
+    assert_false(provider_helper_auth_request_valid(&input, reason,
+                                                    sizeof(reason)));
+    assert_non_null(strstr(reason, "fingerprint"));
+    input.credential_fingerprint_len =
+        (uint32_t)strlen(input.credential_fingerprint);
+    input.cert_serial_len = 0;
+    assert_false(provider_helper_auth_request_valid(&input, reason,
+                                                    sizeof(reason)));
+    assert_non_null(strstr(reason, "serial"));
+    input.cert_serial_len = (uint32_t)strlen(input.cert_serial);
+    input.cert_issuer_len = 0;
+    assert_false(provider_helper_auth_request_valid(&input, reason,
+                                                    sizeof(reason)));
+    assert_non_null(strstr(reason, "issuer"));
+    input.cert_issuer_len = (uint32_t)strlen(input.cert_issuer);
+
     input.claimed_principal[1] = '\n';
     assert_false(provider_helper_auth_request_valid(&input, reason,
                                                     sizeof(reason)));
@@ -3328,6 +3345,15 @@ test_provider_helper_auth_request_callback(void **state)
              "%s", "alice@example.test");
     request.claimed_principal_len =
         (uint32_t)strlen(request.claimed_principal);
+    snprintf(request.credential_fingerprint,
+             sizeof(request.credential_fingerprint), "%s", "sha256:abcd");
+    request.credential_fingerprint_len =
+        (uint32_t)strlen(request.credential_fingerprint);
+    snprintf(request.cert_serial, sizeof(request.cert_serial), "%s", "1234");
+    request.cert_serial_len = (uint32_t)strlen(request.cert_serial);
+    snprintf(request.cert_issuer, sizeof(request.cert_issuer), "%s",
+             "CN=Example CA");
+    request.cert_issuer_len = (uint32_t)strlen(request.cert_issuer);
 
     write_helper_auth_request_fd(fds[1], 1, 77, &request);
     provider_helper_process_event(&supervisor);
