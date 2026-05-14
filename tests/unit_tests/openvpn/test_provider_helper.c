@@ -2055,6 +2055,97 @@ test_send_ikev2_encrypted_create_child_rekey_from(
 }
 
 static void
+test_send_ikev2_encrypted_ike_sa_rekey_from(
+    int fd,
+    uint16_t port,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt,
+    uint32_t message_id)
+{
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    uint8_t plaintext[TEST_IKEV2_SA_PAYLOAD_LEN
+                      + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                      + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE
+                      + PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES
+                      + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                      + PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES + 1];
+    CLEAR(plaintext);
+    size_t plaintext_len = 0;
+
+    plaintext_len = test_add_ikev2_payload(
+        plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_KE,
+        TEST_IKEV2_SA_PAYLOAD_LEN, 0);
+    const size_t proposal = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    test_write_be16(plaintext + proposal + 2, TEST_IKEV2_SA_PROPOSAL_LEN);
+    plaintext[proposal + 4] = 1;
+    plaintext[proposal + 5] = PROVIDER_HELPER_IKEV2_PROTOCOL_IKE;
+    plaintext[proposal + 6] = 0;
+    plaintext[proposal + 7] = 3;
+
+    size_t transform = proposal + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE;
+    plaintext[transform] = PROVIDER_HELPER_IKEV2_TRANSFORM_MORE;
+    test_write_be16(plaintext + transform + 2, TEST_IKEV2_ENCR_TRANSFORM_LEN);
+    plaintext[transform + 4] = PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR;
+    test_write_be16(plaintext + transform + 6,
+                    PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16);
+    test_write_be16(plaintext + transform + 8,
+                    0x8000u | PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH);
+    test_write_be16(plaintext + transform + 10, 256);
+
+    transform += TEST_IKEV2_ENCR_TRANSFORM_LEN;
+    plaintext[transform] = PROVIDER_HELPER_IKEV2_TRANSFORM_MORE;
+    test_write_be16(plaintext + transform + 2, TEST_IKEV2_PRF_TRANSFORM_LEN);
+    plaintext[transform + 4] = PROVIDER_HELPER_IKEV2_TRANSFORM_PRF;
+    test_write_be16(plaintext + transform + 6,
+                    PROVIDER_HELPER_IKEV2_PRF_HMAC_SHA2_256);
+
+    transform += TEST_IKEV2_PRF_TRANSFORM_LEN;
+    test_write_be16(plaintext + transform + 2, TEST_IKEV2_DH_TRANSFORM_LEN);
+    plaintext[transform + 4] = PROVIDER_HELPER_IKEV2_TRANSFORM_DH;
+    test_write_be16(plaintext + transform + 6,
+                    PROVIDER_HELPER_IKEV2_DH_ECP_256);
+
+    const size_t ke_offset = plaintext_len
+                             + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    plaintext_len = test_add_ikev2_payload(
+        plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE,
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+        + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE
+        + PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES, 0);
+    test_write_be16(plaintext + ke_offset, PROVIDER_HELPER_IKEV2_DH_ECP_256);
+    memcpy(plaintext + ke_offset + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE,
+           test_ikev2_ecp256_generator,
+           PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES);
+
+    const size_t nonce_offset = plaintext_len
+                                + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    plaintext_len = test_add_ikev2_payload(
+        plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+        + PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES, 0);
+    memset(plaintext + nonce_offset, 0xa6,
+           PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES);
+
+    plaintext[plaintext_len++] = 0; /* Pad Length. */
+    const size_t packet_len = test_make_encrypted_ikev2_plaintext_packet(
+        packet, sizeof(packet), initiator_spi, material, natt,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA, plaintext,
+        plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_SA, message_id);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    assert_int_equal(sendto(fd, packet, packet_len, 0,
+                            (struct sockaddr *)&addr, sizeof(addr)),
+                     packet_len);
+    secure_memzero(plaintext, sizeof(plaintext));
+}
+
+static void
 test_send_ikev2_encrypted_ike_delete_from(
     int fd,
     uint16_t port,
@@ -3589,16 +3680,22 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
         state_fd, state_initiator_spi, &state_material,
         PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA, 4,
         PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
+    test_send_ikev2_encrypted_ike_sa_rekey_from(
+        state_fd, natt_port, state_initiator_spi, &state_material, true, 5);
+    test_recv_ikev2_encrypted_notify_exchange_response(
+        state_fd, state_initiator_spi, &state_material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA, 5,
+        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
     test_send_ikev2_encrypted_mobike_update_from(
-        migrated_fd, natt_port, state_initiator_spi, &state_material, true, 5);
-    test_recv_ikev2_encrypted_empty_response(
-        migrated_fd, state_initiator_spi, &state_material,
-        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 5, true);
-    test_send_ikev2_encrypted_ike_delete_from(
         migrated_fd, natt_port, state_initiator_spi, &state_material, true, 6);
     test_recv_ikev2_encrypted_empty_response(
         migrated_fd, state_initiator_spi, &state_material,
         PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 6, true);
+    test_send_ikev2_encrypted_ike_delete_from(
+        migrated_fd, natt_port, state_initiator_spi, &state_material, true, 7);
+    test_recv_ikev2_encrypted_empty_response(
+        migrated_fd, state_initiator_spi, &state_material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 7, true);
 #endif
     test_send_ikev2_exchange_header_fields_from(
         datagram_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA,
@@ -3632,9 +3729,9 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
 #if defined(ENABLE_CRYPTO_OPENSSL)
-    assert_int_equal(supervisor.runtime_stats.datagrams_rx, 21);
-    assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 21);
-    assert_int_equal(supervisor.runtime_stats.ike_exchange_unsupported, 4);
+    assert_int_equal(supervisor.runtime_stats.datagrams_rx, 22);
+    assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 22);
+    assert_int_equal(supervisor.runtime_stats.ike_exchange_unsupported, 5);
     assert_int_equal(supervisor.runtime_stats.ike_informational_empty_rx, 1);
     assert_int_equal(supervisor.runtime_stats.ike_informational_empty_response_tx,
                      1);
@@ -3646,14 +3743,14 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     assert_int_equal(
         supervisor.runtime_stats.ike_informational_delete_response_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_create_child_unsupported_rx,
-                     2);
-    assert_int_equal(supervisor.runtime_stats.ike_create_child_rekey_rx, 1);
+                     3);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_rekey_rx, 2);
     assert_int_equal(supervisor.runtime_stats.ike_create_child_no_additional_sas_tx,
                      1);
     assert_int_equal(
         supervisor.runtime_stats.ike_create_child_no_additional_sas_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_create_child_temp_failure_tx,
-                     1);
+                     2);
     assert_int_equal(
         supervisor.runtime_stats.ike_create_child_temp_failure_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_exchange_replay_dropped, 2);
