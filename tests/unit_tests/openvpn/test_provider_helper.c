@@ -3466,6 +3466,8 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     test_recv_ikev2_encrypted_empty_response(
         state_fd, state_initiator_spi, &state_material,
         PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 3, true);
+    test_send_ikev2_encrypted_create_child_from(
+        state_fd, natt_port, state_initiator_spi, &state_material, true, 2);
     test_send_ikev2_encrypted_ike_delete_from(
         state_fd, natt_port, state_initiator_spi, &state_material, true, 4);
     test_recv_ikev2_encrypted_empty_response(
@@ -3500,8 +3502,8 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
 #if defined(ENABLE_CRYPTO_OPENSSL)
-    assert_int_equal(supervisor.runtime_stats.datagrams_rx, 13);
-    assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 13);
+    assert_int_equal(supervisor.runtime_stats.datagrams_rx, 14);
+    assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 14);
     assert_int_equal(supervisor.runtime_stats.ike_exchange_unsupported, 3);
     assert_int_equal(supervisor.runtime_stats.ike_informational_empty_rx, 1);
     assert_int_equal(supervisor.runtime_stats.ike_informational_empty_response_tx,
@@ -3519,7 +3521,7 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
                      1);
     assert_int_equal(
         supervisor.runtime_stats.ike_create_child_temp_failure_failed, 0);
-    assert_int_equal(supervisor.runtime_stats.ike_exchange_replay_dropped, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_exchange_replay_dropped, 1);
     assert_int_equal(supervisor.runtime_stats.ike_exchange_out_of_order_dropped,
                      1);
     assert_int_equal(supervisor.runtime_stats.ike_exchange_decrypt_failed, 1);
