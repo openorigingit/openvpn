@@ -2774,15 +2774,17 @@ test_recv_ikev2_natt_sa_init_response(int fd, uint64_t initiator_spi)
 }
 
 #if defined(ENABLE_CRYPTO_OPENSSL)
-static void
-test_recv_ikev2_encrypted_notify_exchange_response(
+static size_t
+test_recv_ikev2_encrypted_response_payload(
     int fd,
     uint64_t initiator_spi,
     const struct test_ikev2_sa_init_response_material *material,
     uint8_t expected_exchange_type,
     uint32_t expected_message_id,
-    uint16_t expected_notify_type,
-    bool expect_natt)
+    uint8_t expected_first_payload,
+    bool expect_natt,
+    uint8_t *plaintext,
+    size_t plaintext_size)
 {
     uint8_t response[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     struct sockaddr_in from;
@@ -2795,6 +2797,8 @@ test_recv_ikev2_encrypted_notify_exchange_response(
     struct provider_helper_ikev2_payload_summary summary;
 
     assert_non_null(material);
+    assert_non_null(plaintext);
+    assert_true(plaintext_size > 0);
     assert_int_equal(poll(&pfd, 1, 1000), 1);
     assert_true(pfd.revents & POLLIN);
     const ssize_t n = recvfrom(fd, response, sizeof(response), 0,
@@ -2815,8 +2819,7 @@ test_recv_ikev2_encrypted_notify_exchange_response(
     assert_int_equal(header.message_id, expected_message_id);
     assert_true(summary.saw_sk);
     assert_int_equal(summary.sk_count, 1);
-    assert_int_equal(summary.sk_next_payload,
-                     PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY);
+    assert_int_equal(summary.sk_next_payload, expected_first_payload);
     assert_true(summary.sk_len > TEST_IKEV2_AES_GCM_IV_BYTES
                                  + TEST_IKEV2_AES_GCM_TAG_BYTES);
 
@@ -2837,18 +2840,38 @@ test_recv_ikev2_encrypted_notify_exchange_response(
     memcpy(nonce + TEST_IKEV2_AES_GCM_SALT_BYTES, iv,
            TEST_IKEV2_AES_GCM_IV_BYTES);
 
-    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     size_t plaintext_len = 0;
     assert_true(test_aes_gcm_decrypt(
                     sk_er, 32, nonce, sizeof(nonce),
                     response + header.header_offset,
                     summary.sk_offset - header.header_offset, ciphertext,
                     ciphertext_len, tag, TEST_IKEV2_AES_GCM_TAG_BYTES,
-                    plaintext, sizeof(plaintext), &plaintext_len));
-    assert_true(plaintext_len >= PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE + 1);
+                    plaintext, plaintext_size, &plaintext_len));
+    assert_true(plaintext_len >= 1);
     const size_t padding_len = (size_t)plaintext[plaintext_len - 1] + 1;
     assert_true(padding_len <= plaintext_len);
     const size_t payload_len = plaintext_len - padding_len;
+
+    secure_memzero(sk_er, sizeof(sk_er));
+    secure_memzero(nonce, sizeof(nonce));
+    return payload_len;
+}
+
+static void
+test_recv_ikev2_encrypted_notify_exchange_response(
+    int fd,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    uint8_t expected_exchange_type,
+    uint32_t expected_message_id,
+    uint16_t expected_notify_type,
+    bool expect_natt)
+{
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t payload_len = test_recv_ikev2_encrypted_response_payload(
+        fd, initiator_spi, material, expected_exchange_type,
+        expected_message_id, PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY,
+        expect_natt, plaintext, sizeof(plaintext));
     assert_int_equal(payload_len, PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE);
     assert_int_equal(plaintext[0], PROVIDER_HELPER_IKEV2_PAYLOAD_NONE);
     assert_int_equal(plaintext[1], 0);
@@ -2859,8 +2882,6 @@ test_recv_ikev2_encrypted_notify_exchange_response(
     assert_int_equal((((uint16_t)plaintext[6]) << 8) | plaintext[7],
                      expected_notify_type);
 
-    secure_memzero(sk_er, sizeof(sk_er));
-    secure_memzero(nonce, sizeof(nonce));
     secure_memzero(plaintext, sizeof(plaintext));
 }
 
@@ -2875,6 +2896,92 @@ test_recv_ikev2_encrypted_notify_response(
     test_recv_ikev2_encrypted_notify_exchange_response(
         fd, initiator_spi, material, PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
         1, expected_notify_type, expect_natt);
+}
+
+static void
+test_recv_ikev2_encrypted_child_sa_response(
+    int fd,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    uint32_t expected_message_id,
+    const struct provider_helper_xfrm_lease *lease,
+    bool expect_natt)
+{
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t payload_len = test_recv_ikev2_encrypted_response_payload(
+        fd, initiator_spi, material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA, expected_message_id,
+        PROVIDER_HELPER_IKEV2_PAYLOAD_SA, expect_natt, plaintext,
+        sizeof(plaintext));
+    assert_non_null(lease);
+    assert_true(payload_len > PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE);
+
+    uint8_t packet[PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                   + PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t packet_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE + payload_len;
+    assert_true(packet_len <= sizeof(packet));
+    test_make_ikev2_header(packet, false,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA,
+                           PROVIDER_HELPER_IKEV2_FLAG_RESPONSE,
+                           material->responder_spi, (uint32_t)packet_len);
+    test_write_be64(packet, initiator_spi);
+    packet[16] = PROVIDER_HELPER_IKEV2_PAYLOAD_SA;
+    memcpy(packet + PROVIDER_HELPER_IKEV2_HEADER_SIZE, plaintext, payload_len);
+
+    struct provider_helper_ikev2_header header;
+    struct provider_helper_ikev2_payload_summary summary;
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, packet_len,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, false,
+                         &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_parse_payloads(
+                         packet, packet_len, &header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_true(summary.saw_sa);
+    assert_true(summary.saw_nonce);
+    assert_true(summary.saw_tsi);
+    assert_true(summary.saw_tsr);
+    assert_true(summary.nonce_len >= PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES);
+    assert_true(summary.nonce_len <= PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES);
+
+    struct provider_helper_ikev2_child_sa_selection selected;
+    assert_int_equal(provider_helper_ikev2_select_child_sa_proposal(
+                         packet, packet_len, &summary, &selected),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_true(selected.selected);
+    assert_int_equal(selected.encr_id, PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16);
+    assert_int_equal(selected.encr_key_bits, 256);
+    assert_true(selected.initiator_spi != 0);
+
+    const size_t tsi = summary.tsi_offset + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+    assert_int_equal(packet[summary.tsi_offset], 1);
+    assert_int_equal(packet[tsi], PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE);
+    assert_int_equal(packet[tsi + 1], lease->ip_protocol_id);
+    assert_int_equal(test_read_be16(packet + tsi + 4),
+                     lease->remote_ts_start_port);
+    assert_int_equal(test_read_be16(packet + tsi + 6),
+                     lease->remote_ts_end_port);
+    assert_int_equal(test_read_be32(packet + tsi + 8),
+                     lease->remote_ts_start_ipv4);
+    assert_int_equal(test_read_be32(packet + tsi + 12),
+                     lease->remote_ts_end_ipv4);
+
+    const size_t tsr = summary.tsr_offset + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+    assert_int_equal(packet[summary.tsr_offset], 1);
+    assert_int_equal(packet[tsr], PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE);
+    assert_int_equal(packet[tsr + 1], lease->ip_protocol_id);
+    assert_int_equal(test_read_be16(packet + tsr + 4),
+                     lease->local_ts_start_port);
+    assert_int_equal(test_read_be16(packet + tsr + 6),
+                     lease->local_ts_end_port);
+    assert_int_equal(test_read_be32(packet + tsr + 8),
+                     lease->local_ts_start_ipv4);
+    assert_int_equal(test_read_be32(packet + tsr + 12),
+                     lease->local_ts_end_ipv4);
+
+    secure_memzero(plaintext, sizeof(plaintext));
+    secure_memzero(packet, sizeof(packet));
 }
 
 #endif
@@ -5532,6 +5639,8 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     test_send_ikev2_encrypted_create_child_from(
         response_fd, natt_port, initiator_spi, &sa_init_material, true, 2);
     usleep(10000);
+    test_recv_ikev2_encrypted_child_sa_response(
+        response_fd, initiator_spi, &sa_init_material, 2, &xfrm_lease, true);
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
