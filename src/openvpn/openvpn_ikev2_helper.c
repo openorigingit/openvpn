@@ -1026,12 +1026,17 @@ ikev2_helper_cookie_mac(void *ctx, const uint8_t *input, size_t input_len,
                                        input_len, tag, tag_len);
 }
 
-static void
+static bool
 ikev2_helper_cookie_context_init(struct ikev2_helper_cookie_context *cookie_ctx)
 {
+    if (!cookie_ctx)
+    {
+        return false;
+    }
     CLEAR(*cookie_ctx);
     cookie_ctx->ready = ikev2_helper_random_bytes(cookie_ctx->key,
                                                   sizeof(cookie_ctx->key));
+    return cookie_ctx->ready;
 }
 
 static void
@@ -6342,7 +6347,11 @@ ikev2_helper_loop(int fd)
         listeners[i].fd = -1;
     }
     CLEAR(xfrm_leases);
-    ikev2_helper_cookie_context_init(&cookie_ctx);
+    if (!ikev2_helper_cookie_context_init(&cookie_ctx))
+    {
+        ret = 11;
+        goto done;
+    }
 
     if (!ikev2_helper_send_hello(fd, tx_sequence++, 1))
     {
