@@ -2191,6 +2191,108 @@ ikev2_helper_validate_child_ts_payload(const uint8_t *body, size_t body_len)
                            : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
 }
 
+struct ikev2_helper_ipv4_ts_range {
+    uint8_t ip_protocol_id;
+    uint16_t start_port;
+    uint16_t end_port;
+    uint32_t start_addr;
+    uint32_t end_addr;
+};
+
+static bool
+ikev2_helper_read_single_ipv4_ts_range(
+    const uint8_t *body,
+    size_t body_len,
+    struct ikev2_helper_ipv4_ts_range *range)
+{
+    if (!body || !range
+        || body_len != PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE
+                       + PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE
+        || body[0] != 1 || body[1] || body[2] || body[3])
+    {
+        return false;
+    }
+
+    const size_t pos = PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+    if (body[pos] != PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE
+        || ikev2_helper_read_be16(body + pos + 2)
+               != PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE)
+    {
+        return false;
+    }
+
+    CLEAR(*range);
+    range->ip_protocol_id = body[pos + 1];
+    range->start_port = ikev2_helper_read_be16(body + pos + 4);
+    range->end_port = ikev2_helper_read_be16(body + pos + 6);
+    range->start_addr = ikev2_helper_read_be32(body + pos + 8);
+    range->end_addr = ikev2_helper_read_be32(body + pos + 12);
+    return range->start_port <= range->end_port
+           && range->start_addr <= range->end_addr;
+}
+
+static bool
+ikev2_helper_ipv4_ts_allowed(
+    const struct ikev2_helper_ipv4_ts_range *requested,
+    uint32_t allowed_start_addr,
+    uint32_t allowed_end_addr,
+    uint32_t allowed_start_port,
+    uint32_t allowed_end_port,
+    uint32_t allowed_protocol_id)
+{
+    if (!requested || allowed_start_addr > allowed_end_addr
+        || allowed_start_port > allowed_end_port || allowed_end_port > 65535
+        || allowed_protocol_id > 255)
+    {
+        return false;
+    }
+    if (requested->start_addr < allowed_start_addr
+        || requested->end_addr > allowed_end_addr
+        || requested->start_port < allowed_start_port
+        || requested->end_port > allowed_end_port)
+    {
+        return false;
+    }
+    return allowed_protocol_id == 0
+           || requested->ip_protocol_id == (uint8_t)allowed_protocol_id;
+}
+
+static bool
+ikev2_helper_child_ts_matches_xfrm_lease(
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    const struct provider_helper_ikev2_payload_summary *summary,
+    const struct provider_helper_xfrm_lease *lease)
+{
+    if (!plaintext || !summary || !lease || lease->address_family != AF_INET
+        || !ikev2_helper_body_inside(plaintext_len, summary->tsi_offset,
+                                     summary->tsi_len)
+        || !ikev2_helper_body_inside(plaintext_len, summary->tsr_offset,
+                                     summary->tsr_len))
+    {
+        return false;
+    }
+
+    struct ikev2_helper_ipv4_ts_range tsi;
+    struct ikev2_helper_ipv4_ts_range tsr;
+    if (!ikev2_helper_read_single_ipv4_ts_range(
+            plaintext + summary->tsi_offset, summary->tsi_len, &tsi)
+        || !ikev2_helper_read_single_ipv4_ts_range(
+            plaintext + summary->tsr_offset, summary->tsr_len, &tsr))
+    {
+        return false;
+    }
+
+    return ikev2_helper_ipv4_ts_allowed(
+               &tsi, lease->remote_ts_start_ipv4, lease->remote_ts_end_ipv4,
+               lease->remote_ts_start_port, lease->remote_ts_end_port,
+               lease->ip_protocol_id)
+           && ikev2_helper_ipv4_ts_allowed(
+               &tsr, lease->local_ts_start_ipv4, lease->local_ts_end_ipv4,
+               lease->local_ts_start_port, lease->local_ts_end_port,
+               lease->ip_protocol_id);
+}
+
 static enum provider_helper_ikev2_parse_result
 ikev2_helper_validate_create_child_inner_payload(uint8_t payload_type,
                                                  const uint8_t *body,
@@ -4836,6 +4938,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         ++counters->ike_create_child_rekey_rx;
                     }
                     bool no_proposal = false;
+                    bool ts_unacceptable = false;
                     bool install_unsupported = false;
                     if (!rekey_request)
                     {
@@ -4861,7 +4964,16 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         }
                         else
                         {
-                            install_unsupported = true;
+                            if (ikev2_helper_child_ts_matches_xfrm_lease(
+                                    plaintext, plaintext_len, &inner_summary,
+                                    &sa->authorized_xfrm_lease))
+                            {
+                                install_unsupported = true;
+                            }
+                            else
+                            {
+                                ts_unacceptable = true;
+                            }
                         }
                     }
                     const uint16_t notify_type =
@@ -4869,6 +4981,8 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             ? PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE
                             : no_proposal
                                   ? PROVIDER_HELPER_IKEV2_NOTIFY_NO_PROPOSAL_CHOSEN
+                              : ts_unacceptable
+                                  ? PROVIDER_HELPER_IKEV2_NOTIFY_TS_UNACCEPTABLE
                                   : PROVIDER_HELPER_IKEV2_NOTIFY_NO_ADDITIONAL_SAS;
                     if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
                             listener, sa, header.exchange_type,
@@ -4886,6 +5000,10 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         else if (no_proposal)
                         {
                             ++counters->ike_create_child_no_proposal_tx;
+                        }
+                        else if (ts_unacceptable)
+                        {
+                            ++counters->ike_create_child_ts_unacceptable_tx;
                         }
                         else
                         {
@@ -4908,6 +5026,11 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         {
                             ++counters
                                   ->ike_create_child_no_proposal_failed;
+                        }
+                        else if (ts_unacceptable)
+                        {
+                            ++counters
+                                  ->ike_create_child_ts_unacceptable_failed;
                         }
                         else
                         {

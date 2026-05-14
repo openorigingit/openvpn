@@ -36,7 +36,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 36
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  680
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  696
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     88
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
 #define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
@@ -191,6 +191,7 @@ enum provider_helper_ikev2_payload_type {
 #define PROVIDER_HELPER_IKEV2_NOTIFY_INVALID_KE_PAYLOAD 17
 #define PROVIDER_HELPER_IKEV2_NOTIFY_AUTHENTICATION_FAILED 24
 #define PROVIDER_HELPER_IKEV2_NOTIFY_NO_ADDITIONAL_SAS 35
+#define PROVIDER_HELPER_IKEV2_NOTIFY_TS_UNACCEPTABLE 38
 #define PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE 43
 #define PROVIDER_HELPER_IKEV2_NOTIFY_NAT_DETECTION_SOURCE_IP 16388
 #define PROVIDER_HELPER_IKEV2_NOTIFY_NAT_DETECTION_DESTINATION_IP 16389
@@ -390,6 +391,8 @@ struct provider_helper_runtime_stats {
     uint64_t ike_create_child_install_unsupported_tx;
     uint64_t ike_create_child_install_unsupported_failed;
     uint64_t ike_exchange_pre_auth_dropped;
+    uint64_t ike_create_child_ts_unacceptable_tx;
+    uint64_t ike_create_child_ts_unacceptable_failed;
 };
 
 struct provider_helper_xfrm_lease {

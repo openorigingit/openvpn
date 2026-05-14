@@ -844,6 +844,10 @@ provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
         &pos, stats->ike_create_child_install_unsupported_failed);
     provider_helper_wire_write_u64(&pos,
                                    stats->ike_exchange_pre_auth_dropped);
+    provider_helper_wire_write_u64(&pos,
+                                   stats->ike_create_child_ts_unacceptable_tx);
+    provider_helper_wire_write_u64(
+        &pos, stats->ike_create_child_ts_unacceptable_failed);
 
     return (size_t)(pos - dst) == PROVIDER_HELPER_RUNTIME_STATS_SIZE;
 }
@@ -975,6 +979,10 @@ provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
     stats->ike_create_child_install_unsupported_failed =
         provider_helper_wire_read_u64(&pos);
     stats->ike_exchange_pre_auth_dropped =
+        provider_helper_wire_read_u64(&pos);
+    stats->ike_create_child_ts_unacceptable_tx =
+        provider_helper_wire_read_u64(&pos);
+    stats->ike_create_child_ts_unacceptable_failed =
         provider_helper_wire_read_u64(&pos);
 
     return (size_t)(pos - src) == PROVIDER_HELPER_RUNTIME_STATS_SIZE;
