@@ -5768,7 +5768,11 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         }
                         else
                         {
-                            if (ikev2_helper_child_ts_for_xfrm_lease(
+                            if (sa->child_sa.ready && sa->child_sa.xfrm_applied)
+                            {
+                                /* The Linux MVP owns one installed CHILD_SA per IKE_SA. */
+                            }
+                            else if (ikev2_helper_child_ts_for_xfrm_lease(
                                     plaintext, plaintext_len, &inner_summary,
                                     &sa->authorized_xfrm_lease,
                                     &child_local_ts, &child_remote_ts))
