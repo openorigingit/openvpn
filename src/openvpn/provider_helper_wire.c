@@ -127,9 +127,11 @@ provider_helper_runtime_config_valid(const struct provider_helper_runtime_config
         provider_helper_config_reason(reason, reason_size, "retransmit_limit must be nonzero");
         return false;
     }
-    if (config->worker_limit == 0)
+    if (config->worker_limit == 0
+        || config->worker_limit > PROVIDER_HELPER_DEFAULT_WORKER_LIMIT)
     {
-        provider_helper_config_reason(reason, reason_size, "worker_limit must be nonzero");
+        provider_helper_config_reason(reason, reason_size,
+                                      "worker_limit outside supported bounds");
         return false;
     }
     if (config->half_open_timeout_seconds == 0)

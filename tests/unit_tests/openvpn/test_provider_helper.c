@@ -251,6 +251,15 @@ test_provider_helper_runtime_config_roundtrip(void **state)
     assert_false(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
     assert_non_null(strstr(reason, "half_open_timeout_seconds"));
     input.half_open_timeout_seconds = PROVIDER_HELPER_DEFAULT_HALF_OPEN_TIMEOUT;
+    input.worker_limit = 0;
+    assert_false(provider_helper_runtime_config_valid(&input, reason,
+                                                      sizeof(reason)));
+    assert_non_null(strstr(reason, "worker_limit"));
+    input.worker_limit = PROVIDER_HELPER_DEFAULT_WORKER_LIMIT + 1;
+    assert_false(provider_helper_runtime_config_valid(&input, reason,
+                                                      sizeof(reason)));
+    assert_non_null(strstr(reason, "worker_limit"));
+    input.worker_limit = PROVIDER_HELPER_DEFAULT_WORKER_LIMIT;
     input.max_half_open_sas_per_source = input.max_half_open_sas + 1;
     assert_false(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
     assert_non_null(strstr(reason, "max_half_open_sas_per_source"));
