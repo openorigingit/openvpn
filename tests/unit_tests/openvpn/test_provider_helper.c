@@ -279,6 +279,10 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .datagrams_parsed = 7,
         .datagrams_malformed = 2,
         .datagrams_oversize = 1,
+        .xfrm_leases_active = 51,
+        .xfrm_lease_installed = 52,
+        .xfrm_lease_replaced = 53,
+        .xfrm_lease_deleted = 54,
         .ike_exchange_unsupported = 44,
         .ike_sa_init_accepted = 5,
         .ike_sa_init_cookie_required = 4,
@@ -338,6 +342,10 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
     assert_int_equal(output.datagrams_parsed, input.datagrams_parsed);
     assert_int_equal(output.datagrams_malformed, input.datagrams_malformed);
     assert_int_equal(output.datagrams_oversize, input.datagrams_oversize);
+    assert_int_equal(output.xfrm_leases_active, input.xfrm_leases_active);
+    assert_int_equal(output.xfrm_lease_installed, input.xfrm_lease_installed);
+    assert_int_equal(output.xfrm_lease_replaced, input.xfrm_lease_replaced);
+    assert_int_equal(output.xfrm_lease_deleted, input.xfrm_lease_deleted);
     assert_int_equal(output.ike_exchange_unsupported,
                      input.ike_exchange_unsupported);
     assert_int_equal(output.ike_sa_init_accepted, input.ike_sa_init_accepted);
@@ -2959,8 +2967,8 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 5);
 
-    assert_true(provider_helper_supervisor_send_xfrm_lease_delete(
-                    &supervisor, &xfrm_lease, 100));
+    assert_true(provider_helper_supervisor_send_xfrm_lease(&supervisor, &xfrm_lease,
+                                                           100));
     for (int i = 0; i < 100 && supervisor.last_rx_sequence < 6; ++i)
     {
         provider_helper_process_event(&supervisor);
@@ -2969,6 +2977,17 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 6);
+
+    assert_true(provider_helper_supervisor_send_xfrm_lease_delete(
+                    &supervisor, &xfrm_lease, 101));
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 7; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 7);
 
     int response_fd = test_create_udp_sender(0x7f000004u);
     test_send_ikev2_datagram_from(response_fd, port, 0xfeedfacecafebeefull);
@@ -3138,6 +3157,10 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
     assert_true(supervisor.runtime_stats.datagrams_rx >= 20);
     assert_true(supervisor.runtime_stats.datagrams_parsed >= 20);
+    assert_int_equal(supervisor.runtime_stats.xfrm_leases_active, 0);
+    assert_int_equal(supervisor.runtime_stats.xfrm_lease_installed, 1);
+    assert_int_equal(supervisor.runtime_stats.xfrm_lease_replaced, 1);
+    assert_int_equal(supervisor.runtime_stats.xfrm_lease_deleted, 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_accepted >= 4);
     assert_true(supervisor.runtime_stats.ike_sa_init_state_failed >= 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_keymat_ready >= 4);
@@ -3388,6 +3411,10 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
         supervisor.runtime_stats.ike_auth_allow_temp_failure_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_allow_missing_xfrm_lease,
                      0);
+    assert_int_equal(supervisor.runtime_stats.xfrm_leases_active, 1);
+    assert_int_equal(supervisor.runtime_stats.xfrm_lease_installed, 1);
+    assert_int_equal(supervisor.runtime_stats.xfrm_lease_replaced, 0);
+    assert_int_equal(supervisor.runtime_stats.xfrm_lease_deleted, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
 
     close(response_fd);

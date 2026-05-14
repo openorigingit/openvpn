@@ -35,7 +35,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 36
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  424
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  456
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
 #define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
@@ -286,6 +286,10 @@ struct provider_helper_runtime_stats {
     uint64_t datagrams_parsed;
     uint64_t datagrams_malformed;
     uint64_t datagrams_oversize;
+    uint64_t xfrm_leases_active;
+    uint64_t xfrm_lease_installed;
+    uint64_t xfrm_lease_replaced;
+    uint64_t xfrm_lease_deleted;
     uint64_t ike_exchange_unsupported;
     uint64_t ike_sa_init_accepted;
     uint64_t ike_sa_init_cookie_required;
