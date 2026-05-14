@@ -5713,21 +5713,29 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             &sa->child_sa))
                     {
                         ++counters->ike_informational_delete_rx;
-                        if (ikev2_helper_send_cached_encrypted_empty_response(
-                                listener, sa, header.exchange_type,
-                                header.message_id)
-                            && ikev2_helper_delete_child_sa_xfrm(
-                                &sa->child_sa, counters))
-                        {
-                            ++counters->ike_informational_delete_response_tx;
-                            ikev2_helper_secure_zero(&sa->child_sa,
-                                                     sizeof(sa->child_sa));
-                            sa->message_id = header.message_id;
-                        }
-                        else
+                        if (!ikev2_helper_delete_child_sa_xfrm(&sa->child_sa,
+                                                               counters))
                         {
                             ++counters
                                   ->ike_informational_delete_response_failed;
+                        }
+                        else
+                        {
+                            if (ikev2_helper_send_cached_encrypted_empty_response(
+                                    listener, sa, header.exchange_type,
+                                    header.message_id))
+                            {
+                                ++counters
+                                      ->ike_informational_delete_response_tx;
+                                sa->message_id = header.message_id;
+                            }
+                            else
+                            {
+                                ++counters
+                                      ->ike_informational_delete_response_failed;
+                            }
+                            ikev2_helper_secure_zero(&sa->child_sa,
+                                                     sizeof(sa->child_sa));
                         }
                         ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                         counters->ike_sa_active = sa_table->active;
