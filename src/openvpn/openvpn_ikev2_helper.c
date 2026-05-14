@@ -4050,6 +4050,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         sa, packet, (size_t)n, &header, &protected_summary,
                         plaintext, sizeof(plaintext), &plaintext_len))
                 {
+                    ++counters->ike_exchange_decrypt_failed;
                     ++counters->datagrams_malformed;
                     counters->ike_sa_active = sa_table->active;
                     return;
