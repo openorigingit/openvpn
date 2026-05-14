@@ -526,6 +526,60 @@ provider_helper_wire_read_u64(const uint8_t **pos)
 }
 
 bool
+provider_helper_negotiate_features(uint64_t supported_features,
+                                   uint64_t remote_mandatory_features,
+                                   uint64_t remote_optional_features,
+                                   uint64_t *negotiated_features)
+{
+    if (remote_mandatory_features & ~supported_features)
+    {
+        return false;
+    }
+
+    if (negotiated_features)
+    {
+        *negotiated_features =
+            (remote_mandatory_features | remote_optional_features) & supported_features;
+    }
+    return true;
+}
+
+bool
+provider_helper_ipc_encode_feature_set(uint8_t *dst, size_t dst_len,
+                                       const struct provider_helper_feature_set *features)
+{
+    if (!dst || dst_len < PROVIDER_HELPER_FEATURE_SET_SIZE || !features)
+    {
+        return false;
+    }
+
+    uint8_t *pos = dst;
+    provider_helper_wire_write_u64(&pos, features->mandatory_features);
+    provider_helper_wire_write_u64(&pos, features->optional_features);
+
+    return (size_t)(pos - dst) == PROVIDER_HELPER_FEATURE_SET_SIZE;
+}
+
+bool
+provider_helper_ipc_decode_feature_set(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_feature_set *features)
+{
+    if (!src || src_len != PROVIDER_HELPER_FEATURE_SET_SIZE || !features)
+    {
+        return false;
+    }
+
+    const uint8_t *pos = src;
+    CLEAR(*features);
+    features->mandatory_features = provider_helper_wire_read_u64(&pos);
+    features->optional_features = provider_helper_wire_read_u64(&pos);
+
+    return (size_t)(pos - src) == PROVIDER_HELPER_FEATURE_SET_SIZE;
+}
+
+bool
 provider_helper_ipc_encode_runtime_config(uint8_t *dst, size_t dst_len,
                                           const struct provider_helper_runtime_config *config)
 {

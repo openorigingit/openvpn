@@ -79,6 +79,22 @@ provider_helper_ipc_write_header(struct buffer *buf,
 }
 
 bool
+provider_helper_ipc_write_feature_set(
+    struct buffer *buf,
+    const struct provider_helper_feature_set *features)
+{
+    if (!buf || !features)
+    {
+        return false;
+    }
+
+    uint8_t payload[PROVIDER_HELPER_FEATURE_SET_SIZE];
+    return provider_helper_ipc_encode_feature_set(payload, sizeof(payload),
+                                                  features)
+           && buf_write(buf, payload, sizeof(payload));
+}
+
+bool
 provider_helper_ipc_write_runtime_config(struct buffer *buf,
                                          const struct provider_helper_runtime_config *config)
 {
@@ -185,23 +201,4 @@ provider_helper_ipc_read_header(struct buffer *buf,
         buf_advance(buf, PROVIDER_HELPER_IPC_HEADER_SIZE);
     }
     return result;
-}
-
-bool
-provider_helper_negotiate_features(uint64_t supported_features,
-                                   uint64_t remote_mandatory_features,
-                                   uint64_t remote_optional_features,
-                                   uint64_t *negotiated_features)
-{
-    if (remote_mandatory_features & ~supported_features)
-    {
-        return false;
-    }
-
-    if (negotiated_features)
-    {
-        *negotiated_features =
-            (remote_mandatory_features | remote_optional_features) & supported_features;
-    }
-    return true;
 }

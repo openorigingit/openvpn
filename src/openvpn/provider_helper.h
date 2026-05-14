@@ -31,6 +31,7 @@
 #define PROVIDER_HELPER_IPC_VERSION_MINOR 0
 #define PROVIDER_HELPER_IPC_HEADER_SIZE   40
 #define PROVIDER_HELPER_IPC_MAX_MESSAGE   (64 * 1024)
+#define PROVIDER_HELPER_FEATURE_SET_SIZE  16
 #define PROVIDER_HELPER_CHILD_FD          3
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 36
@@ -76,6 +77,8 @@
 
 #define PROVIDER_HELPER_XFRM_LEASE_IPV4   (1u << 0)
 #define PROVIDER_HELPER_XFRM_LEASE_IPV6   (1u << 1)
+
+#define PROVIDER_HELPER_FEATURE_IKEV2_BASE (1ull << 0)
 
 #define PROVIDER_HELPER_IKEV2_MAJOR_VERSION 2
 #define PROVIDER_HELPER_IKEV2_MINOR_VERSION 0
@@ -253,6 +256,11 @@ struct provider_helper_auth_response {
     uint32_t flags;
     uint32_t reserved;
     char reason[PROVIDER_HELPER_AUTH_REASON_SIZE];
+};
+
+struct provider_helper_feature_set {
+    uint64_t mandatory_features;
+    uint64_t optional_features;
 };
 
 typedef bool (*provider_helper_auth_request_cb)(
@@ -493,6 +501,9 @@ bool provider_helper_auth_response_valid(
 
 bool provider_helper_ipc_write_header(struct buffer *buf,
                                       const struct provider_helper_msg_header *header);
+bool provider_helper_ipc_write_feature_set(
+    struct buffer *buf,
+    const struct provider_helper_feature_set *features);
 bool provider_helper_ipc_encode_header(uint8_t *dst, size_t dst_len,
                                        const struct provider_helper_msg_header *header);
 enum provider_helper_ipc_result
@@ -505,6 +516,14 @@ provider_helper_ipc_decode_header(const uint8_t *src, size_t src_len,
                                   struct provider_helper_msg_header *header,
                                   uint32_t max_message_size,
                                   uint64_t *last_sequence);
+bool provider_helper_ipc_encode_feature_set(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_feature_set *features);
+bool provider_helper_ipc_decode_feature_set(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_feature_set *features);
 bool provider_helper_ipc_write_runtime_config(struct buffer *buf,
                                               const struct provider_helper_runtime_config *config);
 bool provider_helper_ipc_write_listener_fd(struct buffer *buf,

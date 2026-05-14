@@ -932,6 +932,32 @@ ikev2_helper_send_header(int fd, uint32_t type, uint64_t sequence,
 }
 
 static bool
+ikev2_helper_send_hello(int fd, uint64_t sequence, uint64_t correlation_id)
+{
+    uint8_t frame[PROVIDER_HELPER_IPC_HEADER_SIZE
+                  + PROVIDER_HELPER_FEATURE_SET_SIZE];
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_HELLO,
+        .sequence = sequence,
+        .correlation_id = correlation_id,
+        .payload_len = PROVIDER_HELPER_FEATURE_SET_SIZE,
+    };
+    const struct provider_helper_feature_set features = {
+        .mandatory_features = PROVIDER_HELPER_FEATURE_IKEV2_BASE,
+    };
+
+    return provider_helper_ipc_encode_header(frame, PROVIDER_HELPER_IPC_HEADER_SIZE,
+                                             &header)
+           && provider_helper_ipc_encode_feature_set(
+               frame + PROVIDER_HELPER_IPC_HEADER_SIZE,
+               PROVIDER_HELPER_FEATURE_SET_SIZE, &features)
+           && ikev2_helper_write_all(fd, frame, sizeof(frame));
+}
+
+static bool
 ikev2_helper_send_stats(int fd, uint64_t sequence, uint64_t correlation_id,
                         const struct provider_helper_runtime_stats *stats)
 {
@@ -1046,6 +1072,23 @@ ikev2_helper_read_runtime_config(int fd, const struct provider_helper_msg_header
 
     return provider_helper_ipc_decode_runtime_config(payload, sizeof(payload), config)
            && provider_helper_runtime_config_valid(config, NULL, 0);
+}
+
+static bool
+ikev2_helper_read_feature_set(
+    int fd,
+    const struct provider_helper_msg_header *header,
+    struct provider_helper_feature_set *features)
+{
+    uint8_t payload[PROVIDER_HELPER_FEATURE_SET_SIZE];
+    if (!header || header->payload_len != sizeof(payload)
+        || !ikev2_helper_read_all(fd, payload, sizeof(payload)))
+    {
+        return false;
+    }
+
+    return provider_helper_ipc_decode_feature_set(payload, sizeof(payload),
+                                                  features);
 }
 
 static bool
@@ -3353,6 +3396,7 @@ ikev2_helper_loop(int fd)
     uint64_t tx_sequence = 1;
     uint64_t last_rx_sequence = 0;
     uint64_t next_auth_request_id = 1;
+    uint64_t negotiated_features = 0;
     bool configured = false;
     struct ikev2_helper_listener listeners[IKEV2_HELPER_MAX_LISTENERS];
     struct provider_helper_xfrm_lease xfrm_leases[IKEV2_HELPER_MAX_XFRM_LEASES];
@@ -3373,7 +3417,7 @@ ikev2_helper_loop(int fd)
     CLEAR(xfrm_leases);
     ikev2_helper_cookie_context_init(&cookie_ctx);
 
-    if (!ikev2_helper_send_header(fd, PROVIDER_HELPER_MSG_HELLO, tx_sequence++, 1))
+    if (!ikev2_helper_send_hello(fd, tx_sequence++, 1))
     {
         ret = 2;
         goto done;
@@ -3449,7 +3493,7 @@ ikev2_helper_loop(int fd)
         switch (header.type)
         {
             case PROVIDER_HELPER_MSG_CONFIGURE:
-                if (configured
+                if (configured || !(negotiated_features & PROVIDER_HELPER_FEATURE_IKEV2_BASE)
                     || !ikev2_helper_read_runtime_config(fd, &header, &config)
                     || !ikev2_helper_send_header(fd, PROVIDER_HELPER_MSG_CONFIGURE_ACK,
                                                  tx_sequence++, header.sequence))
@@ -3550,6 +3594,22 @@ ikev2_helper_loop(int fd)
             }
 
             case PROVIDER_HELPER_MSG_HELLO_REPLY:
+            {
+                struct provider_helper_feature_set remote;
+                if (configured || negotiated_features
+                    || !ikev2_helper_read_feature_set(fd, &header, &remote)
+                    || !provider_helper_negotiate_features(
+                        PROVIDER_HELPER_FEATURE_IKEV2_BASE,
+                        remote.mandatory_features, remote.optional_features,
+                        &negotiated_features)
+                    || !(negotiated_features & PROVIDER_HELPER_FEATURE_IKEV2_BASE))
+                {
+                    ret = 6;
+                    goto done;
+                }
+                break;
+            }
+
             case PROVIDER_HELPER_MSG_PONG:
                 if (header.payload_len)
                 {

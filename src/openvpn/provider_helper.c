@@ -90,6 +90,7 @@ provider_helper_supervisor_init(struct provider_helper_supervisor *supervisor)
     supervisor->ipc_fd = -1;
     supervisor->next_tx_sequence = 1;
     supervisor->max_message_size = PROVIDER_HELPER_IPC_MAX_MESSAGE;
+    supervisor->supported_features = PROVIDER_HELPER_FEATURE_IKEV2_BASE;
     supervisor->last_state_change = now;
     provider_helper_runtime_config_default(&supervisor->runtime_config);
 }
@@ -170,6 +171,39 @@ provider_helper_write_all(int fd, const uint8_t *data, size_t len)
 }
 
 static bool
+provider_helper_supervisor_send_hello_reply(
+    struct provider_helper_supervisor *supervisor,
+    uint64_t correlation_id,
+    uint64_t mandatory_features)
+{
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE
+                                  + PROVIDER_HELPER_FEATURE_SET_SIZE);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_HELLO_REPLY,
+        .sequence = supervisor->next_tx_sequence++,
+        .correlation_id = correlation_id,
+        .payload_len = PROVIDER_HELPER_FEATURE_SET_SIZE,
+    };
+    const struct provider_helper_feature_set features = {
+        .mandatory_features = mandatory_features,
+        .optional_features = supervisor->negotiated_features
+                             & ~mandatory_features,
+    };
+
+    const bool encoded = provider_helper_ipc_write_header(&buf, &header)
+                         && provider_helper_ipc_write_feature_set(&buf,
+                                                                  &features);
+    const bool written = encoded
+                         && provider_helper_write_all(supervisor->ipc_fd, BPTR(&buf),
+                                                      (size_t)BLEN(&buf));
+    free_buf(&buf);
+    return written;
+}
+
+static bool
 provider_helper_supervisor_send_config(struct provider_helper_supervisor *supervisor,
                                        uint64_t correlation_id)
 {
@@ -193,6 +227,44 @@ provider_helper_supervisor_send_config(struct provider_helper_supervisor *superv
                                                       (size_t)BLEN(&buf));
     free_buf(&buf);
     return written;
+}
+
+static bool
+provider_helper_supervisor_process_hello(
+    struct provider_helper_supervisor *supervisor,
+    const struct provider_helper_msg_header *header,
+    const uint8_t *payload,
+    size_t payload_len)
+{
+    if (!supervisor || !header || supervisor->state != PROVIDER_HELPER_STATE_STARTING)
+    {
+        return false;
+    }
+
+    supervisor->negotiated_features = 0;
+    if (!payload_len)
+    {
+        return provider_helper_supervisor_send_config(supervisor, header->sequence);
+    }
+    if (payload_len != PROVIDER_HELPER_FEATURE_SET_SIZE)
+    {
+        return false;
+    }
+
+    struct provider_helper_feature_set remote;
+    if (!provider_helper_ipc_decode_feature_set(payload, payload_len, &remote)
+        || !provider_helper_negotiate_features(
+            supervisor->supported_features, remote.mandatory_features,
+            remote.optional_features, &supervisor->negotiated_features))
+    {
+        return false;
+    }
+
+    const uint64_t mandatory_features =
+        remote.mandatory_features & supervisor->supported_features;
+    return provider_helper_supervisor_send_hello_reply(
+               supervisor, header->sequence, mandatory_features)
+           && provider_helper_supervisor_send_config(supervisor, header->sequence);
 }
 
 static bool
@@ -620,6 +692,23 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
         supervisor->payload_len = 0;
         supervisor->payload_received = 0;
 
+        if (header.type == PROVIDER_HELPER_MSG_HELLO)
+        {
+            if (!provider_helper_supervisor_process_hello(
+                    supervisor, &header, supervisor->payload_buf, payload_len))
+            {
+                provider_helper_supervisor_set_state(
+                    supervisor, PROVIDER_HELPER_STATE_FAILED);
+                provider_helper_close_ipc(supervisor);
+            }
+            else
+            {
+                provider_helper_supervisor_set_state(
+                    supervisor, PROVIDER_HELPER_STATE_PREFLIGHT);
+            }
+            return;
+        }
+
         if (header.type == PROVIDER_HELPER_MSG_STATS
             && payload_len == PROVIDER_HELPER_RUNTIME_STATS_SIZE
             && supervisor->state == PROVIDER_HELPER_STATE_READY
@@ -718,8 +807,8 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
     switch (header.type)
     {
         case PROVIDER_HELPER_MSG_HELLO:
-            if (supervisor->state != PROVIDER_HELPER_STATE_STARTING
-                || !provider_helper_supervisor_send_config(supervisor, header.sequence))
+            if (!provider_helper_supervisor_process_hello(supervisor, &header,
+                                                          NULL, 0))
             {
                 provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);
                 provider_helper_close_ipc(supervisor);

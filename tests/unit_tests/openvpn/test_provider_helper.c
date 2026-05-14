@@ -163,6 +163,22 @@ test_provider_helper_feature_negotiation(void **state)
     assert_int_equal(negotiated, 0x05);
 
     assert_false(provider_helper_negotiate_features(0x01, 0x02, 0, &negotiated));
+
+    const struct provider_helper_feature_set input = {
+        .mandatory_features = PROVIDER_HELPER_FEATURE_IKEV2_BASE,
+        .optional_features = 0x04,
+    };
+    uint8_t payload[PROVIDER_HELPER_FEATURE_SET_SIZE];
+    struct provider_helper_feature_set output;
+    assert_true(provider_helper_ipc_encode_feature_set(payload, sizeof(payload),
+                                                       &input));
+    assert_true(provider_helper_ipc_decode_feature_set(payload, sizeof(payload),
+                                                       &output));
+    assert_int_equal(output.mandatory_features, input.mandatory_features);
+    assert_int_equal(output.optional_features, input.optional_features);
+    assert_false(provider_helper_ipc_decode_feature_set(payload,
+                                                        sizeof(payload) - 1,
+                                                        &output));
 }
 
 static void
@@ -2672,6 +2688,7 @@ test_provider_helper_spawn_noop(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 2);
+    assert_int_equal(supervisor.negotiated_features, 0);
     provider_helper_supervisor_stop(&supervisor);
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
     assert_int_equal(supervisor.ipc_fd, -1);
@@ -2760,6 +2777,8 @@ test_provider_helper_spawn_ikev2_natt_listener(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 2);
+    assert_int_equal(supervisor.negotiated_features,
+                     PROVIDER_HELPER_FEATURE_IKEV2_BASE);
 
     uint16_t port = 0;
     int listener_fd = test_create_udp_listener(&port);
