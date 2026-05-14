@@ -1498,7 +1498,7 @@ ikev2_helper_add_bounded_payload_bytes(size_t *total, size_t payload_len,
 }
 
 static void
-ikev2_helper_record_ike_auth_inner_payload(
+ikev2_helper_record_inner_payload(
     struct provider_helper_ikev2_payload_summary *summary,
     uint8_t payload_type,
     size_t pos,
@@ -1523,6 +1523,26 @@ ikev2_helper_record_ike_auth_inner_payload(
             {
                 summary->sa_offset = body_offset;
                 summary->sa_len = body_len;
+            }
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_KE:
+            summary->saw_ke = true;
+            ++summary->ke_count;
+            if (summary->ke_count == 1)
+            {
+                summary->ke_offset = body_offset;
+                summary->ke_len = body_len;
+            }
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE:
+            summary->saw_nonce = true;
+            ++summary->nonce_count;
+            if (summary->nonce_count == 1)
+            {
+                summary->nonce_offset = body_offset;
+                summary->nonce_len = body_len;
             }
             break;
 
@@ -1676,14 +1696,159 @@ ikev2_helper_parse_ike_auth_inner_payloads(
             }
         }
 
-        ikev2_helper_record_ike_auth_inner_payload(summary, payload_type, pos,
-                                                   payload_len);
+        ikev2_helper_record_inner_payload(summary, payload_type, pos,
+                                          payload_len);
         pos += payload_len;
         payload_type = next_payload;
     }
 
     return pos == plaintext_len ? PROVIDER_HELPER_IKEV2_PARSE_OK
                                 : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+}
+
+static bool
+ikev2_helper_create_child_inner_payload_supported(uint8_t payload_type)
+{
+    switch (payload_type)
+    {
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_SA:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_KE:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_VENDOR:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_TSI:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_TSR:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+static enum provider_helper_ikev2_parse_result
+ikev2_helper_validate_create_child_inner_payload(uint8_t payload_type,
+                                                 const uint8_t *body,
+                                                 size_t body_len)
+{
+    if (!body && body_len)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    switch (payload_type)
+    {
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_SA:
+            return body_len >= PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                   ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                   : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_KE:
+            return body_len >= PROVIDER_HELPER_IKEV2_KE_MIN_BYTES
+                   ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                   : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE:
+            return body_len >= PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+                       && body_len <= PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES
+                   ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                   : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_TSI:
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_TSR:
+            return body_len >= 4 ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                                 : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_VENDOR:
+            return PROVIDER_HELPER_IKEV2_PARSE_OK;
+
+        default:
+            return PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD;
+    }
+}
+
+static enum provider_helper_ikev2_parse_result
+ikev2_helper_parse_create_child_inner_payloads(
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    uint8_t first_payload,
+    struct provider_helper_ikev2_payload_summary *summary)
+{
+    if (summary)
+    {
+        CLEAR(*summary);
+    }
+    if (!plaintext && plaintext_len)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_TOO_SHORT;
+    }
+    if (first_payload == PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
+    {
+        return plaintext_len == 0
+               ? PROVIDER_HELPER_IKEV2_PARSE_MISSING_REQUIRED_PAYLOAD
+               : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    size_t pos = 0;
+    uint8_t payload_type = first_payload;
+    uint32_t payload_count = 0;
+    while (payload_type != PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
+    {
+        if (++payload_count > PROVIDER_HELPER_IKEV2_MAX_PAYLOADS)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_PAYLOAD_LIMIT;
+        }
+        if (plaintext_len - pos < PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const uint8_t next_payload = plaintext[pos];
+        const uint8_t payload_flags = plaintext[pos + 1];
+        const uint16_t payload_len = ((uint16_t)plaintext[pos + 2] << 8)
+                                     | plaintext[pos + 3];
+        const bool critical = (payload_flags & 0x80) != 0;
+        if (payload_len < PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+            || payload_len > plaintext_len - pos)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+        if (!ikev2_helper_create_child_inner_payload_supported(payload_type))
+        {
+            return critical
+                   ? PROVIDER_HELPER_IKEV2_PARSE_UNSUPPORTED_CRITICAL_PAYLOAD
+                   : PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD;
+        }
+
+        const size_t body_len =
+            payload_len - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+        const enum provider_helper_ikev2_parse_result payload_result =
+            ikev2_helper_validate_create_child_inner_payload(
+                payload_type,
+                plaintext + pos + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE,
+                body_len);
+        if (payload_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+        {
+            return payload_result;
+        }
+
+        ikev2_helper_record_inner_payload(summary, payload_type, pos,
+                                          payload_len);
+        pos += payload_len;
+        payload_type = next_payload;
+    }
+
+    if (pos != plaintext_len)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+    if (!summary || summary->sa_count != 1 || summary->nonce_count != 1
+        || !summary->saw_tsi || !summary->saw_tsr)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_MISSING_REQUIRED_PAYLOAD;
+    }
+
+    return PROVIDER_HELPER_IKEV2_PARSE_OK;
 }
 
 static bool
@@ -3682,6 +3847,19 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 if (header.exchange_type
                     == PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA)
                 {
+                    struct provider_helper_ikev2_payload_summary inner_summary;
+                    const enum provider_helper_ikev2_parse_result inner_result =
+                        ikev2_helper_parse_create_child_inner_payloads(
+                            plaintext, plaintext_len,
+                            protected_summary.sk_next_payload,
+                            &inner_summary);
+                    if (inner_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+                    {
+                        ++counters->datagrams_malformed;
+                        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                        counters->ike_sa_active = sa_table->active;
+                        return;
+                    }
                     ++counters->ike_create_child_unsupported_rx;
                     ++counters->ike_exchange_unsupported;
                     if (ikev2_helper_send_encrypted_notify_exchange_response(

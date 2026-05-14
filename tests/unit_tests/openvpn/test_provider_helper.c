@@ -1837,6 +1837,70 @@ test_send_ikev2_encrypted_protected_exchange_from(
 }
 
 static void
+test_send_ikev2_encrypted_create_child_from(
+    int fd,
+    uint16_t port,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt,
+    uint32_t message_id)
+{
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    uint8_t plaintext[PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 8
+                      + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                      + PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+                      + 2 * (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4)
+                      + 1];
+    CLEAR(plaintext);
+    size_t plaintext_len = 0;
+
+    plaintext_len = test_add_ikev2_payload(
+        plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE,
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 8, 0);
+    const size_t sa_body = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    test_write_be16(plaintext + sa_body + 2, 8);
+    plaintext[sa_body + 4] = 1;
+    plaintext[sa_body + 5] = 3; /* ESP protocol id. */
+    plaintext[sa_body + 6] = 4;
+
+    const size_t nonce_offset = plaintext_len
+                                + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    plaintext_len = test_add_ikev2_payload(
+        plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_TSI,
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+        + PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES, 0);
+    memset(plaintext + nonce_offset, 0xa5,
+           PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES);
+
+    plaintext_len = test_add_ikev2_payload(
+        plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_TSR,
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4, 0);
+    plaintext[plaintext_len - 4] = 1;
+
+    plaintext_len = test_add_ikev2_payload(
+        plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4, 0);
+    plaintext[plaintext_len - 4] = 1;
+
+    plaintext[plaintext_len++] = 0; /* Pad Length. */
+    const size_t packet_len = test_make_encrypted_ikev2_plaintext_packet(
+        packet, sizeof(packet), initiator_spi, material, natt,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA, plaintext,
+        plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_SA, message_id);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    assert_int_equal(sendto(fd, packet, packet_len, 0,
+                            (struct sockaddr *)&addr, sizeof(addr)),
+                     packet_len);
+    secure_memzero(plaintext, sizeof(plaintext));
+}
+
+static void
 test_send_ikev2_encrypted_ike_delete_from(
     int fd,
     uint16_t port,
@@ -3292,9 +3356,8 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
         datagram_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
         0x0102030405060708ull, 0x8877665544332211ull, 3);
 #if defined(ENABLE_CRYPTO_OPENSSL)
-    test_send_ikev2_encrypted_protected_exchange_from(
-        state_fd, natt_port, PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA,
-        state_initiator_spi, &state_material, true, 2);
+    test_send_ikev2_encrypted_create_child_from(
+        state_fd, natt_port, state_initiator_spi, &state_material, true, 2);
     test_recv_ikev2_encrypted_notify_exchange_response(
         state_fd, state_initiator_spi, &state_material,
         PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA, 2,
