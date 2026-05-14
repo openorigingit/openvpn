@@ -1510,9 +1510,11 @@ test_make_encrypted_ike_auth_message_id_packet(
         const uint16_t eap_body_len = 11;
         const uint16_t eap_payload_len =
             PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + eap_body_len;
-        assert_true(plaintext_len + eap_payload_len + 1 <= sizeof(plaintext));
+        assert_true(plaintext_len + eap_payload_len
+                    + (2 * TEST_IKEV2_TS_IPV4_PAYLOAD_LEN) + 1
+                    <= sizeof(plaintext));
         plaintext_len = test_add_ikev2_payload(
-            plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+            plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_TSI,
             eap_payload_len, 0);
         const size_t eap_body = plaintext_len - eap_payload_len
                                 + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
@@ -1523,6 +1525,34 @@ test_make_encrypted_ike_auth_message_id_packet(
         plaintext[eap_body + 5] = 0x80;
         test_write_be32(plaintext + eap_body + 6, 1);
         plaintext[eap_body + 10] = 0x16;
+
+        plaintext_len = test_add_ikev2_payload(
+            plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_TSR,
+            TEST_IKEV2_TS_IPV4_PAYLOAD_LEN, 0);
+        const size_t tsi_body = plaintext_len - TEST_IKEV2_TS_IPV4_PAYLOAD_LEN
+                                + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+        plaintext[tsi_body] = 1;
+        const size_t tsi = tsi_body + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+        plaintext[tsi] = PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE;
+        test_write_be16(plaintext + tsi + 2,
+                        PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
+        test_write_be16(plaintext + tsi + 6, 65535);
+        test_write_be32(plaintext + tsi + 8, 0x0a580002);
+        test_write_be32(plaintext + tsi + 12, 0x0a580002);
+
+        plaintext_len = test_add_ikev2_payload(
+            plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+            TEST_IKEV2_TS_IPV4_PAYLOAD_LEN, 0);
+        const size_t tsr_body = plaintext_len - TEST_IKEV2_TS_IPV4_PAYLOAD_LEN
+                                + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+        plaintext[tsr_body] = 1;
+        const size_t tsr = tsr_body + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+        plaintext[tsr] = PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE;
+        test_write_be16(plaintext + tsr + 2,
+                        PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
+        test_write_be16(plaintext + tsr + 6, 65535);
+        test_write_be32(plaintext + tsr + 8, 0x0a580001);
+        test_write_be32(plaintext + tsr + 12, 0x0a580001);
     }
     plaintext[plaintext_len++] = 0; /* Pad Length. */
 

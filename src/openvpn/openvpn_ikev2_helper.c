@@ -1367,6 +1367,9 @@ ikev2_helper_ike_auth_inner_payload_supported(uint8_t payload_type)
 }
 
 static enum provider_helper_ikev2_parse_result
+ikev2_helper_validate_child_ts_payload(const uint8_t *body, size_t body_len);
+
+static enum provider_helper_ikev2_parse_result
 ikev2_helper_validate_eap_tls_payload(
     const uint8_t *body,
     size_t body_len,
@@ -1486,8 +1489,7 @@ ikev2_helper_validate_ike_auth_inner_payload(
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_TSI:
         case PROVIDER_HELPER_IKEV2_PAYLOAD_TSR:
-            return body_len >= 4 ? PROVIDER_HELPER_IKEV2_PARSE_OK
-                                 : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            return ikev2_helper_validate_child_ts_payload(body, body_len);
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_CERT:
         case PROVIDER_HELPER_IKEV2_PAYLOAD_CERTREQ:
