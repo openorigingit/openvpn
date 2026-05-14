@@ -2138,7 +2138,7 @@ ikev2_helper_aes_gcm_encrypt(const uint8_t *key, size_t key_len,
 }
 
 static bool
-ikev2_helper_decrypt_ike_auth_sk(
+ikev2_helper_decrypt_sk_payload(
     const struct ikev2_helper_ike_sa *sa,
     const uint8_t *packet,
     size_t packet_len,
@@ -3075,19 +3075,20 @@ static bool
 ikev2_helper_protected_exchange_request_shape_valid(
     const uint8_t *packet,
     size_t packet_len,
-    const struct provider_helper_ikev2_header *header)
+    const struct provider_helper_ikev2_header *header,
+    struct provider_helper_ikev2_payload_summary *summary)
 {
-    struct provider_helper_ikev2_payload_summary summary;
-    if (provider_helper_ikev2_parse_payloads(packet, packet_len, header,
-                                             &summary)
+    if (!summary
+        || provider_helper_ikev2_parse_payloads(packet, packet_len, header,
+                                                summary)
         != PROVIDER_HELPER_IKEV2_PARSE_OK)
     {
         return false;
     }
 
-    return summary.saw_sk && summary.sk_count == 1
-           && summary.sk_len > IKEV2_HELPER_AES_GCM_IV_BYTES
-                              + IKEV2_HELPER_AES_GCM_TAG_BYTES;
+    return summary->saw_sk && summary->sk_count == 1
+           && summary->sk_len > IKEV2_HELPER_AES_GCM_IV_BYTES
+                               + IKEV2_HELPER_AES_GCM_TAG_BYTES;
 }
 
 static struct ikev2_helper_ike_sa *
@@ -3392,7 +3393,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
 
             uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
             size_t plaintext_len = 0;
-            if (!ikev2_helper_decrypt_ike_auth_sk(
+            if (!ikev2_helper_decrypt_sk_payload(
                     sa, packet, (size_t)n, &header, &summary, plaintext,
                     sizeof(plaintext), &plaintext_len))
             {
@@ -3472,10 +3473,11 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 || header.exchange_type
                        == PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL)
             {
+                struct provider_helper_ikev2_payload_summary protected_summary;
                 if (!ikev2_helper_protected_exchange_request_header_valid(
                         &header)
                     || !ikev2_helper_protected_exchange_request_shape_valid(
-                        packet, (size_t)n, &header))
+                        packet, (size_t)n, &header, &protected_summary))
                 {
                     ++counters->datagrams_malformed;
                     counters->ike_sa_active = sa_table->active;
@@ -3487,13 +3489,27 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
-                if (!ikev2_helper_find_protected_exchange_sa(
-                        sa_table, listener, &header, &peer, peer_len))
+                struct ikev2_helper_ike_sa *sa =
+                    ikev2_helper_find_protected_exchange_sa(
+                        sa_table, listener, &header, &peer, peer_len);
+                if (!sa)
                 {
                     ++counters->datagrams_malformed;
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
+
+                uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+                size_t plaintext_len = 0;
+                if (!ikev2_helper_decrypt_sk_payload(
+                        sa, packet, (size_t)n, &header, &protected_summary,
+                        plaintext, sizeof(plaintext), &plaintext_len))
+                {
+                    ++counters->datagrams_malformed;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+                ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
             }
             ++counters->ike_exchange_unsupported;
             counters->ike_sa_active = sa_table->active;
