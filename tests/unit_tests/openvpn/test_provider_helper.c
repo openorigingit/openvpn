@@ -5657,11 +5657,11 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_true(supervisor.runtime_stats.ike_auth_rx >= 2);
     assert_true(supervisor.runtime_stats.ike_auth_no_state >= 1);
     assert_true(supervisor.runtime_stats.ike_auth_natt_migrated >= 1);
-    assert_true(supervisor.runtime_stats.ike_auth_decrypt_failed >= 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_decrypt_failed, 0);
 #if defined(ENABLE_CRYPTO_OPENSSL)
     assert_true(supervisor.runtime_stats.ike_auth_decrypted >= 1);
     assert_true(supervisor.runtime_stats.ike_auth_inner_parsed >= 1);
-    assert_true(supervisor.runtime_stats.ike_auth_inner_malformed >= 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_inner_malformed, 0);
     assert_true(supervisor.runtime_stats.ike_auth_idi_extracted >= 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_idi_invalid, 0);
     assert_true(supervisor.runtime_stats.ike_auth_eap_tls_rx >= 1);
@@ -5669,7 +5669,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_auth_cert_invalid, 0);
     assert_true(supervisor.runtime_stats.ike_auth_request_tx >= 1);
     assert_true(
-        supervisor.runtime_stats.ike_auth_request_pending_dropped >= 1);
+        supervisor.runtime_stats.ike_auth_request_pending_dropped >= 2);
     assert_true(supervisor.runtime_stats.ike_exchange_auth_pending_dropped
                 >= 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_request_failed, 0);

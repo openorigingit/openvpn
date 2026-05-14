@@ -5724,6 +5724,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 counters->ike_sa_active = sa_table->active;
                 return;
             }
+            if (sa->pending_auth_request_id)
+            {
+                ++counters->ike_auth_request_pending_dropped;
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
             const time_t auth_now = time(NULL);
 
             uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
@@ -5758,13 +5764,6 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 return;
             }
             ++counters->ike_auth_eap_tls_rx;
-            if (sa->pending_auth_request_id)
-            {
-                ++counters->ike_auth_request_pending_dropped;
-                ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
-                counters->ike_sa_active = sa_table->active;
-                return;
-            }
             if (!ikev2_helper_extract_claimed_idi(sa, plaintext, plaintext_len,
                                                   &inner_summary))
             {
