@@ -3789,6 +3789,14 @@ ikev2_helper_find_xfrm_lease(const struct provider_helper_xfrm_lease *leases,
 }
 
 static bool
+ikev2_helper_xfrm_lease_same_slot(const struct provider_helper_xfrm_lease *a,
+                                  const struct provider_helper_xfrm_lease *b)
+{
+    return a && b && a->lease_id == b->lease_id
+           && a->provider_session_id == b->provider_session_id;
+}
+
+static bool
 ikev2_helper_xfrm_lease_same_identity(
     const struct provider_helper_xfrm_lease *a,
     const struct provider_helper_xfrm_lease *b)
@@ -4085,7 +4093,8 @@ ikev2_helper_store_xfrm_lease(
     size_t *lease_count,
     size_t lease_capacity,
     const struct provider_helper_xfrm_lease *lease,
-    bool *replaced)
+    bool *replaced,
+    struct provider_helper_xfrm_lease *replaced_lease)
 {
     if (!leases || !lease_count || !lease)
     {
@@ -4095,11 +4104,19 @@ ikev2_helper_store_xfrm_lease(
     {
         *replaced = false;
     }
+    if (replaced_lease)
+    {
+        CLEAR(*replaced_lease);
+    }
 
     for (size_t i = 0; i < *lease_count; ++i)
     {
-        if (ikev2_helper_xfrm_lease_same_identity(&leases[i], lease))
+        if (ikev2_helper_xfrm_lease_same_slot(&leases[i], lease))
         {
+            if (replaced_lease)
+            {
+                *replaced_lease = leases[i];
+            }
             leases[i] = *lease;
             if (replaced)
             {
@@ -6009,16 +6026,19 @@ ikev2_helper_loop(int fd)
             case PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL:
             {
                 struct provider_helper_xfrm_lease lease;
+                struct provider_helper_xfrm_lease replaced_lease;
                 bool replaced = false;
                 uint32_t revoked = 0;
+                CLEAR(replaced_lease);
                 if (!configured
                     || !ikev2_helper_read_xfrm_lease(fd, &header, &lease)
                     || !ikev2_helper_store_xfrm_lease(
                         xfrm_leases, &xfrm_lease_count, SIZE(xfrm_leases),
-                        &lease, &replaced)
+                        &lease, &replaced, &replaced_lease)
                     || (replaced
                         && !ikev2_helper_clear_ike_sas_for_xfrm_lease(
-                            &sa_table, &lease, &counters, &revoked))
+                            &sa_table, &replaced_lease, &counters,
+                            &revoked))
                     || !ikev2_helper_send_header(
                         fd, PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL_ACK,
                         tx_sequence++, header.sequence))

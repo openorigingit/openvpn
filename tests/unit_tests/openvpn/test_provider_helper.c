@@ -5658,9 +5658,11 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     assert_int_equal(supervisor.runtime_stats.ike_create_child_response_tx, 1);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
 
+    struct provider_helper_xfrm_lease replaced_xfrm_lease = xfrm_lease;
+    replaced_xfrm_lease.policy_revision = xfrm_lease.policy_revision + 1;
     target_rx_sequence = supervisor.last_rx_sequence + 1;
-    assert_true(provider_helper_supervisor_send_xfrm_lease_delete(
-                    &supervisor, &xfrm_lease, 101));
+    assert_true(provider_helper_supervisor_send_xfrm_lease(
+                    &supervisor, &replaced_xfrm_lease, 101));
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -5668,6 +5670,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
         provider_helper_process_event(&supervisor);
         usleep(10000);
     }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
@@ -5680,7 +5683,37 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
         usleep(10000);
     }
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.runtime_stats.xfrm_lease_replaced, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_xfrm_lease_revoked, 1);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
+    assert_int_equal(supervisor.runtime_stats.xfrm_leases_active, 1);
+
+    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    assert_true(provider_helper_supervisor_send_xfrm_lease_delete(
+                    &supervisor, &replaced_xfrm_lease, 103));
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 104);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 1);
+    assert_int_equal(supervisor.runtime_stats.xfrm_lease_deleted, 1);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
 
