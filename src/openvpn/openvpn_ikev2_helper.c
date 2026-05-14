@@ -3748,6 +3748,8 @@ ikev2_helper_inner_payload_contains_notify(
     const uint8_t *plaintext,
     size_t plaintext_len,
     uint8_t first_payload,
+    uint8_t expected_protocol_id,
+    uint8_t expected_spi_size,
     uint16_t expected_notify_type)
 {
     if ((!plaintext && plaintext_len)
@@ -3784,7 +3786,8 @@ ikev2_helper_inner_payload_contains_notify(
             const uint8_t *body =
                 plaintext + pos + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
             const uint16_t notify_type = ((uint16_t)body[2] << 8) | body[3];
-            if (body[0] == 0 && body[1] == 0
+            if (body[0] == expected_protocol_id
+                && body[1] == expected_spi_size
                 && notify_type == expected_notify_type)
             {
                 return true;
@@ -3808,8 +3811,20 @@ ikev2_helper_is_mobike_update_sa_addresses_request(
     return plaintext && summary && summary->payload_count > 0
            && summary->notify_count == summary->payload_count
            && ikev2_helper_inner_payload_contains_notify(
-               plaintext, plaintext_len, first_payload,
+               plaintext, plaintext_len, first_payload, 0, 0,
                PROVIDER_HELPER_IKEV2_NOTIFY_UPDATE_SA_ADDRESSES);
+}
+
+static bool
+ikev2_helper_is_child_rekey_request(
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    uint8_t first_payload)
+{
+    return ikev2_helper_inner_payload_contains_notify(
+        plaintext, plaintext_len, first_payload,
+        PROVIDER_HELPER_IKEV2_PROTOCOL_ESP, 4,
+        PROVIDER_HELPER_IKEV2_NOTIFY_REKEY_SA);
 }
 
 static bool
@@ -4404,16 +4419,43 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     }
                     ++counters->ike_create_child_unsupported_rx;
                     ++counters->ike_exchange_unsupported;
+                    const bool rekey_request =
+                        ikev2_helper_is_child_rekey_request(
+                            plaintext, plaintext_len,
+                            protected_summary.sk_next_payload);
+                    if (rekey_request)
+                    {
+                        ++counters->ike_create_child_rekey_rx;
+                    }
+                    const uint16_t notify_type =
+                        rekey_request
+                        ? PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE
+                        : PROVIDER_HELPER_IKEV2_NOTIFY_NO_ADDITIONAL_SAS;
                     if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
                             listener, sa, header.exchange_type,
-                            header.message_id,
-                            PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
+                            header.message_id, notify_type))
                     {
-                        ++counters->ike_create_child_temp_failure_tx;
+                        if (rekey_request)
+                        {
+                            ++counters->ike_create_child_temp_failure_tx;
+                        }
+                        else
+                        {
+                            ++counters
+                                  ->ike_create_child_no_additional_sas_tx;
+                        }
                     }
                     else
                     {
-                        ++counters->ike_create_child_temp_failure_failed;
+                        if (rekey_request)
+                        {
+                            ++counters->ike_create_child_temp_failure_failed;
+                        }
+                        else
+                        {
+                            ++counters
+                                  ->ike_create_child_no_additional_sas_failed;
+                        }
                     }
                     sa->message_id = header.message_id;
                     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));

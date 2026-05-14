@@ -36,7 +36,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 36
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  616
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  640
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
 #define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
@@ -189,10 +189,12 @@ enum provider_helper_ikev2_payload_type {
 #define PROVIDER_HELPER_IKEV2_NOTIFY_NO_PROPOSAL_CHOSEN 14
 #define PROVIDER_HELPER_IKEV2_NOTIFY_INVALID_KE_PAYLOAD 17
 #define PROVIDER_HELPER_IKEV2_NOTIFY_AUTHENTICATION_FAILED 24
+#define PROVIDER_HELPER_IKEV2_NOTIFY_NO_ADDITIONAL_SAS 35
 #define PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE 43
 #define PROVIDER_HELPER_IKEV2_NOTIFY_NAT_DETECTION_SOURCE_IP 16388
 #define PROVIDER_HELPER_IKEV2_NOTIFY_NAT_DETECTION_DESTINATION_IP 16389
 #define PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE 16390
+#define PROVIDER_HELPER_IKEV2_NOTIFY_REKEY_SA 16393
 #define PROVIDER_HELPER_IKEV2_NOTIFY_MOBIKE_SUPPORTED 16396
 #define PROVIDER_HELPER_IKEV2_NOTIFY_ADDITIONAL_IP4_ADDRESS 16397
 #define PROVIDER_HELPER_IKEV2_NOTIFY_ADDITIONAL_IP6_ADDRESS 16398
@@ -342,6 +344,9 @@ struct provider_helper_runtime_stats {
     uint64_t ike_informational_delete_response_tx;
     uint64_t ike_informational_delete_response_failed;
     uint64_t ike_create_child_unsupported_rx;
+    uint64_t ike_create_child_rekey_rx;
+    uint64_t ike_create_child_no_additional_sas_tx;
+    uint64_t ike_create_child_no_additional_sas_failed;
     uint64_t ike_create_child_temp_failure_tx;
     uint64_t ike_create_child_temp_failure_failed;
     uint64_t ike_exchange_auth_pending_dropped;
