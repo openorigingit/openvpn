@@ -765,6 +765,14 @@ provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u64(&pos, stats->ike_exchange_retransmit_tx);
     provider_helper_wire_write_u64(&pos,
                                    stats->ike_exchange_retransmit_failed);
+    provider_helper_wire_write_u64(&pos, stats->ike_mobike_update_rx);
+    provider_helper_wire_write_u64(&pos,
+                                   stats->ike_mobike_update_response_tx);
+    provider_helper_wire_write_u64(&pos,
+                                   stats->ike_mobike_update_response_failed);
+    provider_helper_wire_write_u64(&pos, stats->ike_mobike_peer_migrated);
+    provider_helper_wire_write_u64(&pos,
+                                   stats->ike_mobike_unexpected_peer_dropped);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_rx);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_malformed);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_no_state);
@@ -872,6 +880,14 @@ provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
         provider_helper_wire_read_u64(&pos);
     stats->ike_exchange_retransmit_tx = provider_helper_wire_read_u64(&pos);
     stats->ike_exchange_retransmit_failed =
+        provider_helper_wire_read_u64(&pos);
+    stats->ike_mobike_update_rx = provider_helper_wire_read_u64(&pos);
+    stats->ike_mobike_update_response_tx =
+        provider_helper_wire_read_u64(&pos);
+    stats->ike_mobike_update_response_failed =
+        provider_helper_wire_read_u64(&pos);
+    stats->ike_mobike_peer_migrated = provider_helper_wire_read_u64(&pos);
+    stats->ike_mobike_unexpected_peer_dropped =
         provider_helper_wire_read_u64(&pos);
     stats->ike_auth_rx = provider_helper_wire_read_u64(&pos);
     stats->ike_auth_malformed = provider_helper_wire_read_u64(&pos);
@@ -1319,6 +1335,12 @@ provider_helper_ikev2_record_payload(
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY:
             summary->saw_notify = true;
+            ++summary->notify_count;
+            if (summary->notify_count == 1)
+            {
+                summary->notify_offset = body_offset;
+                summary->notify_len = body_len;
+            }
             break;
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_DELETE:

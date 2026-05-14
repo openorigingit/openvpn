@@ -1567,6 +1567,16 @@ ikev2_helper_record_inner_payload(
             }
             break;
 
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY:
+            summary->saw_notify = true;
+            ++summary->notify_count;
+            if (summary->notify_count == 1)
+            {
+                summary->notify_offset = body_offset;
+                summary->notify_len = body_len;
+            }
+            break;
+
         case PROVIDER_HELPER_IKEV2_PAYLOAD_IDI:
             summary->saw_idi = true;
             ++summary->idi_count;
@@ -3707,6 +3717,101 @@ ikev2_helper_find_protected_exchange_sa(
     return NULL;
 }
 
+static struct ikev2_helper_ike_sa *
+ikev2_helper_find_protected_exchange_sa_by_spi(
+    struct ikev2_helper_ike_sa_table *table,
+    const struct ikev2_helper_listener *listener,
+    const struct provider_helper_ikev2_header *header)
+{
+    if (!table || !listener || !header)
+    {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        if (sa->active
+            && sa->listener_id == listener->descriptor.listener_id
+            && sa->initiator_spi == header->initiator_spi
+            && sa->responder_spi == header->responder_spi)
+        {
+            return sa;
+        }
+    }
+
+    return NULL;
+}
+
+static bool
+ikev2_helper_inner_payload_contains_notify(
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    uint8_t first_payload,
+    uint16_t expected_notify_type)
+{
+    if ((!plaintext && plaintext_len)
+        || first_payload == PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
+    {
+        return false;
+    }
+
+    size_t pos = 0;
+    uint8_t payload_type = first_payload;
+    uint32_t payload_count = 0;
+    while (payload_type != PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
+    {
+        if (++payload_count > PROVIDER_HELPER_IKEV2_MAX_PAYLOADS
+            || plaintext_len - pos < PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE)
+        {
+            return false;
+        }
+
+        const uint8_t next_payload = plaintext[pos];
+        const uint16_t payload_len = ((uint16_t)plaintext[pos + 2] << 8)
+                                     | plaintext[pos + 3];
+        if (payload_len < PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+            || payload_len > plaintext_len - pos)
+        {
+            return false;
+        }
+
+        const size_t body_len =
+            payload_len - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+        if (payload_type == PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY
+            && body_len >= 4)
+        {
+            const uint8_t *body =
+                plaintext + pos + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+            const uint16_t notify_type = ((uint16_t)body[2] << 8) | body[3];
+            if (body[0] == 0 && body[1] == 0
+                && notify_type == expected_notify_type)
+            {
+                return true;
+            }
+        }
+
+        pos += payload_len;
+        payload_type = next_payload;
+    }
+
+    return false;
+}
+
+static bool
+ikev2_helper_is_mobike_update_sa_addresses_request(
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    uint8_t first_payload,
+    const struct provider_helper_ikev2_payload_summary *summary)
+{
+    return plaintext && summary && summary->payload_count > 0
+           && summary->notify_count == summary->payload_count
+           && ikev2_helper_inner_payload_contains_notify(
+               plaintext, plaintext_len, first_payload,
+               PROVIDER_HELPER_IKEV2_NOTIFY_UPDATE_SA_ADDRESSES);
+}
+
 static bool
 ikev2_helper_is_ike_sa_delete_request(
     const uint8_t *plaintext,
@@ -4100,12 +4205,26 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 struct ikev2_helper_ike_sa *sa =
                     ikev2_helper_find_protected_exchange_sa(
                         sa_table, listener, &header, &peer, peer_len);
+                bool peer_migration_candidate = false;
+                if (!sa
+                    && header.exchange_type
+                           == PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL
+                    && (listener->descriptor.flags
+                        & PROVIDER_HELPER_LISTENER_FD_NATT))
+                {
+                    sa = ikev2_helper_find_protected_exchange_sa_by_spi(
+                        sa_table, listener, &header);
+                    peer_migration_candidate = sa != NULL;
+                }
                 if (!sa)
                 {
                     ++counters->datagrams_malformed;
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
+                const bool peer_matches =
+                    ikev2_helper_peer_equal(&sa->peer, sa->peer_len, &peer,
+                                            peer_len);
                 if (sa->pending_auth_request_id)
                 {
                     ++counters->ike_exchange_auth_pending_dropped;
@@ -4120,7 +4239,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 }
                 if (header.message_id == sa->message_id)
                 {
-                    if (sa->protected_retransmits >= config->retransmit_limit)
+                    if (!peer_matches)
+                    {
+                        ++counters->ike_exchange_replay_dropped;
+                    }
+                    else if (sa->protected_retransmits
+                             >= config->retransmit_limit)
                     {
                         ++counters->ike_exchange_replay_dropped;
                     }
@@ -4193,6 +4317,49 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     if (inner_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
                     {
                         ++counters->datagrams_malformed;
+                        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                        counters->ike_sa_active = sa_table->active;
+                        return;
+                    }
+                    if (ikev2_helper_is_mobike_update_sa_addresses_request(
+                            plaintext, plaintext_len,
+                            protected_summary.sk_next_payload, &inner_summary))
+                    {
+                        const struct sockaddr_storage old_peer = sa->peer;
+                        const socklen_t old_peer_len = sa->peer_len;
+                        ++counters->ike_mobike_update_rx;
+                        if (!peer_matches || peer_migration_candidate)
+                        {
+                            sa->peer = peer;
+                            sa->peer_len = peer_len;
+                        }
+                        if (ikev2_helper_send_cached_encrypted_empty_response(
+                                listener, sa, header.exchange_type,
+                                header.message_id))
+                        {
+                            ++counters->ike_mobike_update_response_tx;
+                            if (!peer_matches || peer_migration_candidate)
+                            {
+                                ++counters->ike_mobike_peer_migrated;
+                            }
+                            sa->message_id = header.message_id;
+                        }
+                        else
+                        {
+                            ++counters->ike_mobike_update_response_failed;
+                            if (!peer_matches || peer_migration_candidate)
+                            {
+                                sa->peer = old_peer;
+                                sa->peer_len = old_peer_len;
+                            }
+                        }
+                        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                        counters->ike_sa_active = sa_table->active;
+                        return;
+                    }
+                    if (!peer_matches || peer_migration_candidate)
+                    {
+                        ++counters->ike_mobike_unexpected_peer_dropped;
                         ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                         counters->ike_sa_active = sa_table->active;
                         return;

@@ -36,7 +36,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 36
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  576
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  616
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
 #define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
@@ -193,6 +193,12 @@ enum provider_helper_ikev2_payload_type {
 #define PROVIDER_HELPER_IKEV2_NOTIFY_NAT_DETECTION_SOURCE_IP 16388
 #define PROVIDER_HELPER_IKEV2_NOTIFY_NAT_DETECTION_DESTINATION_IP 16389
 #define PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE 16390
+#define PROVIDER_HELPER_IKEV2_NOTIFY_MOBIKE_SUPPORTED 16396
+#define PROVIDER_HELPER_IKEV2_NOTIFY_ADDITIONAL_IP4_ADDRESS 16397
+#define PROVIDER_HELPER_IKEV2_NOTIFY_ADDITIONAL_IP6_ADDRESS 16398
+#define PROVIDER_HELPER_IKEV2_NOTIFY_UPDATE_SA_ADDRESSES 16400
+#define PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE2 16401
+#define PROVIDER_HELPER_IKEV2_NOTIFY_NO_NATS_ALLOWED 16402
 
 enum provider_helper_ikev2_parse_result {
     PROVIDER_HELPER_IKEV2_PARSE_OK = 0,
@@ -344,6 +350,11 @@ struct provider_helper_runtime_stats {
     uint64_t ike_exchange_decrypt_failed;
     uint64_t ike_exchange_retransmit_tx;
     uint64_t ike_exchange_retransmit_failed;
+    uint64_t ike_mobike_update_rx;
+    uint64_t ike_mobike_update_response_tx;
+    uint64_t ike_mobike_update_response_failed;
+    uint64_t ike_mobike_peer_migrated;
+    uint64_t ike_mobike_unexpected_peer_dropped;
     uint64_t ike_auth_rx;
     uint64_t ike_auth_malformed;
     uint64_t ike_auth_no_state;
@@ -415,6 +426,7 @@ struct provider_helper_ikev2_payload_summary {
     uint32_t sa_count;
     uint32_t ke_count;
     uint32_t nonce_count;
+    uint32_t notify_count;
     uint32_t idi_count;
     uint32_t cert_count;
     uint32_t eap_count;
@@ -429,6 +441,8 @@ struct provider_helper_ikev2_payload_summary {
     size_t ke_data_len;
     size_t nonce_offset;
     size_t nonce_len;
+    size_t notify_offset;
+    size_t notify_len;
     size_t idi_offset;
     size_t idi_len;
     size_t cert_offset;
