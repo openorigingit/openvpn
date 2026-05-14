@@ -2415,12 +2415,13 @@ ikev2_helper_find_listener(const struct ikev2_helper_listener *listeners,
 }
 
 static bool
-ikev2_helper_build_auth_failed_response(
+ikev2_helper_build_encrypted_notify_response(
     uint8_t *response,
     size_t response_size,
     size_t *response_len,
     const struct ikev2_helper_listener *listener,
-    const struct ikev2_helper_ike_sa *sa)
+    const struct ikev2_helper_ike_sa *sa,
+    uint16_t notify_type)
 {
     if (response_len)
     {
@@ -2428,6 +2429,7 @@ ikev2_helper_build_auth_failed_response(
     }
     if (!response || !response_len || !listener || !sa || !sa->active
         || !sa->initiator_spi || !sa->responder_spi || !sa->message_id
+        || !notify_type
         || sa->sk_er_len <= IKEV2_HELPER_AES_GCM_SALT_BYTES
         || sa->sk_er_len > sizeof(sa->sk_er))
     {
@@ -2442,8 +2444,7 @@ ikev2_helper_build_auth_failed_response(
                             PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE);
     *plain_pos++ = 0;
     *plain_pos++ = 0;
-    ikev2_helper_write_be16(
-        &plain_pos, PROVIDER_HELPER_IKEV2_NOTIFY_AUTHENTICATION_FAILED);
+    ikev2_helper_write_be16(&plain_pos, notify_type);
     *plain_pos++ = 0; /* Pad Length: no padding bytes for AEAD. */
     const size_t plaintext_len = (size_t)(plain_pos - plaintext);
 
@@ -2517,9 +2518,10 @@ ikev2_helper_build_auth_failed_response(
 }
 
 static bool
-ikev2_helper_send_auth_failed_response(
+ikev2_helper_send_encrypted_notify_response(
     const struct ikev2_helper_listener *listener,
-    const struct ikev2_helper_ike_sa *sa)
+    const struct ikev2_helper_ike_sa *sa,
+    uint16_t notify_type)
 {
     uint8_t response[PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE
                      + PROVIDER_HELPER_IKEV2_HEADER_SIZE
@@ -2529,8 +2531,9 @@ ikev2_helper_send_auth_failed_response(
                      + IKEV2_HELPER_AES_GCM_TAG_BYTES];
     size_t response_len = 0;
     if (!listener || !sa || !sa->active
-        || !ikev2_helper_build_auth_failed_response(
-            response, sizeof(response), &response_len, listener, sa))
+        || !ikev2_helper_build_encrypted_notify_response(
+            response, sizeof(response), &response_len, listener, sa,
+            notify_type))
     {
         return false;
     }
@@ -2568,7 +2571,10 @@ ikev2_helper_apply_auth_response(
             const struct ikev2_helper_listener *listener =
                 ikev2_helper_find_listener(listeners, listener_count,
                                            sa->listener_id);
-            if (listener && ikev2_helper_send_auth_failed_response(listener, sa))
+            if (listener
+                && ikev2_helper_send_encrypted_notify_response(
+                    listener, sa,
+                    PROVIDER_HELPER_IKEV2_NOTIFY_AUTHENTICATION_FAILED))
             {
                 ++counters->ike_auth_deny_response_tx;
             }
@@ -2581,6 +2587,20 @@ ikev2_helper_apply_auth_response(
         }
         else
         {
+            const struct ikev2_helper_listener *listener =
+                ikev2_helper_find_listener(listeners, listener_count,
+                                           sa->listener_id);
+            if (listener
+                && ikev2_helper_send_encrypted_notify_response(
+                    listener, sa,
+                    PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
+            {
+                ++counters->ike_auth_allow_temp_failure_tx;
+            }
+            else
+            {
+                ++counters->ike_auth_allow_temp_failure_failed;
+            }
             ikev2_helper_clear_ike_sa(table, sa);
             ++counters->ike_auth_allow_unsupported;
         }

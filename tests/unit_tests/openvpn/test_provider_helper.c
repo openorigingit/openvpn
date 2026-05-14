@@ -287,6 +287,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_auth_denied = 41,
         .ike_auth_deny_response_tx = 45,
         .ike_auth_deny_response_failed = 46,
+        .ike_auth_allow_temp_failure_tx = 48,
+        .ike_auth_allow_temp_failure_failed = 49,
         .ike_auth_allow_unsupported = 42,
         .ike_auth_unsupported = 43,
     };
@@ -376,6 +378,10 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_auth_deny_response_tx);
     assert_int_equal(output.ike_auth_deny_response_failed,
                      input.ike_auth_deny_response_failed);
+    assert_int_equal(output.ike_auth_allow_temp_failure_tx,
+                     input.ike_auth_allow_temp_failure_tx);
+    assert_int_equal(output.ike_auth_allow_temp_failure_failed,
+                     input.ike_auth_allow_temp_failure_failed);
     assert_int_equal(output.ike_auth_allow_unsupported,
                      input.ike_auth_allow_unsupported);
     assert_int_equal(output.ike_auth_unsupported, input.ike_auth_unsupported);
@@ -1641,10 +1647,11 @@ test_recv_ikev2_natt_sa_init_response(int fd, uint64_t initiator_spi)
 
 #if defined(ENABLE_CRYPTO_OPENSSL)
 static void
-test_recv_ikev2_auth_failed_response(
+test_recv_ikev2_encrypted_notify_response(
     int fd,
     uint64_t initiator_spi,
     const struct test_ikev2_sa_init_response_material *material,
+    uint16_t expected_notify_type,
     bool expect_natt)
 {
     uint8_t response[PROVIDER_HELPER_IPC_MAX_MESSAGE];
@@ -1721,7 +1728,7 @@ test_recv_ikev2_auth_failed_response(
     assert_int_equal(plaintext[4], 0);
     assert_int_equal(plaintext[5], 0);
     assert_int_equal((((uint16_t)plaintext[6]) << 8) | plaintext[7],
-                     PROVIDER_HELPER_IKEV2_NOTIFY_AUTHENTICATION_FAILED);
+                     expected_notify_type);
 
     secure_memzero(sk_er, sizeof(sk_er));
     secure_memzero(nonce, sizeof(nonce));
@@ -2712,6 +2719,7 @@ write_helper_auth_request_fd(int fd, uint64_t sequence, uint64_t correlation_id,
 
 struct test_provider_helper_auth_cb_state {
     unsigned int calls;
+    bool allow;
     uint64_t request_id;
     struct provider_helper_auth_request request;
 };
@@ -2731,9 +2739,16 @@ test_provider_helper_auth_cb(void *arg,
     state->request = *request;
     CLEAR(*response);
     response->request_id = request->request_id;
-    response->decision = PROVIDER_HELPER_AUTH_DENY;
+    response->decision = state->allow ? PROVIDER_HELPER_AUTH_ALLOW
+                                      : PROVIDER_HELPER_AUTH_DENY;
+    if (state->allow)
+    {
+        response->provider_session_id = 101;
+        response->xfrm_lease_id = 202;
+        response->policy_revision = 303;
+    }
     snprintf(response->reason, sizeof(response->reason), "%s",
-             "unit test deny");
+             state->allow ? "unit test allow" : "unit test deny");
     response->reason_len = (uint32_t)strlen(response->reason);
     return true;
 }
@@ -2980,8 +2995,9 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_memory_equal(cb_state.request.cert_serial, "1234", strlen("1234"));
     assert_true(cb_state.request.cert_issuer_len > 0);
     assert_non_null(strstr(cb_state.request.cert_issuer, "Test IKEv2 CA"));
-    test_recv_ikev2_auth_failed_response(response_fd, 0xfeedfacecafebeefull,
-                                         &sa_init_material, true);
+    test_recv_ikev2_encrypted_notify_response(
+        response_fd, 0xfeedfacecafebeefull, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_NOTIFY_AUTHENTICATION_FAILED, true);
 #endif
     close(response_fd);
 
@@ -3116,6 +3132,9 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_true(supervisor.runtime_stats.ike_auth_denied >= 1);
     assert_true(supervisor.runtime_stats.ike_auth_deny_response_tx >= 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_deny_response_failed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_allow_temp_failure_tx, 0);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_auth_allow_temp_failure_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_allow_unsupported, 0);
 #else
     assert_int_equal(supervisor.runtime_stats.ike_auth_decrypted, 0);
@@ -3133,6 +3152,9 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_auth_denied, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_deny_response_tx, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_deny_response_failed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_allow_temp_failure_tx, 0);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_auth_allow_temp_failure_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_allow_unsupported, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 0);
 #endif
@@ -3173,6 +3195,131 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     provider_helper_supervisor_stop(&supervisor);
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
     assert_int_equal(supervisor.ipc_fd, -1);
+}
+
+static void
+test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
+{
+    (void)state;
+
+    if (!ikev2_helper_path)
+    {
+        skip();
+    }
+#if !defined(ENABLE_CRYPTO_OPENSSL)
+    skip();
+#else
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    struct test_provider_helper_auth_cb_state cb_state;
+    CLEAR(cb_state);
+    cb_state.allow = true;
+    provider_helper_supervisor_set_auth_callback(
+        &supervisor, test_provider_helper_auth_cb, &cb_state);
+
+    char *const argv[] = { (char *)ikev2_helper_path, NULL };
+    assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path, argv));
+    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 2);
+
+    uint16_t port = 0;
+    int listener_fd = test_create_udp_listener(&port);
+    const struct provider_helper_listener_fd listener = {
+        .listener_id = 1,
+        .family = AF_INET,
+        .socket_type = SOCK_DGRAM,
+        .protocol = IPPROTO_UDP,
+        .local_port = port,
+        .flags = PROVIDER_HELPER_LISTENER_FD_IKE,
+    };
+    assert_true(provider_helper_supervisor_send_listener_fd(&supervisor, listener_fd,
+                                                            &listener, 88));
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 3; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 3);
+
+    uint16_t natt_port = 0;
+    int natt_listener_fd = test_create_udp_listener(&natt_port);
+    const struct provider_helper_listener_fd natt_listener = {
+        .listener_id = 2,
+        .family = AF_INET,
+        .socket_type = SOCK_DGRAM,
+        .protocol = IPPROTO_UDP,
+        .local_port = natt_port,
+        .flags = PROVIDER_HELPER_LISTENER_FD_NATT,
+    };
+    assert_true(provider_helper_supervisor_send_listener_fd(
+                    &supervisor, natt_listener_fd, &natt_listener, 89));
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 4; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 4);
+
+    int response_fd = test_create_udp_sender(0x7f000009u);
+    const uint64_t initiator_spi = 0x9876543210abcdefull;
+    test_send_ikev2_datagram_from(response_fd, port, initiator_spi);
+    usleep(10000);
+    struct test_ikev2_sa_init_response_material sa_init_material;
+    assert_true(test_recv_ikev2_sa_init_response_material(
+                    response_fd, initiator_spi, &sa_init_material) != 0);
+
+    uint8_t cert_der[2048];
+    size_t cert_der_len = 0;
+    test_make_der_certificate(cert_der, sizeof(cert_der), &cert_der_len);
+    test_send_ikev2_encrypted_ike_auth_datagram_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, false,
+        cert_der, cert_der_len);
+
+    for (int i = 0; i < 100 && cb_state.calls < 1; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(cb_state.calls, 1);
+    assert_int_equal(cb_state.request.credential_fingerprint_len, 71);
+    test_recv_ikev2_encrypted_notify_response(
+        response_fd, initiator_spi, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
+
+    uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 90);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_denied, 0);
+    assert_true(supervisor.runtime_stats.ike_auth_allow_unsupported >= 1);
+    assert_true(supervisor.runtime_stats.ike_auth_allow_temp_failure_tx >= 1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_auth_allow_temp_failure_failed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
+
+    close(response_fd);
+    close(listener_fd);
+    close(natt_listener_fd);
+    provider_helper_supervisor_stop(&supervisor);
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
+    assert_int_equal(supervisor.ipc_fd, -1);
+#endif
 }
 
 static const char *
@@ -3225,6 +3372,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_spawn_ikev2_natt_listener),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_unsupported_exchange),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_scaffold),
+        cmocka_unit_test(test_provider_helper_spawn_ikev2_auth_allow_unsupported),
     };
 
     return cmocka_run_group_tests_name("provider_helper", tests, NULL, NULL);
