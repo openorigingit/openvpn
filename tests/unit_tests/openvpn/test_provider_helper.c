@@ -4711,6 +4711,36 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 4);
 
+    uint8_t cert_der[2048];
+    size_t cert_der_len = 0;
+    test_make_der_certificate(cert_der, sizeof(cert_der), &cert_der_len);
+
+    int missing_lease_fd = test_create_udp_sender(0x7f00000du);
+    const uint64_t missing_lease_initiator_spi = 0x9876543210abcde0ull;
+    test_send_ikev2_datagram_from(missing_lease_fd, port,
+                                  missing_lease_initiator_spi);
+    usleep(10000);
+    struct test_ikev2_sa_init_response_material missing_lease_material;
+    assert_true(test_recv_ikev2_sa_init_response_material(
+                    missing_lease_fd, missing_lease_initiator_spi,
+                    &missing_lease_material) != 0);
+    test_send_ikev2_encrypted_ike_auth_datagram_from(
+        missing_lease_fd, natt_port, missing_lease_initiator_spi,
+        &missing_lease_material, true, false, cert_der, cert_der_len);
+
+    for (int i = 0; i < 100 && cb_state.calls < 1; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(cb_state.calls, 1);
+    assert_int_equal(cb_state.request.credential_fingerprint_len, 71);
+    test_recv_ikev2_encrypted_notify_response(
+        missing_lease_fd, missing_lease_initiator_spi, &missing_lease_material,
+        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
+    close(missing_lease_fd);
+
     const struct provider_helper_xfrm_lease xfrm_lease = {
         .lease_id = 202,
         .provider_session_id = 101,
@@ -4722,15 +4752,18 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
         .address_family = AF_INET,
         .flags = PROVIDER_HELPER_XFRM_LEASE_IPV4,
     };
+    uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
     assert_true(provider_helper_supervisor_send_xfrm_lease(&supervisor, &xfrm_lease,
                                                            99));
-    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 5; ++i)
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
     }
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
-    assert_int_equal(supervisor.last_rx_sequence, 5);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
 
     int response_fd = test_create_udp_sender(0x7f000009u);
     const uint64_t initiator_spi = 0x9876543210abcdefull;
@@ -4740,26 +4773,23 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     assert_true(test_recv_ikev2_sa_init_response_material(
                     response_fd, initiator_spi, &sa_init_material) != 0);
 
-    uint8_t cert_der[2048];
-    size_t cert_der_len = 0;
-    test_make_der_certificate(cert_der, sizeof(cert_der), &cert_der_len);
     test_send_ikev2_encrypted_ike_auth_datagram_from(
         response_fd, natt_port, initiator_spi, &sa_init_material, true, false,
         cert_der, cert_der_len);
 
-    for (int i = 0; i < 100 && cb_state.calls < 1; ++i)
+    for (int i = 0; i < 100 && cb_state.calls < 2; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
     }
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
-    assert_int_equal(cb_state.calls, 1);
+    assert_int_equal(cb_state.calls, 2);
     assert_int_equal(cb_state.request.credential_fingerprint_len, 71);
     test_recv_ikev2_encrypted_notify_response(
         response_fd, initiator_spi, &sa_init_material,
         PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
 
-    uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
+    target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
                            supervisor.next_tx_sequence++, 90);
     for (int i = 0;
@@ -4773,11 +4803,11 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
     assert_int_equal(supervisor.runtime_stats.ike_auth_denied, 0);
     assert_true(supervisor.runtime_stats.ike_auth_allow_unsupported >= 1);
-    assert_true(supervisor.runtime_stats.ike_auth_allow_temp_failure_tx >= 1);
+    assert_true(supervisor.runtime_stats.ike_auth_allow_temp_failure_tx >= 2);
     assert_int_equal(
         supervisor.runtime_stats.ike_auth_allow_temp_failure_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_allow_missing_xfrm_lease,
-                     0);
+                     1);
     assert_int_equal(supervisor.runtime_stats.xfrm_leases_active, 1);
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_installed, 1);
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_replaced, 0);

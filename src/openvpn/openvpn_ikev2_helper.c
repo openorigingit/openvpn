@@ -3688,14 +3688,30 @@ ikev2_helper_apply_auth_response(
         }
         else
         {
-            if (!ikev2_helper_find_xfrm_lease(xfrm_leases, xfrm_lease_count,
-                                              response))
-            {
-                ++counters->ike_auth_allow_missing_xfrm_lease;
-            }
+            const struct provider_helper_xfrm_lease *lease =
+                ikev2_helper_find_xfrm_lease(xfrm_leases, xfrm_lease_count,
+                                             response);
             const struct ikev2_helper_listener *listener =
                 ikev2_helper_find_listener(listeners, listener_count,
                                            sa->listener_id);
+            if (!lease)
+            {
+                ++counters->ike_auth_allow_missing_xfrm_lease;
+                if (listener
+                    && ikev2_helper_send_encrypted_notify_response(
+                        listener, sa,
+                        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
+                {
+                    ++counters->ike_auth_allow_temp_failure_tx;
+                }
+                else
+                {
+                    ++counters->ike_auth_allow_temp_failure_failed;
+                }
+                ikev2_helper_clear_ike_sa(table, sa);
+                counters->ike_sa_active = table->active;
+                return true;
+            }
             if (listener
                 && ikev2_helper_send_encrypted_notify_response(
                     listener, sa,
