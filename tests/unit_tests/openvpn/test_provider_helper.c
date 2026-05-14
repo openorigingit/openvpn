@@ -5214,7 +5214,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_true(supervisor.runtime_stats.datagrams_parsed >= 20);
     assert_int_equal(supervisor.runtime_stats.xfrm_leases_active, 0);
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_installed, 1);
-    assert_int_equal(supervisor.runtime_stats.xfrm_lease_replaced, 1);
+    assert_int_equal(supervisor.runtime_stats.xfrm_lease_replaced, 0);
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_deleted, 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_accepted >= 4);
     assert_true(supervisor.runtime_stats.ike_sa_init_state_failed >= 1);
@@ -5760,6 +5760,36 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     assert_int_equal(supervisor.runtime_stats.ike_create_child_response_tx, 1);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
 
+    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    assert_true(provider_helper_supervisor_send_xfrm_lease(&supervisor,
+                                                           &xfrm_lease, 101));
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 102);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.runtime_stats.xfrm_lease_installed, 1);
+    assert_int_equal(supervisor.runtime_stats.xfrm_lease_replaced, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_xfrm_lease_revoked, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_xfrm_install_ok,
+                     1);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
+
     test_send_ikev2_encrypted_create_child_from(
         response_fd, natt_port, initiator_spi, &sa_init_material, true, 3);
     usleep(10000);
@@ -5770,7 +5800,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           supervisor.next_tx_sequence++, 101);
+                           supervisor.next_tx_sequence++, 103);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -5796,7 +5826,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           supervisor.next_tx_sequence++, 102);
+                           supervisor.next_tx_sequence++, 104);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -5822,7 +5852,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           supervisor.next_tx_sequence++, 103);
+                           supervisor.next_tx_sequence++, 105);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -5846,7 +5876,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           supervisor.next_tx_sequence++, 104);
+                           supervisor.next_tx_sequence++, 106);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -5864,7 +5894,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     replaced_xfrm_lease.policy_revision = xfrm_lease.policy_revision + 1;
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     assert_true(provider_helper_supervisor_send_xfrm_lease(
-                    &supervisor, &replaced_xfrm_lease, 105));
+                    &supervisor, &replaced_xfrm_lease, 107));
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -5876,7 +5906,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           supervisor.next_tx_sequence++, 106);
+                           supervisor.next_tx_sequence++, 108);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -5894,7 +5924,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     assert_true(provider_helper_supervisor_send_xfrm_lease_delete(
-                    &supervisor, &replaced_xfrm_lease, 107));
+                    &supervisor, &replaced_xfrm_lease, 109));
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -5905,7 +5935,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           supervisor.next_tx_sequence++, 108);
+                           supervisor.next_tx_sequence++, 110);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -5921,7 +5951,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     assert_true(provider_helper_supervisor_send_xfrm_lease(&supervisor, &xfrm_lease,
-                                                           109));
+                                                           111));
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -5964,7 +5994,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           supervisor.next_tx_sequence++, 110);
+                           supervisor.next_tx_sequence++, 112);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)

@@ -4094,6 +4094,7 @@ ikev2_helper_store_xfrm_lease(
     size_t lease_capacity,
     const struct provider_helper_xfrm_lease *lease,
     bool *replaced,
+    bool *unchanged,
     struct provider_helper_xfrm_lease *replaced_lease)
 {
     if (!leases || !lease_count || !lease)
@@ -4104,6 +4105,10 @@ ikev2_helper_store_xfrm_lease(
     {
         *replaced = false;
     }
+    if (unchanged)
+    {
+        *unchanged = false;
+    }
     if (replaced_lease)
     {
         CLEAR(*replaced_lease);
@@ -4113,6 +4118,14 @@ ikev2_helper_store_xfrm_lease(
     {
         if (ikev2_helper_xfrm_lease_same_slot(&leases[i], lease))
         {
+            if (ikev2_helper_xfrm_lease_equal(&leases[i], lease))
+            {
+                if (unchanged)
+                {
+                    *unchanged = true;
+                }
+                return true;
+            }
             if (replaced_lease)
             {
                 *replaced_lease = leases[i];
@@ -6146,13 +6159,14 @@ ikev2_helper_loop(int fd)
                 struct provider_helper_xfrm_lease lease;
                 struct provider_helper_xfrm_lease replaced_lease;
                 bool replaced = false;
+                bool unchanged = false;
                 uint32_t revoked = 0;
                 CLEAR(replaced_lease);
                 if (!configured
                     || !ikev2_helper_read_xfrm_lease(fd, &header, &lease)
                     || !ikev2_helper_store_xfrm_lease(
                         xfrm_leases, &xfrm_lease_count, SIZE(xfrm_leases),
-                        &lease, &replaced, &replaced_lease)
+                        &lease, &replaced, &unchanged, &replaced_lease)
                     || (replaced
                         && !ikev2_helper_clear_ike_sas_for_xfrm_lease(
                             &sa_table, &replaced_lease, &counters,
@@ -6169,7 +6183,7 @@ ikev2_helper_loop(int fd)
                     ++counters.xfrm_lease_replaced;
                     counters.ike_sa_xfrm_lease_revoked += revoked;
                 }
-                else
+                else if (!unchanged)
                 {
                     ++counters.xfrm_lease_installed;
                 }
