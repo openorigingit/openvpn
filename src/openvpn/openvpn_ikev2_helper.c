@@ -2210,6 +2210,46 @@ ikev2_helper_find_ike_sa(struct ikev2_helper_ike_sa_table *table,
     return NULL;
 }
 
+static struct ikev2_helper_ike_sa *
+ikev2_helper_find_ike_auth_sa(struct ikev2_helper_ike_sa_table *table,
+                              const struct ikev2_helper_listener *listener,
+                              const struct provider_helper_ikev2_header *header,
+                              const struct sockaddr_storage *peer,
+                              socklen_t peer_len,
+                              bool *natt_migrated)
+{
+    if (natt_migrated)
+    {
+        *natt_migrated = false;
+    }
+    struct ikev2_helper_ike_sa *sa =
+        ikev2_helper_find_ike_sa(table, listener, header, peer, peer_len);
+    if (sa || !table || !listener || !header || !peer || !natt_migrated
+        || !header->responder_spi
+        || !(listener->descriptor.flags & PROVIDER_HELPER_LISTENER_FD_NATT))
+    {
+        return sa;
+    }
+
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        sa = &table->entries[i];
+        if (sa->active
+            && sa->initiator_spi == header->initiator_spi
+            && sa->responder_spi == header->responder_spi
+            && ikev2_helper_peer_address_equal(&sa->peer, peer))
+        {
+            sa->listener_id = listener->descriptor.listener_id;
+            sa->peer = *peer;
+            sa->peer_len = peer_len;
+            *natt_migrated = true;
+            return sa;
+        }
+    }
+
+    return NULL;
+}
+
 static bool
 ikev2_helper_store_ike_sa_init_material(
     struct ikev2_helper_ike_sa *sa,
@@ -2970,13 +3010,20 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 return;
             }
 
+            bool natt_migrated = false;
             struct ikev2_helper_ike_sa *sa =
-                ikev2_helper_find_ike_sa(sa_table, listener, &header, &peer, peer_len);
+                ikev2_helper_find_ike_auth_sa(sa_table, listener, &header,
+                                              &peer, peer_len,
+                                              &natt_migrated);
             if (!sa)
             {
                 ++counters->ike_auth_no_state;
                 counters->ike_sa_active = sa_table->active;
                 return;
+            }
+            if (natt_migrated)
+            {
+                ++counters->ike_auth_natt_migrated;
             }
             sa->message_id = header.message_id;
             sa->updated = time(NULL);
