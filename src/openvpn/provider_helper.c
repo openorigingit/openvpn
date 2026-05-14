@@ -121,6 +121,35 @@ provider_helper_supervisor_set_state(struct provider_helper_supervisor *supervis
     }
 }
 
+#ifndef _WIN32
+static void
+provider_helper_supervisor_try_reap_child(struct provider_helper_supervisor *supervisor)
+{
+    if (!supervisor || supervisor->pid <= 0)
+    {
+        return;
+    }
+
+    int status = 0;
+    const pid_t ret = waitpid(supervisor->pid, &status, WNOHANG);
+    if (ret == supervisor->pid || (ret < 0 && errno == ECHILD))
+    {
+        supervisor->pid = 0;
+    }
+}
+#endif
+
+static void
+provider_helper_supervisor_fail_ipc(struct provider_helper_supervisor *supervisor,
+                                    enum provider_helper_state state)
+{
+    provider_helper_supervisor_set_state(supervisor, state);
+    provider_helper_close_ipc(supervisor);
+#ifndef _WIN32
+    provider_helper_supervisor_try_reap_child(supervisor);
+#endif
+}
+
 struct provider_helper_status_counter {
     const char *name;
     uint64_t value;
@@ -519,9 +548,8 @@ provider_helper_supervisor_send_auth_response(
     free_buf(&buf);
     if (!written)
     {
-        provider_helper_supervisor_set_state(supervisor,
-                                             PROVIDER_HELPER_STATE_DEGRADED);
-        provider_helper_close_ipc(supervisor);
+        provider_helper_supervisor_fail_ipc(supervisor,
+                                            PROVIDER_HELPER_STATE_DEGRADED);
     }
     return written;
 }
@@ -600,8 +628,8 @@ provider_helper_supervisor_send_listener_fd(
     free_buf(&header_buf);
     if (!written)
     {
-        provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_DEGRADED);
-        provider_helper_close_ipc(supervisor);
+        provider_helper_supervisor_fail_ipc(supervisor,
+                                            PROVIDER_HELPER_STATE_DEGRADED);
     }
     return written;
 }
@@ -640,8 +668,8 @@ provider_helper_supervisor_send_xfrm_lease_msg(
     free_buf(&buf);
     if (!written)
     {
-        provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_DEGRADED);
-        provider_helper_close_ipc(supervisor);
+        provider_helper_supervisor_fail_ipc(supervisor,
+                                            PROVIDER_HELPER_STATE_DEGRADED);
     }
     return written;
 }
@@ -785,9 +813,8 @@ provider_helper_supervisor_send_stats_request(
     free_buf(&buf);
     if (!written)
     {
-        provider_helper_supervisor_set_state(supervisor,
-                                             PROVIDER_HELPER_STATE_DEGRADED);
-        provider_helper_close_ipc(supervisor);
+        provider_helper_supervisor_fail_ipc(supervisor,
+                                            PROVIDER_HELPER_STATE_DEGRADED);
     }
     return written;
 }
@@ -854,7 +881,15 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
 #ifndef _WIN32
     if (supervisor->ipc_fd < 0 && supervisor->pid > 0)
     {
-        (void)provider_helper_supervisor_reap(supervisor);
+        if (supervisor->state == PROVIDER_HELPER_STATE_FAILED
+            || supervisor->state == PROVIDER_HELPER_STATE_DEGRADED)
+        {
+            provider_helper_supervisor_try_reap_child(supervisor);
+        }
+        else
+        {
+            (void)provider_helper_supervisor_reap(supervisor);
+        }
     }
 #endif
 
@@ -875,17 +910,14 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
             {
                 return;
             }
-            provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_DEGRADED);
-            provider_helper_close_ipc(supervisor);
+            provider_helper_supervisor_fail_ipc(supervisor,
+                                                PROVIDER_HELPER_STATE_DEGRADED);
             return;
         }
         if (n == 0)
         {
-            provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_DEGRADED);
-            provider_helper_close_ipc(supervisor);
-#ifndef _WIN32
-            (void)provider_helper_supervisor_reap(supervisor);
-#endif
+            provider_helper_supervisor_fail_ipc(supervisor,
+                                                PROVIDER_HELPER_STATE_DEGRADED);
             return;
         }
         supervisor->payload_received += (size_t)n;
@@ -904,9 +936,8 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
             if (!provider_helper_supervisor_process_hello(
                     supervisor, &header, supervisor->payload_buf, payload_len))
             {
-                provider_helper_supervisor_set_state(
-                    supervisor, PROVIDER_HELPER_STATE_FAILED);
-                provider_helper_close_ipc(supervisor);
+                provider_helper_supervisor_fail_ipc(supervisor,
+                                                    PROVIDER_HELPER_STATE_FAILED);
             }
             else
             {
@@ -938,17 +969,16 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
                 || !provider_helper_supervisor_send_auth_response(
                     supervisor, &response, header.sequence))
             {
-                provider_helper_supervisor_set_state(
-                    supervisor, PROVIDER_HELPER_STATE_FAILED);
-                provider_helper_close_ipc(supervisor);
+                provider_helper_supervisor_fail_ipc(supervisor,
+                                                    PROVIDER_HELPER_STATE_FAILED);
             }
             return;
         }
 
         if (supervisor->ipc_fd >= 0)
         {
-            provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);
-            provider_helper_close_ipc(supervisor);
+            provider_helper_supervisor_fail_ipc(supervisor,
+                                                PROVIDER_HELPER_STATE_FAILED);
         }
         return;
     }
@@ -962,17 +992,14 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
         {
             return;
         }
-        provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_DEGRADED);
-        provider_helper_close_ipc(supervisor);
+        provider_helper_supervisor_fail_ipc(supervisor,
+                                            PROVIDER_HELPER_STATE_DEGRADED);
         return;
     }
     if (n == 0)
     {
-        provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_DEGRADED);
-        provider_helper_close_ipc(supervisor);
-#ifndef _WIN32
-        (void)provider_helper_supervisor_reap(supervisor);
-#endif
+        provider_helper_supervisor_fail_ipc(supervisor,
+                                            PROVIDER_HELPER_STATE_DEGRADED);
         return;
     }
     supervisor->header_len += (size_t)n;
@@ -993,8 +1020,8 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
     {
         msg(D_MULTI_ERRORS, "provider-helper: invalid IPC header: %s",
             provider_helper_ipc_result_name(result));
-        provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);
-        provider_helper_close_ipc(supervisor);
+        provider_helper_supervisor_fail_ipc(supervisor,
+                                            PROVIDER_HELPER_STATE_FAILED);
         return;
     }
 
@@ -1002,8 +1029,8 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
     {
         if (header.payload_len > sizeof(supervisor->payload_buf))
         {
-            provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);
-            provider_helper_close_ipc(supervisor);
+            provider_helper_supervisor_fail_ipc(supervisor,
+                                                PROVIDER_HELPER_STATE_FAILED);
             return;
         }
 
@@ -1020,8 +1047,8 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
             if (!provider_helper_supervisor_process_hello(supervisor, &header,
                                                           NULL, 0))
             {
-                provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);
-                provider_helper_close_ipc(supervisor);
+                provider_helper_supervisor_fail_ipc(supervisor,
+                                                    PROVIDER_HELPER_STATE_FAILED);
                 break;
             }
             provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_PREFLIGHT);
@@ -1030,8 +1057,8 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
         case PROVIDER_HELPER_MSG_CONFIGURE_ACK:
             if (supervisor->state != PROVIDER_HELPER_STATE_PREFLIGHT)
             {
-                provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);
-                provider_helper_close_ipc(supervisor);
+                provider_helper_supervisor_fail_ipc(supervisor,
+                                                    PROVIDER_HELPER_STATE_FAILED);
                 break;
             }
             provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_READY);
@@ -1042,8 +1069,8 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
         case PROVIDER_HELPER_MSG_XFRM_LEASE_DELETE_ACK:
             if (supervisor->state != PROVIDER_HELPER_STATE_READY)
             {
-                provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);
-                provider_helper_close_ipc(supervisor);
+                provider_helper_supervisor_fail_ipc(supervisor,
+                                                    PROVIDER_HELPER_STATE_FAILED);
             }
             break;
 
@@ -1052,8 +1079,8 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
             break;
 
         default:
-            provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);
-            provider_helper_close_ipc(supervisor);
+            provider_helper_supervisor_fail_ipc(supervisor,
+                                                PROVIDER_HELPER_STATE_FAILED);
             break;
     }
 }
