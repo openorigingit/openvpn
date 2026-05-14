@@ -2302,7 +2302,8 @@ test_provider_helper_ikev2_sa_init_response(void **state)
     assert_true(provider_helper_ikev2_build_sa_init_response(
                     response, sizeof(response), &header, responder_spi,
                     &selection, responder_ke, sizeof(responder_ke),
-                    responder_nonce, sizeof(responder_nonce), &response_len));
+                    responder_nonce, sizeof(responder_nonce), false,
+                    &response_len));
 
     const size_t expected_sa_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
                                    + TEST_IKEV2_SA_PROPOSAL_LEN;
@@ -2346,14 +2347,56 @@ test_provider_helper_ikev2_sa_init_response(void **state)
     assert_memory_equal(response + summary.nonce_offset, responder_nonce,
                         sizeof(responder_nonce));
 
+    assert_true(provider_helper_ikev2_build_sa_init_response(
+                    response, sizeof(response), &header, responder_spi,
+                    &selection, responder_ke, sizeof(responder_ke),
+                    responder_nonce, sizeof(responder_nonce), true,
+                    &response_len));
+    const size_t expected_notify_len =
+        PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE
+        + PROVIDER_HELPER_IKEV2_NAT_DETECTION_HASH_BYTES;
+    assert_int_equal(response_len,
+                     PROVIDER_HELPER_IKEV2_HEADER_SIZE + expected_sa_len
+                     + expected_ke_len + expected_nonce_len
+                     + (2 * expected_notify_len));
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         response, response_len,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, false,
+                         &response_header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_parse_payloads(
+                         response, response_len, &response_header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(summary.payload_count, 5);
+    assert_true(summary.saw_notify);
+    const size_t source_notify = summary.nonce_offset + summary.nonce_len;
+    const size_t destination_notify = source_notify + expected_notify_len;
+    assert_int_equal(response[source_notify],
+                     PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY);
+    assert_int_equal((((uint16_t)response[source_notify + 2]) << 8)
+                     | response[source_notify + 3],
+                     expected_notify_len);
+    assert_int_equal((((uint16_t)response[source_notify + 6]) << 8)
+                     | response[source_notify + 7],
+                     PROVIDER_HELPER_IKEV2_NOTIFY_NAT_DETECTION_SOURCE_IP);
+    assert_int_equal(response[destination_notify],
+                     PROVIDER_HELPER_IKEV2_PAYLOAD_NONE);
+    assert_int_equal((((uint16_t)response[destination_notify + 2]) << 8)
+                     | response[destination_notify + 3],
+                     expected_notify_len);
+    assert_int_equal((((uint16_t)response[destination_notify + 6]) << 8)
+                     | response[destination_notify + 7],
+                     PROVIDER_HELPER_IKEV2_NOTIFY_NAT_DETECTION_DESTINATION_IP);
+
     assert_false(provider_helper_ikev2_build_sa_init_response(
                      response, sizeof(response), &header, 0, &selection,
                      responder_ke, sizeof(responder_ke), responder_nonce,
-                     sizeof(responder_nonce), &response_len));
+                     sizeof(responder_nonce), false, &response_len));
     assert_false(provider_helper_ikev2_build_sa_init_response(
                      response, sizeof(response), &header, responder_spi,
                      &selection, responder_ke, sizeof(responder_ke) - 1,
-                     responder_nonce, sizeof(responder_nonce), &response_len));
+                     responder_nonce, sizeof(responder_nonce), false,
+                     &response_len));
 }
 
 static void

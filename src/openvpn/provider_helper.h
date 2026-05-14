@@ -66,6 +66,7 @@
 #define PROVIDER_HELPER_IKEV2_COOKIE_TAG_BYTES 16
 #define PROVIDER_HELPER_IKEV2_COOKIE_BYTES \
     (1 + 4 + PROVIDER_HELPER_IKEV2_COOKIE_TAG_BYTES)
+#define PROVIDER_HELPER_IKEV2_NAT_DETECTION_HASH_BYTES 20
 
 #define PROVIDER_HELPER_CONFIG_FORCE_NATT (1u << 0)
 #define PROVIDER_HELPER_CONFIG_IPV4_ONLY  (1u << 1)
@@ -176,6 +177,8 @@ enum provider_helper_ikev2_payload_type {
 #define PROVIDER_HELPER_IKEV2_NOTIFY_NO_PROPOSAL_CHOSEN 14
 #define PROVIDER_HELPER_IKEV2_NOTIFY_INVALID_KE_PAYLOAD 17
 #define PROVIDER_HELPER_IKEV2_NOTIFY_AUTHENTICATION_FAILED 24
+#define PROVIDER_HELPER_IKEV2_NOTIFY_NAT_DETECTION_SOURCE_IP 16388
+#define PROVIDER_HELPER_IKEV2_NOTIFY_NAT_DETECTION_DESTINATION_IP 16389
 #define PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE 16390
 
 enum provider_helper_ikev2_parse_result {
@@ -593,6 +596,7 @@ bool provider_helper_ikev2_build_sa_init_response(
     size_t responder_ke_len,
     const uint8_t *responder_nonce,
     size_t responder_nonce_len,
+    bool force_natt,
     size_t *out_len);
 bool provider_helper_ikev2_build_cookie(
     uint8_t *dst,

@@ -2767,6 +2767,7 @@ ikev2_helper_send_invalid_ke_response(
 static bool
 ikev2_helper_send_sa_init_response(
     const struct ikev2_helper_listener *listener,
+    const struct provider_helper_runtime_config *config,
     const struct sockaddr_storage *peer,
     socklen_t peer_len,
     const struct provider_helper_ikev2_header *header,
@@ -2781,14 +2782,18 @@ ikev2_helper_send_sa_init_response(
                      + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE
                      + PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES
                      + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
-                     + IKEV2_HELPER_RESPONDER_NONCE_BYTES];
+                     + IKEV2_HELPER_RESPONDER_NONCE_BYTES
+                     + 2 * (PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE
+                            + PROVIDER_HELPER_IKEV2_NAT_DETECTION_HASH_BYTES)];
     size_t response_len = 0;
 
     if (!listener || !peer || !header || !sa || !sa->active
         || !provider_helper_ikev2_build_sa_init_response(
             response, sizeof(response), header, sa->responder_spi,
             &sa->selection, sa->responder_ke, sa->responder_ke_len,
-            sa->responder_nonce, sa->responder_nonce_len, &response_len))
+            sa->responder_nonce, sa->responder_nonce_len,
+            config && (config->flags & PROVIDER_HELPER_CONFIG_FORCE_NATT),
+            &response_len))
     {
         return false;
     }
@@ -2892,8 +2897,9 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 ++existing->retransmits;
                 existing->updated = now;
                 ++counters->ike_sa_init_duplicate;
-                if (ikev2_helper_send_sa_init_response(listener, &peer, peer_len,
-                                                       &header, existing))
+                if (ikev2_helper_send_sa_init_response(listener, config, &peer,
+                                                       peer_len, &header,
+                                                       existing))
                 {
                     ++counters->ike_sa_init_response_tx;
                 }
@@ -2983,7 +2989,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     ++counters->ike_sa_init_accepted;
                     ++counters->ike_sa_init_keymat_ready;
                     if (ikev2_helper_send_sa_init_response(
-                            listener, &peer, peer_len, &header, sa))
+                            listener, config, &peer, peer_len, &header, sa))
                     {
                         ++counters->ike_sa_init_response_tx;
                     }

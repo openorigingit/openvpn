@@ -2091,6 +2091,27 @@ provider_helper_ikev2_write_transform(uint8_t **pos,
     }
 }
 
+static void
+provider_helper_ikev2_write_notify(uint8_t **pos,
+                                   uint8_t next_payload,
+                                   uint16_t notify_type,
+                                   const uint8_t *data,
+                                   size_t data_len)
+{
+    *(*pos)++ = next_payload;
+    *(*pos)++ = 0;
+    provider_helper_wire_write_u16(
+        pos, (uint16_t)(PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE + data_len));
+    *(*pos)++ = 0;
+    *(*pos)++ = 0;
+    provider_helper_wire_write_u16(pos, notify_type);
+    if (data_len)
+    {
+        memcpy(*pos, data, data_len);
+        *pos += data_len;
+    }
+}
+
 bool
 provider_helper_ikev2_build_sa_init_response(
     uint8_t *dst,
@@ -2102,6 +2123,7 @@ provider_helper_ikev2_build_sa_init_response(
     size_t responder_ke_len,
     const uint8_t *responder_nonce,
     size_t responder_nonce_len,
+    bool force_natt,
     size_t *out_len)
 {
     if (out_len)
@@ -2142,9 +2164,14 @@ provider_helper_ikev2_build_sa_init_response(
     const uint16_t nonce_payload_len =
         PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
         + (uint16_t)responder_nonce_len;
+    const uint16_t natt_notify_payload_len =
+        PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE
+        + PROVIDER_HELPER_IKEV2_NAT_DETECTION_HASH_BYTES;
+    const uint16_t natt_payloads_len =
+        force_natt ? (uint16_t)(2 * natt_notify_payload_len) : 0;
     const uint32_t ike_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE
                              + sa_payload_len + ke_payload_len
-                             + nonce_payload_len;
+                             + nonce_payload_len + natt_payloads_len;
     const size_t offset = request->natt
                           ? PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE : 0;
     const size_t packet_len = offset + ike_len;
@@ -2194,11 +2221,39 @@ provider_helper_ikev2_build_sa_init_response(
     memcpy(pos, responder_ke, responder_ke_len);
     pos += responder_ke_len;
 
-    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+    *pos++ = force_natt ? PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY
+                        : PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
     *pos++ = 0;
     provider_helper_wire_write_u16(&pos, nonce_payload_len);
     memcpy(pos, responder_nonce, responder_nonce_len);
     pos += responder_nonce_len;
+
+    if (force_natt)
+    {
+        /*
+         * The experimental MVP deliberately forces ESP-in-UDP and does not
+         * expose raw ESP.  Send non-matching NAT-D values so clients switch to
+         * UDP 4500 even on networks without NAT.
+         */
+        static const uint8_t forced_source_hash[
+            PROVIDER_HELPER_IKEV2_NAT_DETECTION_HASH_BYTES] = {
+            0x4f, 0x56, 0x50, 0x4e, 0x2d, 0x66, 0x6f, 0x72, 0x63, 0x65,
+            0x2d, 0x6e, 0x61, 0x74, 0x74, 0x2d, 0x73, 0x72, 0x63, 0x31,
+        };
+        static const uint8_t forced_destination_hash[
+            PROVIDER_HELPER_IKEV2_NAT_DETECTION_HASH_BYTES] = {
+            0x4f, 0x56, 0x50, 0x4e, 0x2d, 0x66, 0x6f, 0x72, 0x63, 0x65,
+            0x2d, 0x6e, 0x61, 0x74, 0x74, 0x2d, 0x64, 0x73, 0x74, 0x31,
+        };
+        provider_helper_ikev2_write_notify(
+            &pos, PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY,
+            PROVIDER_HELPER_IKEV2_NOTIFY_NAT_DETECTION_SOURCE_IP,
+            forced_source_hash, sizeof(forced_source_hash));
+        provider_helper_ikev2_write_notify(
+            &pos, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+            PROVIDER_HELPER_IKEV2_NOTIFY_NAT_DETECTION_DESTINATION_IP,
+            forced_destination_hash, sizeof(forced_destination_hash));
+    }
 
     if ((size_t)(pos - dst) != packet_len)
     {
