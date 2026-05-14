@@ -18,6 +18,7 @@
 
 #include "syshead.h"
 
+#include "buffer.h"
 #include "provider_xfrm.h"
 
 static bool
@@ -134,6 +135,95 @@ provider_xfrm_spi_recorded(const struct provider_xfrm_lease *lease, uint32_t spi
     return false;
 }
 
+static void
+provider_xfrm_set_error(struct provider_xfrm_result *result, const char *reason)
+{
+    if (result)
+    {
+        result->ok = false;
+        snprintf(result->reason, sizeof(result->reason), "%s", reason);
+    }
+}
+
+static bool
+provider_xfrm_ipv4_selector_valid(
+    const struct provider_xfrm_ipv4_selector *selector)
+{
+    return selector && selector->start_addr <= selector->end_addr
+           && selector->start_port <= selector->end_port;
+}
+
+static size_t
+provider_xfrm_keymat_len_for_cipher(enum provider_xfrm_cipher cipher,
+                                    uint16_t key_bits)
+{
+    if (cipher != PROVIDER_XFRM_CIPHER_AES_GCM_16)
+    {
+        return 0;
+    }
+
+    switch (key_bits)
+    {
+        case 128:
+            return 20;
+
+        case 256:
+            return 36;
+
+        default:
+            return 0;
+    }
+}
+
+static bool
+provider_xfrm_copy_child_sa_key(struct provider_xfrm_child_sa_state *state,
+                                const uint8_t *key, size_t key_len,
+                                struct provider_xfrm_result *result)
+{
+    if (!key || key_len != state->key_len || key_len > sizeof(state->key))
+    {
+        provider_xfrm_set_error(result,
+                                "invalid XFRM CHILD_SA key material length");
+        return false;
+    }
+
+    memcpy(state->key, key, key_len);
+    return true;
+}
+
+static bool
+provider_xfrm_child_sa_state_build(
+    struct provider_xfrm_child_sa_state *state,
+    enum provider_xfrm_direction direction,
+    uint32_t src_outer_ipv4,
+    uint32_t dst_outer_ipv4,
+    const struct provider_xfrm_ipv4_selector *src_ts,
+    const struct provider_xfrm_ipv4_selector *dst_ts,
+    uint32_t spi,
+    const struct provider_xfrm_child_sa_spec *spec,
+    const uint8_t *key,
+    size_t key_len,
+    struct provider_xfrm_result *result)
+{
+    CLEAR(*state);
+    state->direction = direction;
+    state->src_outer_ipv4 = src_outer_ipv4;
+    state->dst_outer_ipv4 = dst_outer_ipv4;
+    state->src_ts = *src_ts;
+    state->dst_ts = *dst_ts;
+    state->spi = spi;
+    state->reqid = spec->reqid;
+    state->mark_value = spec->mark_value;
+    state->mark_mask = spec->mark_mask;
+    state->if_id = spec->if_id;
+    state->cipher = spec->cipher;
+    state->key_bits = spec->key_bits;
+    state->key_len = provider_xfrm_keymat_len_for_cipher(spec->cipher,
+                                                         spec->key_bits);
+
+    return provider_xfrm_copy_child_sa_key(state, key, key_len, result);
+}
+
 void
 provider_xfrm_result_init(struct provider_xfrm_result *result)
 {
@@ -150,6 +240,15 @@ provider_xfrm_lease_init(struct provider_xfrm_lease *lease)
     if (lease)
     {
         CLEAR(*lease);
+    }
+}
+
+void
+provider_xfrm_child_sa_plan_clear(struct provider_xfrm_child_sa_plan *plan)
+{
+    if (plan)
+    {
+        secure_memzero(plan, sizeof(*plan));
     }
 }
 
@@ -334,4 +433,99 @@ provider_xfrm_state_matches_lease(const struct provider_xfrm_lease *lease,
            && strcmp(lease->local_outer_address, state->local_outer_address) == 0
            && strcmp(lease->remote_outer_address, state->remote_outer_address) == 0
            && provider_xfrm_spi_recorded(lease, state->spi);
+}
+
+bool
+provider_xfrm_child_sa_plan_build(struct provider_xfrm_child_sa_plan *plan,
+                                  const struct provider_xfrm_child_sa_spec *spec,
+                                  struct provider_xfrm_result *result)
+{
+    provider_xfrm_result_init(result);
+    if (plan)
+    {
+        provider_xfrm_child_sa_plan_clear(plan);
+    }
+
+    if (!plan || !spec)
+    {
+        provider_xfrm_set_error(result,
+                                "missing XFRM CHILD_SA plan output or spec");
+        return false;
+    }
+
+    if (!spec->lease_id || !spec->provider_session_id
+        || !spec->policy_revision || !spec->reqid || !spec->mark_mask)
+    {
+        provider_xfrm_set_error(
+            result,
+            "lease id, provider session id, policy revision, reqid, and mark mask are required");
+        return false;
+    }
+
+    if (!spec->local_outer_ipv4 || !spec->remote_outer_ipv4)
+    {
+        provider_xfrm_set_error(
+            result,
+            "local and remote outer IPv4 addresses are required");
+        return false;
+    }
+
+    if (!provider_xfrm_ipv4_selector_valid(&spec->local_ts)
+        || !provider_xfrm_ipv4_selector_valid(&spec->remote_ts))
+    {
+        provider_xfrm_set_error(result,
+                                "invalid XFRM CHILD_SA traffic selector");
+        return false;
+    }
+
+    if (!spec->initiator_inbound_spi || !spec->responder_inbound_spi)
+    {
+        provider_xfrm_set_error(result,
+                                "non-zero XFRM CHILD_SA SPIs are required");
+        return false;
+    }
+
+    if (spec->initiator_inbound_spi == spec->responder_inbound_spi)
+    {
+        provider_xfrm_set_error(result,
+                                "XFRM CHILD_SA SPIs must be distinct");
+        return false;
+    }
+
+    const size_t key_len =
+        provider_xfrm_keymat_len_for_cipher(spec->cipher, spec->key_bits);
+    if (!key_len)
+    {
+        provider_xfrm_set_error(result,
+                                "unsupported XFRM CHILD_SA cipher or key size");
+        return false;
+    }
+
+    plan->lease_id = spec->lease_id;
+    plan->provider_session_id = spec->provider_session_id;
+    plan->policy_revision = spec->policy_revision;
+
+    if (!provider_xfrm_child_sa_state_build(
+            &plan->inbound, PROVIDER_XFRM_DIRECTION_IN,
+            spec->remote_outer_ipv4, spec->local_outer_ipv4,
+            &spec->remote_ts, &spec->local_ts, spec->responder_inbound_spi,
+            spec, spec->initiator_to_responder_key,
+            spec->initiator_to_responder_key_len, result))
+    {
+        provider_xfrm_child_sa_plan_clear(plan);
+        return false;
+    }
+
+    if (!provider_xfrm_child_sa_state_build(
+            &plan->outbound, PROVIDER_XFRM_DIRECTION_OUT,
+            spec->local_outer_ipv4, spec->remote_outer_ipv4,
+            &spec->local_ts, &spec->remote_ts, spec->initiator_inbound_spi,
+            spec, spec->responder_to_initiator_key,
+            spec->responder_to_initiator_key_len, result))
+    {
+        provider_xfrm_child_sa_plan_clear(plan);
+        return false;
+    }
+
+    return true;
 }

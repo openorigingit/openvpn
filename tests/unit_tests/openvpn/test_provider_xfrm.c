@@ -34,6 +34,20 @@ static const char *default_remote_ts[] = {
     "10.88.0.2/32",
 };
 
+static const uint8_t default_i2r_key[PROVIDER_XFRM_KEYMAT_MAX_BYTES] = {
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+    0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21,
+    0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a,
+    0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33,
+};
+
+static const uint8_t default_r2i_key[PROVIDER_XFRM_KEYMAT_MAX_BYTES] = {
+    0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+    0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51,
+    0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a,
+    0x5b, 0x5c, 0x5d, 0x5e, 0x5f, 0x60, 0x61, 0x62, 0x63,
+};
+
 static struct provider_xfrm_lease_spec
 default_lease_spec(void)
 {
@@ -56,6 +70,44 @@ default_lease_spec(void)
         .nftables_chain_name = "openvpn_ikev2_17",
         .expires = 2000,
         .rekey_deadline = 1900,
+    };
+}
+
+static struct provider_xfrm_child_sa_spec
+default_child_sa_spec(void)
+{
+    return (struct provider_xfrm_child_sa_spec) {
+        .lease_id = 17,
+        .provider_session_id = 7,
+        .policy_revision = 3,
+        .mark_value = 0x4200,
+        .mark_mask = 0xffff,
+        .if_id = 12,
+        .reqid = 1100,
+        .local_outer_ipv4 = 0xc633640a,
+        .remote_outer_ipv4 = 0xcb007114,
+        .local_ts = {
+            .start_addr = 0x0a580001,
+            .end_addr = 0x0a580001,
+            .start_port = 443,
+            .end_port = 443,
+            .ip_protocol_id = IPPROTO_TCP,
+        },
+        .remote_ts = {
+            .start_addr = 0x0a580002,
+            .end_addr = 0x0a580002,
+            .start_port = 10000,
+            .end_port = 10000,
+            .ip_protocol_id = IPPROTO_TCP,
+        },
+        .initiator_inbound_spi = 0x01020304,
+        .responder_inbound_spi = 0xaabbccdd,
+        .cipher = PROVIDER_XFRM_CIPHER_AES_GCM_16,
+        .key_bits = 256,
+        .initiator_to_responder_key = default_i2r_key,
+        .initiator_to_responder_key_len = sizeof(default_i2r_key),
+        .responder_to_initiator_key = default_r2i_key,
+        .responder_to_initiator_key_len = sizeof(default_r2i_key),
     };
 }
 
@@ -216,6 +268,99 @@ test_provider_xfrm_rejects_empty_spi_tuple(void **state)
     assert_non_null(strstr(result.reason, "SPI"));
 }
 
+static void
+test_provider_xfrm_builds_child_sa_plan(void **state)
+{
+    (void)state;
+
+    struct provider_xfrm_child_sa_plan plan;
+    struct provider_xfrm_result result;
+    struct provider_xfrm_child_sa_spec spec = default_child_sa_spec();
+
+    assert_true(provider_xfrm_child_sa_plan_build(&plan, &spec, &result));
+    assert_true(result.ok);
+
+    assert_int_equal(plan.lease_id, spec.lease_id);
+    assert_int_equal(plan.provider_session_id, spec.provider_session_id);
+    assert_int_equal(plan.policy_revision, spec.policy_revision);
+
+    assert_int_equal(plan.inbound.direction, PROVIDER_XFRM_DIRECTION_IN);
+    assert_int_equal(plan.inbound.src_outer_ipv4, spec.remote_outer_ipv4);
+    assert_int_equal(plan.inbound.dst_outer_ipv4, spec.local_outer_ipv4);
+    assert_memory_equal(&plan.inbound.src_ts, &spec.remote_ts,
+                        sizeof(plan.inbound.src_ts));
+    assert_memory_equal(&plan.inbound.dst_ts, &spec.local_ts,
+                        sizeof(plan.inbound.dst_ts));
+    assert_int_equal(plan.inbound.spi, spec.responder_inbound_spi);
+    assert_int_equal(plan.inbound.reqid, spec.reqid);
+    assert_int_equal(plan.inbound.mark_value, spec.mark_value);
+    assert_int_equal(plan.inbound.mark_mask, spec.mark_mask);
+    assert_int_equal(plan.inbound.if_id, spec.if_id);
+    assert_int_equal(plan.inbound.cipher, spec.cipher);
+    assert_int_equal(plan.inbound.key_bits, spec.key_bits);
+    assert_int_equal(plan.inbound.key_len, sizeof(default_i2r_key));
+    assert_memory_equal(plan.inbound.key, default_i2r_key,
+                        sizeof(default_i2r_key));
+
+    assert_int_equal(plan.outbound.direction, PROVIDER_XFRM_DIRECTION_OUT);
+    assert_int_equal(plan.outbound.src_outer_ipv4, spec.local_outer_ipv4);
+    assert_int_equal(plan.outbound.dst_outer_ipv4, spec.remote_outer_ipv4);
+    assert_memory_equal(&plan.outbound.src_ts, &spec.local_ts,
+                        sizeof(plan.outbound.src_ts));
+    assert_memory_equal(&plan.outbound.dst_ts, &spec.remote_ts,
+                        sizeof(plan.outbound.dst_ts));
+    assert_int_equal(plan.outbound.spi, spec.initiator_inbound_spi);
+    assert_int_equal(plan.outbound.reqid, spec.reqid);
+    assert_int_equal(plan.outbound.mark_value, spec.mark_value);
+    assert_int_equal(plan.outbound.mark_mask, spec.mark_mask);
+    assert_int_equal(plan.outbound.if_id, spec.if_id);
+    assert_int_equal(plan.outbound.cipher, spec.cipher);
+    assert_int_equal(plan.outbound.key_bits, spec.key_bits);
+    assert_int_equal(plan.outbound.key_len, sizeof(default_r2i_key));
+    assert_memory_equal(plan.outbound.key, default_r2i_key,
+                        sizeof(default_r2i_key));
+
+    const uint8_t zero_key[PROVIDER_XFRM_KEYMAT_MAX_BYTES] = { 0 };
+    provider_xfrm_child_sa_plan_clear(&plan);
+    assert_int_equal(plan.lease_id, 0);
+    assert_int_equal(plan.inbound.key_len, 0);
+    assert_memory_equal(plan.inbound.key, zero_key, sizeof(zero_key));
+    assert_memory_equal(plan.outbound.key, zero_key, sizeof(zero_key));
+}
+
+static void
+test_provider_xfrm_rejects_invalid_child_sa_plan(void **state)
+{
+    (void)state;
+
+    struct provider_xfrm_child_sa_plan plan;
+    struct provider_xfrm_result result;
+    struct provider_xfrm_child_sa_spec spec = default_child_sa_spec();
+
+    spec.responder_inbound_spi = 0;
+    assert_false(provider_xfrm_child_sa_plan_build(&plan, &spec, &result));
+    assert_false(result.ok);
+    assert_non_null(strstr(result.reason, "SPI"));
+
+    spec = default_child_sa_spec();
+    spec.initiator_inbound_spi = spec.responder_inbound_spi;
+    assert_false(provider_xfrm_child_sa_plan_build(&plan, &spec, &result));
+    assert_false(result.ok);
+    assert_non_null(strstr(result.reason, "distinct"));
+
+    spec = default_child_sa_spec();
+    spec.initiator_to_responder_key_len = sizeof(default_i2r_key) - 1;
+    assert_false(provider_xfrm_child_sa_plan_build(&plan, &spec, &result));
+    assert_false(result.ok);
+    assert_non_null(strstr(result.reason, "key material"));
+
+    spec = default_child_sa_spec();
+    spec.local_ts.start_addr = spec.local_ts.end_addr + 1;
+    assert_false(provider_xfrm_child_sa_plan_build(&plan, &spec, &result));
+    assert_false(result.ok);
+    assert_non_null(strstr(result.reason, "selector"));
+}
+
 int
 main(void)
 {
@@ -226,6 +371,8 @@ main(void)
         cmocka_unit_test(test_provider_xfrm_authorizes_only_exact_selectors),
         cmocka_unit_test(test_provider_xfrm_cleanup_predicate_matches_only_owned_state),
         cmocka_unit_test(test_provider_xfrm_rejects_empty_spi_tuple),
+        cmocka_unit_test(test_provider_xfrm_builds_child_sa_plan),
+        cmocka_unit_test(test_provider_xfrm_rejects_invalid_child_sa_plan),
     };
 
     return cmocka_run_group_tests_name("provider_xfrm", tests, NULL, NULL);
