@@ -406,6 +406,9 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_create_child_ts_unacceptable_tx = 83,
         .ike_create_child_ts_unacceptable_failed = 84,
         .ike_sa_xfrm_lease_revoked = 85,
+        .ike_create_child_scaffolded = 86,
+        .ike_create_child_scaffold_failed = 87,
+        .ike_child_sa_scaffold_active = 88,
     };
     struct provider_helper_runtime_stats output;
     uint8_t payload[PROVIDER_HELPER_RUNTIME_STATS_SIZE];
@@ -568,6 +571,12 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_create_child_ts_unacceptable_failed);
     assert_int_equal(output.ike_sa_xfrm_lease_revoked,
                      input.ike_sa_xfrm_lease_revoked);
+    assert_int_equal(output.ike_create_child_scaffolded,
+                     input.ike_create_child_scaffolded);
+    assert_int_equal(output.ike_create_child_scaffold_failed,
+                     input.ike_create_child_scaffold_failed);
+    assert_int_equal(output.ike_child_sa_scaffold_active,
+                     input.ike_child_sa_scaffold_active);
 }
 
 static void
@@ -4991,6 +5000,10 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
         supervisor.runtime_stats.ike_create_child_install_unsupported_tx >= 1);
     assert_true(
         supervisor.runtime_stats.ike_create_child_ts_unacceptable_tx >= 1);
+    assert_true(supervisor.runtime_stats.ike_create_child_scaffolded >= 1);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_scaffold_failed,
+                     0);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
     assert_int_equal(cb_state.calls, 2);
     assert_int_equal(supervisor.runtime_stats.xfrm_leases_active, 1);
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_installed, 1);
@@ -5027,6 +5040,7 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_deleted, 1);
     assert_true(supervisor.runtime_stats.ike_sa_xfrm_lease_revoked >= 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
 
     close(response_fd);
     close(listener_fd);

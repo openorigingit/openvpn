@@ -108,6 +108,20 @@ struct ikev2_helper_listener {
     struct provider_helper_listener_fd descriptor;
 };
 
+struct ikev2_helper_child_sa_scaffold {
+    bool ready;
+    uint32_t initiator_spi;
+    uint32_t responder_spi;
+    uint32_t message_id;
+    uint64_t provider_session_id;
+    uint64_t xfrm_lease_id;
+    uint64_t policy_revision;
+    time_t created;
+    time_t updated;
+    struct provider_helper_ikev2_child_sa_selection selection;
+    struct provider_helper_xfrm_lease xfrm_lease;
+};
+
 struct ikev2_helper_ike_sa {
     bool active;
     uint64_t initiator_spi;
@@ -160,6 +174,7 @@ struct ikev2_helper_ike_sa {
     uint64_t xfrm_lease_id;
     uint64_t policy_revision;
     struct provider_helper_xfrm_lease authorized_xfrm_lease;
+    struct ikev2_helper_child_sa_scaffold child_sa;
     time_t created;
     time_t updated;
     struct provider_helper_ikev2_sa_selection selection;
@@ -303,6 +318,32 @@ ikev2_helper_random_nonzero_u64(uint64_t *value)
     for (int i = 0; i < IKEV2_HELPER_SPI_GENERATE_ATTEMPTS; ++i)
     {
         uint64_t candidate = 0;
+        if (!ikev2_helper_random_bytes((uint8_t *)&candidate,
+                                       sizeof(candidate)))
+        {
+            return false;
+        }
+        if (candidate)
+        {
+            *value = candidate;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool
+ikev2_helper_random_nonzero_u32(uint32_t *value)
+{
+    if (!value)
+    {
+        return false;
+    }
+
+    for (int i = 0; i < IKEV2_HELPER_SPI_GENERATE_ATTEMPTS; ++i)
+    {
+        uint32_t candidate = 0;
         if (!ikev2_helper_random_bytes((uint8_t *)&candidate,
                                        sizeof(candidate)))
         {
@@ -3128,6 +3169,56 @@ ikev2_helper_generate_responder_spi(
     return false;
 }
 
+static bool
+ikev2_helper_child_responder_spi_exists(
+    const struct ikev2_helper_ike_sa_table *table,
+    uint32_t responder_spi)
+{
+    if (!table || !responder_spi)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        const struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        if (sa->active && sa->child_sa.ready
+            && sa->child_sa.responder_spi == responder_spi)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool
+ikev2_helper_generate_child_responder_spi(
+    const struct ikev2_helper_ike_sa_table *table,
+    uint32_t *responder_spi)
+{
+    if (!table || !responder_spi)
+    {
+        return false;
+    }
+
+    for (int i = 0; i < IKEV2_HELPER_SPI_GENERATE_ATTEMPTS; ++i)
+    {
+        uint32_t candidate = 0;
+        if (!ikev2_helper_random_nonzero_u32(&candidate))
+        {
+            return false;
+        }
+        if (!ikev2_helper_child_responder_spi_exists(table, candidate))
+        {
+            *responder_spi = candidate;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static struct ikev2_helper_ike_sa *
 ikev2_helper_find_ike_sa(struct ikev2_helper_ike_sa_table *table,
                          const struct ikev2_helper_listener *listener,
@@ -3433,6 +3524,67 @@ ikev2_helper_authorize_ike_sa(
     sa->xfrm_lease_id = response->xfrm_lease_id;
     sa->policy_revision = response->policy_revision;
     sa->authorized_xfrm_lease = *lease;
+}
+
+static uint32_t
+ikev2_helper_count_child_sa_scaffolds(
+    const struct ikev2_helper_ike_sa_table *table)
+{
+    if (!table)
+    {
+        return 0;
+    }
+
+    uint32_t active = 0;
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        const struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        if (sa->active && sa->child_sa.ready)
+        {
+            ++active;
+        }
+    }
+    return active;
+}
+
+static bool
+ikev2_helper_scaffold_child_sa(
+    const struct ikev2_helper_ike_sa_table *table,
+    struct ikev2_helper_ike_sa *sa,
+    const struct provider_helper_ikev2_child_sa_selection *selection,
+    const struct provider_helper_xfrm_lease *lease,
+    uint32_t message_id,
+    time_t now)
+{
+    if (!table || !sa || !sa->active || !sa->auth_authorized || !selection
+        || !selection->selected || !selection->initiator_spi || !lease
+        || !message_id)
+    {
+        return false;
+    }
+
+    struct ikev2_helper_child_sa_scaffold child;
+    CLEAR(child);
+    if (!ikev2_helper_generate_child_responder_spi(table,
+                                                   &child.responder_spi))
+    {
+        return false;
+    }
+
+    child.ready = true;
+    child.initiator_spi = selection->initiator_spi;
+    child.message_id = message_id;
+    child.provider_session_id = sa->provider_session_id;
+    child.xfrm_lease_id = sa->xfrm_lease_id;
+    child.policy_revision = sa->policy_revision;
+    child.created = now;
+    child.updated = now;
+    child.selection = *selection;
+    child.xfrm_lease = *lease;
+
+    ikev2_helper_secure_zero(&sa->child_sa, sizeof(sa->child_sa));
+    sa->child_sa = child;
+    return true;
 }
 
 static bool
@@ -4008,6 +4160,8 @@ ikev2_helper_expire_ike_sas(struct ikev2_helper_ike_sa_table *table,
         ++counters->ike_sa_expired;
     }
     counters->ike_sa_active = table->active;
+    counters->ike_child_sa_scaffold_active =
+        ikev2_helper_count_child_sa_scaffolds(table);
 }
 
 static bool
@@ -4974,10 +5128,11 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     bool no_proposal = false;
                     bool ts_unacceptable = false;
                     bool install_unsupported = false;
+                    struct provider_helper_ikev2_child_sa_selection
+                        child_selection;
+                    CLEAR(child_selection);
                     if (!rekey_request)
                     {
-                        struct provider_helper_ikev2_child_sa_selection
-                            child_selection;
                         const enum provider_helper_ikev2_parse_result
                             select_result =
                                 provider_helper_ikev2_select_child_sa_proposal(
@@ -5002,6 +5157,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                                     plaintext, plaintext_len, &inner_summary,
                                     &sa->authorized_xfrm_lease))
                             {
+                                /*
+                                 * XFRM install is still fail-closed.  Retain
+                                 * a bounded scaffold so the next implementation
+                                 * step can build the CHILD_SA response from
+                                 * real selected state instead of reparsing.
+                                 */
                                 install_unsupported = true;
                             }
                             else
@@ -5028,6 +5189,18 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         }
                         else if (install_unsupported)
                         {
+                            if (ikev2_helper_scaffold_child_sa(
+                                    sa_table, sa, &child_selection,
+                                    &sa->authorized_xfrm_lease,
+                                    header.message_id, time(NULL)))
+                            {
+                                ++counters->ike_create_child_scaffolded;
+                            }
+                            else
+                            {
+                                ++counters
+                                      ->ike_create_child_scaffold_failed;
+                            }
                             ++counters
                                   ->ike_create_child_install_unsupported_tx;
                         }
@@ -5075,6 +5248,8 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     sa->message_id = header.message_id;
                     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                     counters->ike_sa_active = sa_table->active;
+                    counters->ike_child_sa_scaffold_active =
+                        ikev2_helper_count_child_sa_scaffolds(sa_table);
                     return;
                 }
                 ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
@@ -5256,6 +5431,8 @@ ikev2_helper_loop(int fd)
                 }
                 counters.xfrm_leases_active = xfrm_lease_count;
                 counters.ike_sa_active = sa_table.active;
+                counters.ike_child_sa_scaffold_active =
+                    ikev2_helper_count_child_sa_scaffolds(&sa_table);
                 break;
             }
 
@@ -5283,6 +5460,8 @@ ikev2_helper_loop(int fd)
                 }
                 counters.xfrm_leases_active = xfrm_lease_count;
                 counters.ike_sa_active = sa_table.active;
+                counters.ike_child_sa_scaffold_active =
+                    ikev2_helper_count_child_sa_scaffolds(&sa_table);
                 break;
             }
 
@@ -5350,6 +5529,8 @@ ikev2_helper_loop(int fd)
                     goto done;
                 }
                 counters.ike_sa_active = sa_table.active;
+                counters.ike_child_sa_scaffold_active =
+                    ikev2_helper_count_child_sa_scaffolds(&sa_table);
                 if (!ikev2_helper_send_stats(fd, tx_sequence++, header.sequence,
                                              &counters))
                 {
