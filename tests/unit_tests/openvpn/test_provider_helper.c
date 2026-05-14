@@ -195,6 +195,7 @@ test_provider_helper_runtime_config_roundtrip(void **state)
     assert_true(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
     assert_int_equal(input.flags, PROVIDER_HELPER_CONFIG_FORCE_NATT
                                   | PROVIDER_HELPER_CONFIG_IPV4_ONLY);
+    assert_false(input.flags & PROVIDER_HELPER_CONFIG_APPLY_XFRM);
     assert_true(provider_helper_ipc_encode_runtime_config(payload, sizeof(payload), &input));
     assert_true(provider_helper_ipc_decode_runtime_config(payload, sizeof(payload), &output));
     assert_int_equal(output.flags, input.flags);
@@ -208,6 +209,13 @@ test_provider_helper_runtime_config_roundtrip(void **state)
                      input.half_open_timeout_seconds);
     assert_int_equal(output.max_half_open_sas_per_source,
                      input.max_half_open_sas_per_source);
+
+    input.flags |= PROVIDER_HELPER_CONFIG_APPLY_XFRM;
+    assert_true(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
+    assert_true(provider_helper_ipc_encode_runtime_config(payload, sizeof(payload), &input));
+    assert_true(provider_helper_ipc_decode_runtime_config(payload, sizeof(payload), &output));
+    assert_true(output.flags & PROVIDER_HELPER_CONFIG_APPLY_XFRM);
+    input.flags &= ~PROVIDER_HELPER_CONFIG_APPLY_XFRM;
 
     input.flags |= (1u << 31);
     assert_false(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
