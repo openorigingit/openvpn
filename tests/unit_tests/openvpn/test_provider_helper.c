@@ -5030,6 +5030,12 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     test_recv_ikev2_encrypted_notify_response(
         response_fd, initiator_spi, &sa_init_material,
         PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
+    test_send_ikev2_encrypted_ike_auth_datagram_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, false,
+        cert_der, cert_der_len);
+    test_recv_ikev2_encrypted_notify_response(
+        response_fd, initiator_spi, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
@@ -5050,11 +5056,13 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
         supervisor.runtime_stats.ike_auth_allow_temp_failure_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_allow_missing_xfrm_lease,
                      1);
+    assert_true(supervisor.runtime_stats.ike_exchange_retransmit_tx >= 1);
+    assert_int_equal(cb_state.calls, 2);
     assert_int_equal(supervisor.runtime_stats.xfrm_leases_active, 1);
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_installed, 1);
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_replaced, 0);
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_deleted, 0);
-    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
 
     close(response_fd);
     close(listener_fd);

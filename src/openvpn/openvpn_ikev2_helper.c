@@ -155,6 +155,11 @@ struct ikev2_helper_ike_sa {
     size_t cert_issuer_len;
     char cert_issuer[PROVIDER_HELPER_AUTH_ISSUER_SIZE];
     uint64_t pending_auth_request_id;
+    bool auth_authorized;
+    uint64_t provider_session_id;
+    uint64_t xfrm_lease_id;
+    uint64_t policy_revision;
+    struct provider_helper_xfrm_lease authorized_xfrm_lease;
     time_t created;
     time_t updated;
     struct provider_helper_ikev2_sa_selection selection;
@@ -3309,6 +3314,25 @@ ikev2_helper_xfrm_lease_equal(const struct provider_helper_xfrm_lease *a,
            && a->ip_protocol_id == b->ip_protocol_id;
 }
 
+static void
+ikev2_helper_authorize_ike_sa(
+    struct ikev2_helper_ike_sa *sa,
+    const struct provider_helper_auth_response *response,
+    const struct provider_helper_xfrm_lease *lease)
+{
+    if (!sa || !response || !lease)
+    {
+        return;
+    }
+
+    sa->pending_auth_request_id = 0;
+    sa->auth_authorized = true;
+    sa->provider_session_id = response->provider_session_id;
+    sa->xfrm_lease_id = response->xfrm_lease_id;
+    sa->policy_revision = response->policy_revision;
+    sa->authorized_xfrm_lease = *lease;
+}
+
 static bool
 ikev2_helper_store_xfrm_lease(
     struct provider_helper_xfrm_lease *leases,
@@ -3736,17 +3760,19 @@ ikev2_helper_apply_auth_response(
                 return true;
             }
             if (listener
-                && ikev2_helper_send_encrypted_notify_response(
-                    listener, sa,
+                && ikev2_helper_send_cached_encrypted_notify_exchange_response(
+                    listener, sa, PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+                    sa->message_id,
                     PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
             {
+                ikev2_helper_authorize_ike_sa(sa, response, lease);
                 ++counters->ike_auth_allow_temp_failure_tx;
             }
             else
             {
                 ++counters->ike_auth_allow_temp_failure_failed;
+                ikev2_helper_clear_ike_sa(table, sa);
             }
-            ikev2_helper_clear_ike_sa(table, sa);
             ++counters->ike_auth_allow_unsupported;
         }
         counters->ike_sa_active = table->active;
@@ -4450,6 +4476,32 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
             if (natt_migrated)
             {
                 ++counters->ike_auth_natt_migrated;
+            }
+            if (header.message_id == sa->message_id
+                && sa->protected_response_len)
+            {
+                if (sa->protected_retransmits >= config->retransmit_limit)
+                {
+                    ++counters->ike_exchange_replay_dropped;
+                }
+                else if (ikev2_helper_retransmit_cached_protected_response(
+                             listener, sa))
+                {
+                    ++sa->protected_retransmits;
+                    ++counters->ike_exchange_retransmit_tx;
+                }
+                else
+                {
+                    ++counters->ike_exchange_retransmit_failed;
+                }
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
+            if (header.message_id < sa->message_id)
+            {
+                ++counters->ike_exchange_replay_dropped;
+                counters->ike_sa_active = sa_table->active;
+                return;
             }
             sa->message_id = header.message_id;
             sa->updated = time(NULL);
