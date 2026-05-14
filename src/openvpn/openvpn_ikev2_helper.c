@@ -1415,7 +1415,6 @@ ikev2_helper_validate_eap_payload(
 
     switch (code)
     {
-        case IKEV2_HELPER_EAP_CODE_REQUEST:
         case IKEV2_HELPER_EAP_CODE_RESPONSE:
             if (body_len < IKEV2_HELPER_EAP_TYPE_HEADER_SIZE)
             {
@@ -1428,11 +1427,10 @@ ikev2_helper_validate_eap_payload(
             return ikev2_helper_validate_eap_tls_payload(body, body_len,
                                                          config);
 
+        case IKEV2_HELPER_EAP_CODE_REQUEST:
         case IKEV2_HELPER_EAP_CODE_SUCCESS:
         case IKEV2_HELPER_EAP_CODE_FAILURE:
-            return body_len == IKEV2_HELPER_EAP_HEADER_SIZE
-                       ? PROVIDER_HELPER_IKEV2_PARSE_OK
-                       : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            return PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD;
 
         default:
             return PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD;
