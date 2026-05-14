@@ -5019,6 +5019,41 @@ ikev2_helper_is_ike_sa_delete_request(
 }
 
 static bool
+ikev2_helper_is_child_sa_delete_request(
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    const struct provider_helper_ikev2_payload_summary *summary,
+    const struct ikev2_helper_child_sa_scaffold *child)
+{
+    if (!plaintext || !summary || !child || !child->ready
+        || summary->payload_count != 1 || !summary->saw_delete
+        || summary->delete_count != 1 || summary->delete_len < 8
+        || !ikev2_helper_body_inside(plaintext_len, summary->delete_offset,
+                                     summary->delete_len))
+    {
+        return false;
+    }
+
+    const uint8_t *body = plaintext + summary->delete_offset;
+    const uint16_t spi_count = ((uint16_t)body[2] << 8) | body[3];
+    if (body[0] != PROVIDER_HELPER_IKEV2_PROTOCOL_ESP || body[1] != 4
+        || !spi_count || summary->delete_len != 4 + (size_t)spi_count * 4)
+    {
+        return false;
+    }
+
+    for (uint16_t i = 0; i < spi_count; ++i)
+    {
+        const uint32_t spi = ikev2_helper_read_be32(body + 4 + (size_t)i * 4);
+        if (spi == child->initiator_spi || spi == child->responder_spi)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool
 ikev2_helper_ike_auth_listener_allowed(
     const struct ikev2_helper_listener *listener,
     const struct provider_helper_runtime_config *config)
@@ -5627,6 +5662,33 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                         ikev2_helper_clear_ike_sa(sa_table, sa, counters);
                         counters->ike_sa_active = sa_table->active;
+                        return;
+                    }
+                    if (ikev2_helper_is_child_sa_delete_request(
+                            plaintext, plaintext_len, &inner_summary,
+                            &sa->child_sa))
+                    {
+                        ++counters->ike_informational_delete_rx;
+                        if (ikev2_helper_send_cached_encrypted_empty_response(
+                                listener, sa, header.exchange_type,
+                                header.message_id)
+                            && ikev2_helper_delete_child_sa_xfrm(
+                                &sa->child_sa, counters))
+                        {
+                            ++counters->ike_informational_delete_response_tx;
+                            ikev2_helper_secure_zero(&sa->child_sa,
+                                                     sizeof(sa->child_sa));
+                            sa->message_id = header.message_id;
+                        }
+                        else
+                        {
+                            ++counters
+                                  ->ike_informational_delete_response_failed;
+                        }
+                        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                        counters->ike_sa_active = sa_table->active;
+                        counters->ike_child_sa_scaffold_active =
+                            ikev2_helper_count_child_sa_scaffolds(sa_table);
                         return;
                     }
                 }
