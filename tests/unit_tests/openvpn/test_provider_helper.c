@@ -4920,6 +4920,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 
     struct provider_helper_supervisor supervisor;
     provider_helper_supervisor_init(&supervisor);
+    supervisor.runtime_config.half_open_timeout_seconds = 1;
     struct test_provider_helper_auth_cb_state cb_state;
     CLEAR(cb_state);
     provider_helper_supervisor_set_auth_callback(
@@ -5544,10 +5545,28 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_replaced, 0);
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_deleted, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_expired, 0);
+
+    sleep(2);
+    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 100);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_expired, 0);
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     assert_true(provider_helper_supervisor_send_xfrm_lease_delete(
-                    &supervisor, &xfrm_lease, 100));
+                    &supervisor, &xfrm_lease, 101));
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -5560,7 +5579,7 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           supervisor.next_tx_sequence++, 101);
+                           supervisor.next_tx_sequence++, 102);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)

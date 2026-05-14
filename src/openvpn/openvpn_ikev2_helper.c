@@ -4719,7 +4719,7 @@ ikev2_helper_expire_ike_sas(struct ikev2_helper_ike_sa_table *table,
     for (size_t i = 0; i < SIZE(table->entries); ++i)
     {
         struct ikev2_helper_ike_sa *sa = &table->entries[i];
-        if (!sa->active || sa->updated > now
+        if (!sa->active || sa->auth_authorized || sa->updated > now
             || now - sa->updated < (time_t)timeout_seconds)
         {
             continue;
