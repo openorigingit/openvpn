@@ -4769,6 +4769,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         ++counters->ike_create_child_rekey_rx;
                     }
                     bool no_proposal = false;
+                    bool install_unsupported = false;
                     if (!rekey_request)
                     {
                         struct provider_helper_ikev2_child_sa_selection
@@ -4791,9 +4792,13 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             counters->ike_sa_active = sa_table->active;
                             return;
                         }
+                        else
+                        {
+                            install_unsupported = true;
+                        }
                     }
                     const uint16_t notify_type =
-                        rekey_request
+                        rekey_request || install_unsupported
                             ? PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE
                             : no_proposal
                                   ? PROVIDER_HELPER_IKEV2_NOTIFY_NO_PROPOSAL_CHOSEN
@@ -4805,6 +4810,11 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         if (rekey_request)
                         {
                             ++counters->ike_create_child_temp_failure_tx;
+                        }
+                        else if (install_unsupported)
+                        {
+                            ++counters
+                                  ->ike_create_child_install_unsupported_tx;
                         }
                         else if (no_proposal)
                         {
@@ -4821,6 +4831,11 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         if (rekey_request)
                         {
                             ++counters->ike_create_child_temp_failure_failed;
+                        }
+                        else if (install_unsupported)
+                        {
+                            ++counters
+                                  ->ike_create_child_install_unsupported_failed;
                         }
                         else if (no_proposal)
                         {
