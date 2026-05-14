@@ -4633,6 +4633,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
+                if (!sa->auth_authorized)
+                {
+                    ++counters->ike_exchange_pre_auth_dropped;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
                 if (header.message_id < sa->message_id)
                 {
                     ++counters->ike_exchange_replay_dropped;
