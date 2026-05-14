@@ -5922,7 +5922,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
-                sa->updated = time(NULL);
+                const time_t exchange_now = time(NULL);
                 if (header.exchange_type
                         == PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL
                     && protected_summary.sk_next_payload
@@ -5940,6 +5940,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     {
                         ++counters->ike_informational_empty_response_failed;
                     }
+                    sa->updated = exchange_now;
                     sa->message_id = header.message_id;
                     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                     counters->ike_sa_active = sa_table->active;
@@ -6010,6 +6011,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             {
                                 ++counters->ike_mobike_peer_migrated;
                             }
+                            sa->updated = exchange_now;
                             sa->message_id = header.message_id;
                         }
                         else
@@ -6090,6 +6092,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             {
                                 ++counters
                                       ->ike_informational_delete_response_tx;
+                                sa->updated = exchange_now;
                                 sa->message_id = header.message_id;
                             }
                             else
@@ -6344,6 +6347,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     }
                     if (!child_response_failed)
                     {
+                        sa->updated = exchange_now;
                         sa->message_id = header.message_id;
                     }
                     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
