@@ -5395,19 +5395,29 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
         return;
     }
     peer_len = msg.msg_namelen;
+
+    ++counters->datagrams_rx;
+    if (msg.msg_flags & MSG_TRUNC)
+    {
+        ++counters->datagrams_oversize;
+        return;
+    }
+    if (msg.msg_flags & MSG_CTRUNC)
+    {
+        ++counters->datagrams_malformed;
+        return;
+    }
+    if ((uint64_t)n > config->max_packet_size || (size_t)n > sizeof(packet))
+    {
+        ++counters->datagrams_oversize;
+        return;
+    }
     local_endpoint_ready =
         ikev2_helper_msg_local_endpoint(&msg, listener, &local_endpoint,
                                         &local_endpoint_len)
         || ikev2_helper_socket_local_endpoint(listener->fd, listener,
                                               &local_endpoint,
                                               &local_endpoint_len);
-
-    ++counters->datagrams_rx;
-    if ((uint64_t)n > config->max_packet_size || (size_t)n > sizeof(packet))
-    {
-        ++counters->datagrams_oversize;
-        return;
-    }
 
     struct provider_helper_ikev2_header header;
     const bool expect_natt =

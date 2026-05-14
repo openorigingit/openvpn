@@ -4559,6 +4559,86 @@ test_provider_helper_spawn_ikev2_natt_listener(void **state)
 }
 
 static void
+test_provider_helper_spawn_ikev2_rejects_oversize_datagram(void **state)
+{
+    (void)state;
+
+    if (!ikev2_helper_path)
+    {
+        skip();
+    }
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.runtime_config.max_packet_size = PROVIDER_HELPER_IPC_HEADER_SIZE;
+
+    char *const argv[] = { (char *)ikev2_helper_path, NULL };
+    assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
+                                                 argv));
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STARTING);
+
+    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 2);
+
+    uint16_t port = 0;
+    int listener_fd = test_create_udp_listener(&port);
+    const struct provider_helper_listener_fd listener = {
+        .listener_id = 1,
+        .family = AF_INET,
+        .socket_type = SOCK_DGRAM,
+        .protocol = IPPROTO_UDP,
+        .local_port = port,
+        .flags = PROVIDER_HELPER_LISTENER_FD_IKE,
+    };
+    assert_true(provider_helper_supervisor_send_listener_fd(&supervisor, listener_fd,
+                                                            &listener, 88));
+
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 3; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 3);
+
+    int response_fd = test_create_udp_sender(0x7f000006u);
+    test_send_ikev2_datagram_from(response_fd, port, 0x0badf00d01020305ull);
+    usleep(10000);
+
+    const uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 90);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+    assert_int_equal(supervisor.runtime_stats.datagrams_rx, 1);
+    assert_int_equal(supervisor.runtime_stats.datagrams_oversize, 1);
+    assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 0);
+    assert_int_equal(supervisor.runtime_stats.datagrams_malformed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
+
+    close(response_fd);
+    close(listener_fd);
+    provider_helper_supervisor_stop(&supervisor);
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
+    assert_int_equal(supervisor.ipc_fd, -1);
+}
+
+static void
 test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
 {
     (void)state;
@@ -6689,6 +6769,8 @@ main(void)
         cmocka_unit_test(test_provider_helper_reaps_early_helper_exit),
         cmocka_unit_test(test_provider_helper_reaps_after_bad_ipc_header),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_natt_listener),
+        cmocka_unit_test(
+            test_provider_helper_spawn_ikev2_rejects_oversize_datagram),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_unsupported_exchange),
         cmocka_unit_test(
             test_provider_helper_spawn_ikev2_rejects_initial_state_mismatch),
