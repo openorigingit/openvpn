@@ -5606,8 +5606,34 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     {
                         const struct sockaddr_storage old_peer = sa->peer;
                         const socklen_t old_peer_len = sa->peer_len;
+                        const bool peer_update =
+                            !peer_matches || peer_migration_candidate;
                         ++counters->ike_mobike_update_rx;
-                        if (!peer_matches || peer_migration_candidate)
+                        if (peer_update && sa->child_sa.ready
+                            && sa->child_sa.xfrm_applied)
+                        {
+                            ++counters->ike_mobike_unexpected_peer_dropped;
+                            sa->peer = peer;
+                            sa->peer_len = peer_len;
+                            if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
+                                    listener, sa, header.exchange_type,
+                                    header.message_id,
+                                    PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
+                            {
+                                ++counters->ike_mobike_update_response_tx;
+                                sa->message_id = header.message_id;
+                            }
+                            else
+                            {
+                                ++counters->ike_mobike_update_response_failed;
+                            }
+                            sa->peer = old_peer;
+                            sa->peer_len = old_peer_len;
+                            ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                            counters->ike_sa_active = sa_table->active;
+                            return;
+                        }
+                        if (peer_update)
                         {
                             sa->peer = peer;
                             sa->peer_len = peer_len;
@@ -5617,7 +5643,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                                 header.message_id))
                         {
                             ++counters->ike_mobike_update_response_tx;
-                            if (!peer_matches || peer_migration_candidate)
+                            if (peer_update)
                             {
                                 ++counters->ike_mobike_peer_migrated;
                             }
@@ -5626,7 +5652,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         else
                         {
                             ++counters->ike_mobike_update_response_failed;
-                            if (!peer_matches || peer_migration_candidate)
+                            if (peer_update)
                             {
                                 sa->peer = old_peer;
                                 sa->peer_len = old_peer_len;
