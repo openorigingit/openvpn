@@ -97,6 +97,8 @@
 #define IKEV2_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED 0x80
 #define IKEV2_HELPER_EAP_TLS_FLAGS_ALLOWED 0xe0
 #define IKEV2_HELPER_POLL_TIMEOUT_MS 1000
+#define IKEV2_HELPER_IKE_SA_INIT_MESSAGE_ID 0
+#define IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID 1
 
 static volatile sig_atomic_t helper_stop;
 
@@ -2954,6 +2956,27 @@ ikev2_helper_send_sa_init_response(
     return sent == (ssize_t)response_len;
 }
 
+static bool
+ikev2_helper_ike_sa_init_request_header_valid(
+    const struct provider_helper_ikev2_header *header)
+{
+    return header
+           && (header->flags & PROVIDER_HELPER_IKEV2_FLAG_INITIATOR)
+           && !(header->flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE)
+           && header->message_id == IKEV2_HELPER_IKE_SA_INIT_MESSAGE_ID;
+}
+
+static bool
+ikev2_helper_initial_ike_auth_request_header_valid(
+    const struct provider_helper_ikev2_header *header)
+{
+    /* Follow-up EAP IKE_AUTH exchanges need explicit state before admission. */
+    return header
+           && (header->flags & PROVIDER_HELPER_IKEV2_FLAG_INITIATOR)
+           && !(header->flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE)
+           && header->message_id == IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID;
+}
+
 static void
 ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                              const struct provider_helper_runtime_config *config,
@@ -2998,6 +3021,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
         if (header.exchange_type == PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT
             && !(header.flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE))
         {
+            if (!ikev2_helper_ike_sa_init_request_header_valid(&header))
+            {
+                ++counters->datagrams_malformed;
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
             struct provider_helper_ikev2_payload_summary summary;
             const enum provider_helper_ikev2_parse_result init_result =
                 provider_helper_ikev2_validate_ike_sa_init_request(
@@ -3156,6 +3185,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                  && !(header.flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE))
         {
             ++counters->ike_auth_rx;
+            if (!ikev2_helper_initial_ike_auth_request_header_valid(&header))
+            {
+                ++counters->ike_auth_malformed;
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
             struct provider_helper_ikev2_payload_summary summary;
             const enum provider_helper_ikev2_parse_result auth_result =
                 provider_helper_ikev2_validate_ike_auth_request(

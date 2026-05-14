@@ -1215,7 +1215,7 @@ test_make_der_certificate(uint8_t *der, size_t der_size, size_t *der_len)
 }
 
 static size_t
-test_make_encrypted_ike_auth_packet(
+test_make_encrypted_ike_auth_message_id_packet(
     uint8_t *packet,
     size_t packet_size,
     uint64_t initiator_spi,
@@ -1223,7 +1223,8 @@ test_make_encrypted_ike_auth_packet(
     bool natt,
     bool malformed_inner,
     const uint8_t *cert_der,
-    size_t cert_der_len)
+    size_t cert_der_len,
+    uint32_t message_id)
 {
     uint8_t sk_ei[TEST_IKEV2_AES_GCM_KEYMAT_BYTES];
     assert_true(test_derive_ike_auth_keymat(initiator_spi, material, sk_ei,
@@ -1297,7 +1298,7 @@ test_make_encrypted_ike_auth_packet(
                            material->responder_spi, (uint32_t)ike_len);
     test_write_be64(packet + offset, initiator_spi);
     packet[offset + 16] = PROVIDER_HELPER_IKEV2_PAYLOAD_SK;
-    test_write_be32(packet + offset + 20, 1);
+    test_write_be32(packet + offset + 20, message_id);
     size_t pos = offset + PROVIDER_HELPER_IKEV2_HEADER_SIZE;
     test_add_ikev2_payload(packet, pos, PROVIDER_HELPER_IKEV2_PAYLOAD_IDI,
                            (uint16_t)sk_len, 0);
@@ -1336,14 +1337,35 @@ test_make_encrypted_ike_auth_packet(
     secure_memzero(nonce, sizeof(nonce));
     return packet_len;
 }
+
+static size_t
+test_make_encrypted_ike_auth_packet(
+    uint8_t *packet,
+    size_t packet_size,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt,
+    bool malformed_inner,
+    const uint8_t *cert_der,
+    size_t cert_der_len)
+{
+    return test_make_encrypted_ike_auth_message_id_packet(
+        packet, packet_size, initiator_spi, material, natt, malformed_inner,
+        cert_der, cert_der_len, 1);
+}
 #endif
 
 static void
-test_send_ikev2_datagram_from(int fd, uint16_t port, uint64_t initiator_spi)
+test_send_ikev2_sa_init_header_fields_from(int fd, uint16_t port,
+                                           uint64_t initiator_spi,
+                                           uint8_t flags,
+                                           uint32_t message_id)
 {
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     const size_t packet_len = test_make_ike_sa_init_packet(packet, sizeof(packet));
     test_write_be64(packet, initiator_spi);
+    packet[19] = flags;
+    test_write_be32(packet + 20, message_id);
 
     struct sockaddr_in addr;
     CLEAR(addr);
@@ -1354,6 +1376,13 @@ test_send_ikev2_datagram_from(int fd, uint16_t port, uint64_t initiator_spi)
     assert_int_equal(sendto(fd, packet, packet_len, 0,
                             (struct sockaddr *)&addr, sizeof(addr)),
                      packet_len);
+}
+
+static void
+test_send_ikev2_datagram_from(int fd, uint16_t port, uint64_t initiator_spi)
+{
+    test_send_ikev2_sa_init_header_fields_from(
+        fd, port, initiator_spi, PROVIDER_HELPER_IKEV2_FLAG_INITIATOR, 0);
 }
 
 static void
@@ -1440,6 +1469,34 @@ test_send_ikev2_encrypted_ike_auth_datagram_from(
     const size_t packet_len = test_make_encrypted_ike_auth_packet(
         packet, sizeof(packet), initiator_spi, material, natt, malformed_inner,
         cert_der, cert_der_len);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    assert_int_equal(sendto(fd, packet, packet_len, 0,
+                            (struct sockaddr *)&addr, sizeof(addr)),
+                     packet_len);
+}
+
+static void
+test_send_ikev2_encrypted_ike_auth_message_id_datagram_from(
+    int fd,
+    uint16_t port,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt,
+    bool malformed_inner,
+    const uint8_t *cert_der,
+    size_t cert_der_len,
+    uint32_t message_id)
+{
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t packet_len = test_make_encrypted_ike_auth_message_id_packet(
+        packet, sizeof(packet), initiator_spi, material, natt, malformed_inner,
+        cert_der, cert_der_len, message_id);
 
     struct sockaddr_in addr;
     CLEAR(addr);
@@ -2600,7 +2657,8 @@ test_provider_helper_spawn_ikev2_natt_listener(void **state)
     provider_helper_supervisor_init(&supervisor);
 
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
-    assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path, argv));
+    assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
+                                                 argv));
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STARTING);
 
     for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
@@ -2746,6 +2804,140 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_exchange_unsupported, 2);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
 
+    provider_helper_supervisor_stop(&supervisor);
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
+    assert_int_equal(supervisor.ipc_fd, -1);
+}
+
+static void
+test_provider_helper_spawn_ikev2_rejects_initial_state_mismatch(void **state)
+{
+    (void)state;
+
+    if (!ikev2_helper_path)
+    {
+        skip();
+    }
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+
+    char *const argv[] = { (char *)ikev2_helper_path, NULL };
+    assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path, argv));
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STARTING);
+
+    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 2);
+
+    uint16_t port = 0;
+    int listener_fd = test_create_udp_listener(&port);
+    const struct provider_helper_listener_fd listener = {
+        .listener_id = 1,
+        .family = AF_INET,
+        .socket_type = SOCK_DGRAM,
+        .protocol = IPPROTO_UDP,
+        .local_port = port,
+        .flags = PROVIDER_HELPER_LISTENER_FD_IKE,
+    };
+    assert_true(provider_helper_supervisor_send_listener_fd(&supervisor, listener_fd,
+                                                            &listener, 88));
+
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 3; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 3);
+
+    uint16_t natt_port = 0;
+    int natt_listener_fd = test_create_udp_listener(&natt_port);
+    const struct provider_helper_listener_fd natt_listener = {
+        .listener_id = 2,
+        .family = AF_INET,
+        .socket_type = SOCK_DGRAM,
+        .protocol = IPPROTO_UDP,
+        .local_port = natt_port,
+        .flags = PROVIDER_HELPER_LISTENER_FD_NATT,
+    };
+    assert_true(provider_helper_supervisor_send_listener_fd(
+                    &supervisor, natt_listener_fd, &natt_listener, 89));
+
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 4; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 4);
+
+    int bad_init_fd = test_create_udp_sender(0x7f00000au);
+    test_send_ikev2_sa_init_header_fields_from(
+        bad_init_fd, port, 0x0bad000000000001ull,
+        PROVIDER_HELPER_IKEV2_FLAG_INITIATOR, 1);
+    test_send_ikev2_sa_init_header_fields_from(
+        bad_init_fd, port, 0x0bad000000000002ull, 0, 0);
+    close(bad_init_fd);
+
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    int response_fd = test_create_udp_sender(0x7f00000bu);
+    const uint64_t initiator_spi = 0x0bad000000000003ull;
+    test_send_ikev2_datagram_from(response_fd, port, initiator_spi);
+    usleep(10000);
+    struct test_ikev2_sa_init_response_material sa_init_material;
+    assert_true(test_recv_ikev2_sa_init_response_material(
+                    response_fd, initiator_spi, &sa_init_material) != 0);
+
+    uint8_t cert_der[2048];
+    size_t cert_der_len = 0;
+    test_make_der_certificate(cert_der, sizeof(cert_der), &cert_der_len);
+    test_send_ikev2_encrypted_ike_auth_message_id_datagram_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, false,
+        cert_der, cert_der_len, 2);
+    usleep(10000);
+#endif
+
+    uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 90);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+    assert_true(supervisor.runtime_stats.datagrams_rx >= 2);
+    assert_true(supervisor.runtime_stats.datagrams_parsed >= 2);
+    assert_true(supervisor.runtime_stats.datagrams_malformed >= 2);
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    assert_int_equal(supervisor.runtime_stats.ike_sa_init_accepted, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_rx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_malformed, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_decrypted, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_request_tx, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
+    close(response_fd);
+#else
+    assert_int_equal(supervisor.runtime_stats.ike_sa_init_accepted, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_rx, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_malformed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
+#endif
+
+    close(listener_fd);
+    close(natt_listener_fd);
     provider_helper_supervisor_stop(&supervisor);
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
     assert_int_equal(supervisor.ipc_fd, -1);
@@ -3484,6 +3676,8 @@ main(void)
         cmocka_unit_test(test_provider_helper_spawn_noop),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_natt_listener),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_unsupported_exchange),
+        cmocka_unit_test(
+            test_provider_helper_spawn_ikev2_rejects_initial_state_mismatch),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_scaffold),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_auth_allow_unsupported),
     };
