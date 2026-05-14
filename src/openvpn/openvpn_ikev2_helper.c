@@ -55,6 +55,7 @@
 
 #include "provider_helper.h"
 #include "provider_xfrm.h"
+#include "provider_xfrm_linux.h"
 
 #include "memdbg.h"
 
@@ -3902,8 +3903,13 @@ ikev2_helper_build_child_sa_xfrm_plan(
     };
 
     struct provider_xfrm_result result;
-    return provider_xfrm_child_sa_plan_build(&child->xfrm_plan, &spec,
-                                             &result);
+    struct provider_xfrm_linux_message_plan messages;
+    const bool ret = provider_xfrm_child_sa_plan_build(&child->xfrm_plan,
+                                                       &spec, &result)
+                     && provider_xfrm_linux_child_sa_messages_build(
+                         &messages, &child->xfrm_plan, &result);
+    provider_xfrm_linux_message_plan_clear(&messages);
+    return ret;
 }
 
 static bool
