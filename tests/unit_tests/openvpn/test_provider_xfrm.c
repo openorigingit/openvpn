@@ -86,6 +86,8 @@ default_child_sa_spec(void)
         .reqid = 1100,
         .local_outer_ipv4 = 0xc633640a,
         .remote_outer_ipv4 = 0xcb007114,
+        .local_outer_port = 4500,
+        .remote_outer_port = 53124,
         .local_ts = {
             .start_addr = 0x0a580001,
             .end_addr = 0x0a580001,
@@ -287,6 +289,8 @@ test_provider_xfrm_builds_child_sa_plan(void **state)
     assert_int_equal(plan.inbound.direction, PROVIDER_XFRM_DIRECTION_IN);
     assert_int_equal(plan.inbound.src_outer_ipv4, spec.remote_outer_ipv4);
     assert_int_equal(plan.inbound.dst_outer_ipv4, spec.local_outer_ipv4);
+    assert_int_equal(plan.inbound.src_outer_port, spec.remote_outer_port);
+    assert_int_equal(plan.inbound.dst_outer_port, spec.local_outer_port);
     assert_memory_equal(&plan.inbound.src_ts, &spec.remote_ts,
                         sizeof(plan.inbound.src_ts));
     assert_memory_equal(&plan.inbound.dst_ts, &spec.local_ts,
@@ -305,6 +309,8 @@ test_provider_xfrm_builds_child_sa_plan(void **state)
     assert_int_equal(plan.outbound.direction, PROVIDER_XFRM_DIRECTION_OUT);
     assert_int_equal(plan.outbound.src_outer_ipv4, spec.local_outer_ipv4);
     assert_int_equal(plan.outbound.dst_outer_ipv4, spec.remote_outer_ipv4);
+    assert_int_equal(plan.outbound.src_outer_port, spec.local_outer_port);
+    assert_int_equal(plan.outbound.dst_outer_port, spec.remote_outer_port);
     assert_memory_equal(&plan.outbound.src_ts, &spec.local_ts,
                         sizeof(plan.outbound.src_ts));
     assert_memory_equal(&plan.outbound.dst_ts, &spec.remote_ts,
@@ -347,6 +353,12 @@ test_provider_xfrm_rejects_invalid_child_sa_plan(void **state)
     assert_false(provider_xfrm_child_sa_plan_build(&plan, &spec, &result));
     assert_false(result.ok);
     assert_non_null(strstr(result.reason, "distinct"));
+
+    spec = default_child_sa_spec();
+    spec.remote_outer_port = 0;
+    assert_false(provider_xfrm_child_sa_plan_build(&plan, &spec, &result));
+    assert_false(result.ok);
+    assert_non_null(strstr(result.reason, "UDP ports"));
 
     spec = default_child_sa_spec();
     spec.initiator_to_responder_key_len = sizeof(default_i2r_key) - 1;

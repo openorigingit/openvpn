@@ -3819,11 +3819,12 @@ ikev2_helper_count_child_sa_scaffolds(
 }
 
 static bool
-ikev2_helper_sockaddr_ipv4_host(const struct sockaddr_storage *addr,
-                                socklen_t addr_len,
-                                uint32_t *host_ipv4)
+ikev2_helper_sockaddr_ipv4_endpoint(const struct sockaddr_storage *addr,
+                                    socklen_t addr_len,
+                                    uint32_t *host_ipv4,
+                                    uint16_t *host_port)
 {
-    if (!addr || !host_ipv4 || addr->ss_family != AF_INET
+    if (!addr || !host_ipv4 || !host_port || addr->ss_family != AF_INET
         || addr_len < sizeof(struct sockaddr_in))
     {
         return false;
@@ -3831,7 +3832,8 @@ ikev2_helper_sockaddr_ipv4_host(const struct sockaddr_storage *addr,
 
     const struct sockaddr_in *in = (const struct sockaddr_in *)addr;
     *host_ipv4 = ntohl(in->sin_addr.s_addr);
-    return *host_ipv4 != 0;
+    *host_port = ntohs(in->sin_port);
+    return *host_ipv4 != 0 && *host_port != 0;
 }
 
 static enum provider_xfrm_cipher
@@ -3860,11 +3862,15 @@ ikev2_helper_build_child_sa_xfrm_plan(
 
     uint32_t local_outer_ipv4 = 0;
     uint32_t remote_outer_ipv4 = 0;
-    if (!ikev2_helper_sockaddr_ipv4_host(&sa->local_endpoint,
-                                         sa->local_endpoint_len,
-                                         &local_outer_ipv4)
-        || !ikev2_helper_sockaddr_ipv4_host(&sa->peer, sa->peer_len,
-                                            &remote_outer_ipv4))
+    uint16_t local_outer_port = 0;
+    uint16_t remote_outer_port = 0;
+    if (!ikev2_helper_sockaddr_ipv4_endpoint(&sa->local_endpoint,
+                                             sa->local_endpoint_len,
+                                             &local_outer_ipv4,
+                                             &local_outer_port)
+        || !ikev2_helper_sockaddr_ipv4_endpoint(&sa->peer, sa->peer_len,
+                                                &remote_outer_ipv4,
+                                                &remote_outer_port))
     {
         return false;
     }
@@ -3880,6 +3886,8 @@ ikev2_helper_build_child_sa_xfrm_plan(
         .reqid = lease->reqid,
         .local_outer_ipv4 = local_outer_ipv4,
         .remote_outer_ipv4 = remote_outer_ipv4,
+        .local_outer_port = local_outer_port,
+        .remote_outer_port = remote_outer_port,
         .local_ts = *local_ts,
         .remote_ts = *remote_ts,
         .initiator_inbound_spi = child->initiator_spi,

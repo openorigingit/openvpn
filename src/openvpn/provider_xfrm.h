@@ -49,6 +49,8 @@ struct provider_xfrm_child_sa_state {
     enum provider_xfrm_direction direction;
     uint32_t src_outer_ipv4;
     uint32_t dst_outer_ipv4;
+    uint16_t src_outer_port;
+    uint16_t dst_outer_port;
     struct provider_xfrm_ipv4_selector src_ts;
     struct provider_xfrm_ipv4_selector dst_ts;
     uint32_t spi;
@@ -80,6 +82,8 @@ struct provider_xfrm_child_sa_spec {
     uint32_t reqid;
     uint32_t local_outer_ipv4;
     uint32_t remote_outer_ipv4;
+    uint16_t local_outer_port;
+    uint16_t remote_outer_port;
     struct provider_xfrm_ipv4_selector local_ts;
     struct provider_xfrm_ipv4_selector remote_ts;
     uint32_t initiator_inbound_spi;

@@ -197,6 +197,8 @@ provider_xfrm_child_sa_state_build(
     enum provider_xfrm_direction direction,
     uint32_t src_outer_ipv4,
     uint32_t dst_outer_ipv4,
+    uint16_t src_outer_port,
+    uint16_t dst_outer_port,
     const struct provider_xfrm_ipv4_selector *src_ts,
     const struct provider_xfrm_ipv4_selector *dst_ts,
     uint32_t spi,
@@ -209,6 +211,8 @@ provider_xfrm_child_sa_state_build(
     state->direction = direction;
     state->src_outer_ipv4 = src_outer_ipv4;
     state->dst_outer_ipv4 = dst_outer_ipv4;
+    state->src_outer_port = src_outer_port;
+    state->dst_outer_port = dst_outer_port;
     state->src_ts = *src_ts;
     state->dst_ts = *dst_ts;
     state->spi = spi;
@@ -470,6 +474,14 @@ provider_xfrm_child_sa_plan_build(struct provider_xfrm_child_sa_plan *plan,
         return false;
     }
 
+    if (!spec->local_outer_port || !spec->remote_outer_port)
+    {
+        provider_xfrm_set_error(
+            result,
+            "local and remote outer UDP ports are required");
+        return false;
+    }
+
     if (!provider_xfrm_ipv4_selector_valid(&spec->local_ts)
         || !provider_xfrm_ipv4_selector_valid(&spec->remote_ts))
     {
@@ -508,6 +520,7 @@ provider_xfrm_child_sa_plan_build(struct provider_xfrm_child_sa_plan *plan,
     if (!provider_xfrm_child_sa_state_build(
             &plan->inbound, PROVIDER_XFRM_DIRECTION_IN,
             spec->remote_outer_ipv4, spec->local_outer_ipv4,
+            spec->remote_outer_port, spec->local_outer_port,
             &spec->remote_ts, &spec->local_ts, spec->responder_inbound_spi,
             spec, spec->initiator_to_responder_key,
             spec->initiator_to_responder_key_len, result))
@@ -519,6 +532,7 @@ provider_xfrm_child_sa_plan_build(struct provider_xfrm_child_sa_plan *plan,
     if (!provider_xfrm_child_sa_state_build(
             &plan->outbound, PROVIDER_XFRM_DIRECTION_OUT,
             spec->local_outer_ipv4, spec->remote_outer_ipv4,
+            spec->local_outer_port, spec->remote_outer_port,
             &spec->local_ts, &spec->remote_ts, spec->initiator_inbound_spi,
             spec, spec->responder_to_initiator_key,
             spec->responder_to_initiator_key_len, result))
