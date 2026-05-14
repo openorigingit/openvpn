@@ -97,7 +97,8 @@
 #define IKEV2_HELPER_EAP_CODE_FAILURE 4
 #define IKEV2_HELPER_EAP_TYPE_TLS 13
 #define IKEV2_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED 0x80
-#define IKEV2_HELPER_EAP_TLS_FLAGS_ALLOWED 0xe0
+#define IKEV2_HELPER_EAP_TLS_FLAGS_ALLOWED \
+    IKEV2_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED
 #define IKEV2_HELPER_POLL_TIMEOUT_MS 1000
 #define IKEV2_HELPER_IKE_SA_INIT_MESSAGE_ID 0
 #define IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID 1
@@ -1769,7 +1770,7 @@ ikev2_helper_validate_eap_tls_payload(
     {
         return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
     }
-    if (tls_message_len && fragment_len > tls_message_len)
+    if (tls_message_len && fragment_len != tls_message_len)
     {
         return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
     }
