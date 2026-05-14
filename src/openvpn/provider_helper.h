@@ -35,7 +35,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 36
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  376
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  392
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
 #define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
@@ -175,6 +175,7 @@ enum provider_helper_ikev2_payload_type {
 
 #define PROVIDER_HELPER_IKEV2_NOTIFY_NO_PROPOSAL_CHOSEN 14
 #define PROVIDER_HELPER_IKEV2_NOTIFY_INVALID_KE_PAYLOAD 17
+#define PROVIDER_HELPER_IKEV2_NOTIFY_AUTHENTICATION_FAILED 24
 #define PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE 16390
 
 enum provider_helper_ikev2_parse_result {
@@ -319,6 +320,8 @@ struct provider_helper_runtime_stats {
     uint64_t ike_auth_request_pending_dropped;
     uint64_t ike_auth_request_failed;
     uint64_t ike_auth_denied;
+    uint64_t ike_auth_deny_response_tx;
+    uint64_t ike_auth_deny_response_failed;
     uint64_t ike_auth_allow_unsupported;
     uint64_t ike_auth_unsupported;
 };

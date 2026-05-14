@@ -284,6 +284,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_auth_request_pending_dropped = 39,
         .ike_auth_request_failed = 40,
         .ike_auth_denied = 41,
+        .ike_auth_deny_response_tx = 45,
+        .ike_auth_deny_response_failed = 46,
         .ike_auth_allow_unsupported = 42,
         .ike_auth_unsupported = 43,
     };
@@ -367,6 +369,10 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
     assert_int_equal(output.ike_auth_request_failed,
                      input.ike_auth_request_failed);
     assert_int_equal(output.ike_auth_denied, input.ike_auth_denied);
+    assert_int_equal(output.ike_auth_deny_response_tx,
+                     input.ike_auth_deny_response_tx);
+    assert_int_equal(output.ike_auth_deny_response_failed,
+                     input.ike_auth_deny_response_failed);
     assert_int_equal(output.ike_auth_allow_unsupported,
                      input.ike_auth_allow_unsupported);
     assert_int_equal(output.ike_auth_unsupported, input.ike_auth_unsupported);
@@ -951,12 +957,16 @@ test_derive_ike_auth_keymat(
     uint64_t initiator_spi,
     const struct test_ikev2_sa_init_response_material *material,
     uint8_t *sk_ei,
-    size_t sk_ei_len)
+    size_t sk_ei_len,
+    uint8_t *sk_er,
+    size_t sk_er_len)
 {
     if (!material || material->responder_ke_len
                      != PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES
         || material->responder_nonce_len != TEST_IKEV2_PRF_SHA256_BYTES
-        || !sk_ei || sk_ei_len != TEST_IKEV2_AES_GCM_KEYMAT_BYTES)
+        || (!sk_ei && !sk_er)
+        || (sk_ei && sk_ei_len != TEST_IKEV2_AES_GCM_KEYMAT_BYTES)
+        || (sk_er && sk_er_len != TEST_IKEV2_AES_GCM_KEYMAT_BYTES))
     {
         return false;
     }
@@ -999,7 +1009,16 @@ test_derive_ike_auth_keymat(
                                           seed_len, keymat, sizeof(keymat));
     if (ret)
     {
-        memcpy(sk_ei, keymat + TEST_IKEV2_PRF_SHA256_BYTES, sk_ei_len);
+        const uint8_t *pos = keymat + TEST_IKEV2_PRF_SHA256_BYTES;
+        if (sk_ei)
+        {
+            memcpy(sk_ei, pos, sk_ei_len);
+        }
+        pos += TEST_IKEV2_AES_GCM_KEYMAT_BYTES;
+        if (sk_er)
+        {
+            memcpy(sk_er, pos, sk_er_len);
+        }
     }
 
     secure_memzero(initiator_nonce, sizeof(initiator_nonce));
@@ -1040,6 +1059,52 @@ test_aes_gcm_encrypt(const uint8_t *key, size_t key_len,
         && EVP_EncryptFinal_ex(ctx, ciphertext + out_len, &final_len) == 1
         && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG,
                                TEST_IKEV2_AES_GCM_TAG_BYTES, tag) == 1;
+    EVP_CIPHER_CTX_free(ctx);
+    return ret;
+}
+
+static bool
+test_aes_gcm_decrypt(const uint8_t *key, size_t key_len,
+                     const uint8_t *nonce, size_t nonce_len,
+                     const uint8_t *aad, size_t aad_len,
+                     const uint8_t *ciphertext, size_t ciphertext_len,
+                     const uint8_t *tag, size_t tag_len,
+                     uint8_t *plaintext, size_t plaintext_size,
+                     size_t *plaintext_len)
+{
+    if (plaintext_len)
+    {
+        *plaintext_len = 0;
+    }
+    if (!key || key_len != 32 || !nonce || nonce_len != 12
+        || !aad || aad_len > INT_MAX
+        || !ciphertext || ciphertext_len > INT_MAX
+        || !tag || tag_len != TEST_IKEV2_AES_GCM_TAG_BYTES
+        || !plaintext || plaintext_size < ciphertext_len || !plaintext_len)
+    {
+        return false;
+    }
+
+    const EVP_CIPHER *cipher = EVP_aes_256_gcm();
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    int out_len = 0;
+    int final_len = 0;
+    const bool ret =
+        ctx
+        && EVP_DecryptInit_ex(ctx, cipher, NULL, NULL, NULL) == 1
+        && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, (int)nonce_len,
+                               NULL) == 1
+        && EVP_DecryptInit_ex(ctx, NULL, NULL, key, nonce) == 1
+        && EVP_DecryptUpdate(ctx, NULL, &out_len, aad, (int)aad_len) == 1
+        && EVP_DecryptUpdate(ctx, plaintext, &out_len, ciphertext,
+                             (int)ciphertext_len) == 1
+        && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, (int)tag_len,
+                               (void *)tag) == 1
+        && EVP_DecryptFinal_ex(ctx, plaintext + out_len, &final_len) == 1;
+    if (ret)
+    {
+        *plaintext_len = (size_t)(out_len + final_len);
+    }
     EVP_CIPHER_CTX_free(ctx);
     return ret;
 }
@@ -1102,7 +1167,7 @@ test_make_encrypted_ike_auth_packet(
 {
     uint8_t sk_ei[TEST_IKEV2_AES_GCM_KEYMAT_BYTES];
     assert_true(test_derive_ike_auth_keymat(initiator_spi, material, sk_ei,
-                                            sizeof(sk_ei)));
+                                            sizeof(sk_ei), NULL, 0));
 
     uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     CLEAR(plaintext);
@@ -1561,6 +1626,94 @@ test_recv_ikev2_natt_sa_init_response(int fd, uint64_t initiator_spi)
     return test_recv_ikev2_sa_init_response_material_impl(
         fd, initiator_spi, NULL, true);
 }
+
+#if defined(ENABLE_CRYPTO_OPENSSL)
+static void
+test_recv_ikev2_auth_failed_response(
+    int fd,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material)
+{
+    uint8_t response[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    struct sockaddr_in from;
+    socklen_t from_len = sizeof(from);
+    struct pollfd pfd = {
+        .fd = fd,
+        .events = POLLIN,
+    };
+    struct provider_helper_ikev2_header header;
+    struct provider_helper_ikev2_payload_summary summary;
+
+    assert_non_null(material);
+    assert_int_equal(poll(&pfd, 1, 1000), 1);
+    assert_true(pfd.revents & POLLIN);
+    const ssize_t n = recvfrom(fd, response, sizeof(response), 0,
+                               (struct sockaddr *)&from, &from_len);
+    assert_true(n > 0);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         response, (size_t)n, PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE,
+                         false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_parse_payloads(
+                         response, (size_t)n, &header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(header.initiator_spi, initiator_spi);
+    assert_int_equal(header.responder_spi, material->responder_spi);
+    assert_int_equal(header.exchange_type,
+                     PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH);
+    assert_int_equal(header.flags, PROVIDER_HELPER_IKEV2_FLAG_RESPONSE);
+    assert_int_equal(header.message_id, 1);
+    assert_true(summary.saw_sk);
+    assert_int_equal(summary.sk_count, 1);
+    assert_int_equal(summary.sk_next_payload,
+                     PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY);
+    assert_true(summary.sk_len > TEST_IKEV2_AES_GCM_IV_BYTES
+                                 + TEST_IKEV2_AES_GCM_TAG_BYTES);
+
+    uint8_t sk_er[TEST_IKEV2_AES_GCM_KEYMAT_BYTES];
+    assert_true(test_derive_ike_auth_keymat(initiator_spi, material, NULL, 0,
+                                            sk_er, sizeof(sk_er)));
+
+    const uint8_t *iv = response + summary.sk_offset;
+    const uint8_t *ciphertext = iv + TEST_IKEV2_AES_GCM_IV_BYTES;
+    const size_t ciphertext_len = summary.sk_len
+                                  - TEST_IKEV2_AES_GCM_IV_BYTES
+                                  - TEST_IKEV2_AES_GCM_TAG_BYTES;
+    const uint8_t *tag = response + summary.sk_offset + summary.sk_len
+                         - TEST_IKEV2_AES_GCM_TAG_BYTES;
+    uint8_t nonce[TEST_IKEV2_AES_GCM_SALT_BYTES
+                  + TEST_IKEV2_AES_GCM_IV_BYTES];
+    memcpy(nonce, sk_er + 32, TEST_IKEV2_AES_GCM_SALT_BYTES);
+    memcpy(nonce + TEST_IKEV2_AES_GCM_SALT_BYTES, iv,
+           TEST_IKEV2_AES_GCM_IV_BYTES);
+
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    size_t plaintext_len = 0;
+    assert_true(test_aes_gcm_decrypt(
+                    sk_er, 32, nonce, sizeof(nonce),
+                    response + header.header_offset,
+                    summary.sk_offset - header.header_offset, ciphertext,
+                    ciphertext_len, tag, TEST_IKEV2_AES_GCM_TAG_BYTES,
+                    plaintext, sizeof(plaintext), &plaintext_len));
+    assert_true(plaintext_len >= PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE + 1);
+    const size_t padding_len = (size_t)plaintext[plaintext_len - 1] + 1;
+    assert_true(padding_len <= plaintext_len);
+    const size_t payload_len = plaintext_len - padding_len;
+    assert_int_equal(payload_len, PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE);
+    assert_int_equal(plaintext[0], PROVIDER_HELPER_IKEV2_PAYLOAD_NONE);
+    assert_int_equal(plaintext[1], 0);
+    assert_int_equal((((uint16_t)plaintext[2]) << 8) | plaintext[3],
+                     PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE);
+    assert_int_equal(plaintext[4], 0);
+    assert_int_equal(plaintext[5], 0);
+    assert_int_equal((((uint16_t)plaintext[6]) << 8) | plaintext[7],
+                     PROVIDER_HELPER_IKEV2_NOTIFY_AUTHENTICATION_FAILED);
+
+    secure_memzero(sk_er, sizeof(sk_er));
+    secure_memzero(nonce, sizeof(nonce));
+    secure_memzero(plaintext, sizeof(plaintext));
+}
+#endif
 
 struct test_cookie_mac_ctx {
     uint8_t seed;
@@ -2709,7 +2862,6 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
                                            0xfeedfacecafebeefull,
                                            0x0102030405060708ull);
     usleep(10000);
-    close(response_fd);
 
     int datagram_fd = test_create_udp_sender(0);
 
@@ -2749,7 +2901,10 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_memory_equal(cb_state.request.cert_serial, "1234", strlen("1234"));
     assert_true(cb_state.request.cert_issuer_len > 0);
     assert_non_null(strstr(cb_state.request.cert_issuer, "Test IKEv2 CA"));
+    test_recv_ikev2_auth_failed_response(response_fd, 0xfeedfacecafebeefull,
+                                         &sa_init_material);
 #endif
+    close(response_fd);
 
     for (int attempt = 0;
          attempt < 20 && supervisor.runtime_stats.ike_sa_active < 2;
@@ -2878,6 +3033,8 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
         supervisor.runtime_stats.ike_auth_request_pending_dropped >= 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_request_failed, 0);
     assert_true(supervisor.runtime_stats.ike_auth_denied >= 1);
+    assert_true(supervisor.runtime_stats.ike_auth_deny_response_tx >= 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_deny_response_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_allow_unsupported, 0);
 #else
     assert_int_equal(supervisor.runtime_stats.ike_auth_decrypted, 0);
@@ -2893,6 +3050,8 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
         supervisor.runtime_stats.ike_auth_request_pending_dropped, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_request_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_denied, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_deny_response_tx, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_deny_response_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_allow_unsupported, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 0);
 #endif

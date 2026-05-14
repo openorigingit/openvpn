@@ -178,6 +178,30 @@ ikev2_helper_signal_handler(int signum)
     helper_stop = 1;
 }
 
+static void
+ikev2_helper_write_be16(uint8_t **pos, uint16_t value)
+{
+    const uint16_t net_value = htons(value);
+    memcpy(*pos, &net_value, sizeof(net_value));
+    *pos += sizeof(net_value);
+}
+
+static void
+ikev2_helper_write_be32(uint8_t **pos, uint32_t value)
+{
+    const uint32_t net_value = htonl(value);
+    memcpy(*pos, &net_value, sizeof(net_value));
+    *pos += sizeof(net_value);
+}
+
+static void
+ikev2_helper_write_be64(uint8_t **pos, uint64_t value)
+{
+    const uint64_t net_value = htonll(value);
+    memcpy(*pos, &net_value, sizeof(net_value));
+    *pos += sizeof(net_value);
+}
+
 static bool
 ikev2_helper_install_signals(void)
 {
@@ -1963,6 +1987,75 @@ ikev2_helper_aes_gcm_decrypt(const uint8_t *key, size_t key_len,
 }
 
 static bool
+ikev2_helper_aes_gcm_encrypt(const uint8_t *key, size_t key_len,
+                             const uint8_t *nonce, size_t nonce_len,
+                             const uint8_t *aad, size_t aad_len,
+                             const uint8_t *plaintext, size_t plaintext_len,
+                             uint8_t *ciphertext, size_t ciphertext_size,
+                             uint8_t *tag, size_t tag_len)
+{
+    if (!key || (key_len != 16 && key_len != 32)
+        || !nonce || nonce_len != IKEV2_HELPER_AES_GCM_NONCE_BYTES
+        || !aad || aad_len > INT_MAX
+        || !plaintext || plaintext_len > INT_MAX
+        || !ciphertext || ciphertext_size < plaintext_len
+        || !tag || tag_len != IKEV2_HELPER_AES_GCM_TAG_BYTES)
+    {
+        return false;
+    }
+
+    bool ret = false;
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    const EVP_CIPHER *cipher = key_len == 16 ? EVP_aes_128_gcm()
+                                             : EVP_aes_256_gcm();
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    int out_len = 0;
+    int final_len = 0;
+    if (ctx
+        && EVP_EncryptInit_ex(ctx, cipher, NULL, NULL, NULL) == 1
+        && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, (int)nonce_len,
+                               NULL) == 1
+        && EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) == 1
+        && EVP_EncryptUpdate(ctx, NULL, &out_len, aad, (int)aad_len) == 1
+        && EVP_EncryptUpdate(ctx, ciphertext, &out_len, plaintext,
+                             (int)plaintext_len) == 1
+        && EVP_EncryptFinal_ex(ctx, ciphertext + out_len, &final_len) == 1
+        && (size_t)(out_len + final_len) == plaintext_len
+        && EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, (int)tag_len,
+                               tag) == 1)
+    {
+        ret = true;
+    }
+    EVP_CIPHER_CTX_free(ctx);
+#elif defined(ENABLE_CRYPTO_MBEDTLS) && defined(MBEDTLS_GCM_C)
+    mbedtls_gcm_context ctx;
+    mbedtls_gcm_init(&ctx);
+    ret = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key,
+                             (unsigned int)(key_len * 8)) == 0
+          && mbedtls_gcm_crypt_and_tag(
+              &ctx, MBEDTLS_GCM_ENCRYPT, plaintext_len, nonce, nonce_len, aad,
+              aad_len, plaintext, ciphertext, tag_len, tag) == 0;
+    mbedtls_gcm_free(&ctx);
+#else
+    (void)key;
+    (void)key_len;
+    (void)nonce;
+    (void)nonce_len;
+    (void)aad;
+    (void)aad_len;
+    (void)plaintext;
+    (void)plaintext_len;
+#endif
+
+    if (!ret)
+    {
+        ikev2_helper_secure_zero(ciphertext, ciphertext_size);
+        ikev2_helper_secure_zero(tag, tag_len);
+    }
+    return ret;
+}
+
+static bool
 ikev2_helper_decrypt_ike_auth_sk(
     const struct ikev2_helper_ike_sa *sa,
     const uint8_t *packet,
@@ -2261,13 +2354,163 @@ ikev2_helper_clear_ike_sa(struct ikev2_helper_ike_sa_table *table,
     }
 }
 
+static const struct ikev2_helper_listener *
+ikev2_helper_find_listener(const struct ikev2_helper_listener *listeners,
+                           size_t listener_count,
+                           uint32_t listener_id)
+{
+    if (!listeners || !listener_id)
+    {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < listener_count; ++i)
+    {
+        if (listeners[i].descriptor.listener_id == listener_id)
+        {
+            return &listeners[i];
+        }
+    }
+    return NULL;
+}
+
+static bool
+ikev2_helper_build_auth_failed_response(
+    uint8_t *response,
+    size_t response_size,
+    size_t *response_len,
+    const struct ikev2_helper_listener *listener,
+    const struct ikev2_helper_ike_sa *sa)
+{
+    if (response_len)
+    {
+        *response_len = 0;
+    }
+    if (!response || !response_len || !listener || !sa || !sa->active
+        || !sa->initiator_spi || !sa->responder_spi || !sa->message_id
+        || sa->sk_er_len <= IKEV2_HELPER_AES_GCM_SALT_BYTES
+        || sa->sk_er_len > sizeof(sa->sk_er))
+    {
+        return false;
+    }
+
+    uint8_t plaintext[PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE + 1];
+    uint8_t *plain_pos = plaintext;
+    *plain_pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+    *plain_pos++ = 0;
+    ikev2_helper_write_be16(&plain_pos,
+                            PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE);
+    *plain_pos++ = 0;
+    *plain_pos++ = 0;
+    ikev2_helper_write_be16(
+        &plain_pos, PROVIDER_HELPER_IKEV2_NOTIFY_AUTHENTICATION_FAILED);
+    *plain_pos++ = 0; /* Pad Length: no padding bytes for AEAD. */
+    const size_t plaintext_len = (size_t)(plain_pos - plaintext);
+
+    const uint16_t sk_payload_len =
+        (uint16_t)(PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                   + IKEV2_HELPER_AES_GCM_IV_BYTES + plaintext_len
+                   + IKEV2_HELPER_AES_GCM_TAG_BYTES);
+    const uint32_t ike_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                             + sk_payload_len;
+    const size_t offset =
+        (listener->descriptor.flags & PROVIDER_HELPER_LISTENER_FD_NATT)
+        ? PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE : 0;
+    const size_t packet_len = offset + ike_len;
+    if (response_size < packet_len)
+    {
+        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+        return false;
+    }
+
+    memset(response, 0, packet_len);
+    uint8_t *pos = response + offset;
+    ikev2_helper_write_be64(&pos, sa->initiator_spi);
+    ikev2_helper_write_be64(&pos, sa->responder_spi);
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_SK;
+    *pos++ = (PROVIDER_HELPER_IKEV2_MAJOR_VERSION << 4)
+             | PROVIDER_HELPER_IKEV2_MINOR_VERSION;
+    *pos++ = PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH;
+    *pos++ = PROVIDER_HELPER_IKEV2_FLAG_RESPONSE;
+    ikev2_helper_write_be32(&pos, sa->message_id);
+    ikev2_helper_write_be32(&pos, ike_len);
+
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY;
+    *pos++ = 0;
+    ikev2_helper_write_be16(&pos, sk_payload_len);
+
+    uint8_t *iv = pos;
+    if (!ikev2_helper_random_bytes(iv, IKEV2_HELPER_AES_GCM_IV_BYTES))
+    {
+        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+        return false;
+    }
+    pos += IKEV2_HELPER_AES_GCM_IV_BYTES;
+
+    const size_t key_len = sa->sk_er_len - IKEV2_HELPER_AES_GCM_SALT_BYTES;
+    const uint8_t *salt = sa->sk_er + key_len;
+    uint8_t nonce[IKEV2_HELPER_AES_GCM_NONCE_BYTES];
+    memcpy(nonce, salt, IKEV2_HELPER_AES_GCM_SALT_BYTES);
+    memcpy(nonce + IKEV2_HELPER_AES_GCM_SALT_BYTES, iv,
+           IKEV2_HELPER_AES_GCM_IV_BYTES);
+
+    uint8_t *ciphertext = pos;
+    uint8_t *tag = pos + plaintext_len;
+    const bool ret = ikev2_helper_aes_gcm_encrypt(
+        sa->sk_er, key_len, nonce, sizeof(nonce), response + offset,
+        PROVIDER_HELPER_IKEV2_HEADER_SIZE
+        + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE,
+        plaintext, plaintext_len, ciphertext, plaintext_len, tag,
+        IKEV2_HELPER_AES_GCM_TAG_BYTES);
+    pos = tag + IKEV2_HELPER_AES_GCM_TAG_BYTES;
+
+    ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+    ikev2_helper_secure_zero(nonce, sizeof(nonce));
+    if (!ret || (size_t)(pos - response) != packet_len)
+    {
+        ikev2_helper_secure_zero(response, response_size);
+        return false;
+    }
+
+    *response_len = packet_len;
+    return true;
+}
+
+static bool
+ikev2_helper_send_auth_failed_response(
+    const struct ikev2_helper_listener *listener,
+    const struct ikev2_helper_ike_sa *sa)
+{
+    uint8_t response[PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE
+                     + PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                     + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                     + IKEV2_HELPER_AES_GCM_IV_BYTES
+                     + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE + 1
+                     + IKEV2_HELPER_AES_GCM_TAG_BYTES];
+    size_t response_len = 0;
+    if (!listener || !sa || !sa->active
+        || !ikev2_helper_build_auth_failed_response(
+            response, sizeof(response), &response_len, listener, sa))
+    {
+        return false;
+    }
+
+    const ssize_t sent =
+        sendto(listener->fd, response, response_len, 0,
+               (const struct sockaddr *)&sa->peer, sa->peer_len);
+    ikev2_helper_secure_zero(response, sizeof(response));
+    return sent == (ssize_t)response_len;
+}
+
 static bool
 ikev2_helper_apply_auth_response(
     struct ikev2_helper_ike_sa_table *table,
+    const struct ikev2_helper_listener *listeners,
+    size_t listener_count,
     const struct provider_helper_auth_response *response,
     struct provider_helper_runtime_stats *counters)
 {
-    if (!table || !response || !counters)
+    if (!table || !listeners || !response || !counters)
     {
         return false;
     }
@@ -2282,6 +2525,17 @@ ikev2_helper_apply_auth_response(
 
         if (response->decision == PROVIDER_HELPER_AUTH_DENY)
         {
+            const struct ikev2_helper_listener *listener =
+                ikev2_helper_find_listener(listeners, listener_count,
+                                           sa->listener_id);
+            if (listener && ikev2_helper_send_auth_failed_response(listener, sa))
+            {
+                ++counters->ike_auth_deny_response_tx;
+            }
+            else
+            {
+                ++counters->ike_auth_deny_response_failed;
+            }
             ikev2_helper_clear_ike_sa(table, sa);
             ++counters->ike_auth_denied;
         }
@@ -2724,6 +2978,8 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 counters->ike_sa_active = sa_table->active;
                 return;
             }
+            sa->message_id = header.message_id;
+            sa->updated = time(NULL);
 
             uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
             size_t plaintext_len = 0;
@@ -2970,7 +3226,9 @@ ikev2_helper_loop(int fd)
                 struct provider_helper_auth_response response;
                 if (!configured
                     || !ikev2_helper_read_auth_response(fd, &header, &response)
-                    || !ikev2_helper_apply_auth_response(&sa_table, &response,
+                    || !ikev2_helper_apply_auth_response(&sa_table, listeners,
+                                                         listener_count,
+                                                         &response,
                                                          &counters))
                 {
                     ret = 6;
