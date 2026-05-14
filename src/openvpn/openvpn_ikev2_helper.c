@@ -1627,10 +1627,22 @@ ikev2_helper_record_inner_payload(
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_TSI:
             summary->saw_tsi = true;
+            ++summary->tsi_count;
+            if (summary->tsi_count == 1)
+            {
+                summary->tsi_offset = body_offset;
+                summary->tsi_len = body_len;
+            }
             break;
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_TSR:
             summary->saw_tsr = true;
+            ++summary->tsr_count;
+            if (summary->tsr_count == 1)
+            {
+                summary->tsr_offset = body_offset;
+                summary->tsr_len = body_len;
+            }
             break;
     }
 }

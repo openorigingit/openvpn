@@ -2918,6 +2918,68 @@ test_provider_helper_ikev2_payload_parser(void **state)
     assert_true(summary.saw_sk);
     assert_int_equal(summary.sk_count, 1);
     assert_int_equal(summary.sk_len, 32);
+
+    packet_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                 + (2 * TEST_IKEV2_TS_IPV4_PAYLOAD_LEN);
+    memset(packet, 0, sizeof(packet));
+    test_make_ikev2_header(packet, false,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+                           0x8877665544332211ull, (uint32_t)packet_len);
+    packet[16] = PROVIDER_HELPER_IKEV2_PAYLOAD_TSI;
+    size_t ts_pos = PROVIDER_HELPER_IKEV2_HEADER_SIZE;
+    const size_t tsi_body =
+        ts_pos + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    ts_pos = test_add_ikev2_payload(packet, ts_pos,
+                                    PROVIDER_HELPER_IKEV2_PAYLOAD_TSR,
+                                    TEST_IKEV2_TS_IPV4_PAYLOAD_LEN, 0);
+    packet[tsi_body] = 1;
+    const size_t tsi_selector =
+        tsi_body + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+    packet[tsi_selector] = PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE;
+    test_write_be16(packet + tsi_selector + 2,
+                    PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
+    test_write_be16(packet + tsi_selector + 6, 65535);
+    test_write_be32(packet + tsi_selector + 8, 0x0a580002);
+    test_write_be32(packet + tsi_selector + 12, 0x0a580002);
+    const size_t tsr_body =
+        ts_pos + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    ts_pos = test_add_ikev2_payload(packet, ts_pos,
+                                    PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+                                    TEST_IKEV2_TS_IPV4_PAYLOAD_LEN, 0);
+    packet[tsr_body] = 1;
+    const size_t tsr_selector =
+        tsr_body + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+    packet[tsr_selector] = PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE;
+    test_write_be16(packet + tsr_selector + 2,
+                    PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
+    test_write_be16(packet + tsr_selector + 6, 65535);
+    test_write_be32(packet + tsr_selector + 8, 0x0a580001);
+    test_write_be32(packet + tsr_selector + 12, 0x0a580001);
+    assert_int_equal(ts_pos, packet_len);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, packet_len, PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE,
+                         false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_parse_payloads(
+                         packet, packet_len, &header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_true(summary.saw_tsi);
+    assert_true(summary.saw_tsr);
+    assert_int_equal(summary.tsi_count, 1);
+    assert_int_equal(summary.tsr_count, 1);
+    assert_int_equal(summary.tsi_offset, tsi_body);
+    assert_int_equal(summary.tsr_offset, tsr_body);
+    assert_int_equal(summary.tsi_len,
+                     PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE
+                     + PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
+    assert_int_equal(summary.tsr_len,
+                     PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE
+                     + PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
+
+    packet_len = test_make_ike_auth_packet(packet, sizeof(packet),
+                                           0x1122334455667788ull,
+                                           0x8877665544332211ull, false);
     packet[16] = PROVIDER_HELPER_IKEV2_PAYLOAD_AUTH;
     assert_int_equal(provider_helper_ikev2_parse_header(
                          packet, packet_len, PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE,
