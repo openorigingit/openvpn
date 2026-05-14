@@ -5550,6 +5550,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
 
             const uint32_t half_open_sas =
                 ikev2_helper_count_half_open_ike_sas(sa_table);
+            const uint32_t source_half_open_sas =
+                ikev2_helper_count_half_open_ike_sas_for_source(sa_table,
+                                                                &peer);
+            const uint32_t prefix_half_open_sas =
+                ikev2_helper_count_half_open_ike_sas_for_prefix(sa_table,
+                                                                &peer);
             if (!ikev2_helper_allow_sa_init_rate(rate_state, config, counters,
                                                  &peer,
                                                  ikev2_helper_now_milliseconds()))
@@ -5557,24 +5563,15 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 counters->ike_sa_active = sa_table->active;
                 return;
             }
-            if (half_open_sas >= max_half_open_sas)
-            {
-                ++counters->ike_sa_init_half_open_dropped;
-            }
-            else if (ikev2_helper_count_half_open_ike_sas_for_source(sa_table,
-                                                                      &peer)
-                     >= config->max_half_open_sas_per_source)
-            {
-                ++counters->ike_sa_init_per_source_dropped;
-            }
-            else if (ikev2_helper_count_half_open_ike_sas_for_prefix(sa_table,
-                                                                      &peer)
-                     >= config->max_half_open_sas_per_prefix)
-            {
-                ++counters->ike_sa_init_per_prefix_dropped;
-            }
-            else if (half_open_sas >= config->cookie_threshold
-                     && !summary.saw_cookie_notify)
+            const bool half_open_full = half_open_sas >= max_half_open_sas;
+            const bool source_half_open_full =
+                source_half_open_sas >= config->max_half_open_sas_per_source;
+            const bool prefix_half_open_full =
+                prefix_half_open_sas >= config->max_half_open_sas_per_prefix;
+            if (!summary.saw_cookie_notify
+                && (half_open_sas >= config->cookie_threshold
+                    || half_open_full || source_half_open_full
+                    || prefix_half_open_full))
             {
                 ++counters->ike_sa_init_cookie_required;
                 if (ikev2_helper_send_cookie_response(
@@ -5586,6 +5583,18 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 {
                     ++counters->ike_sa_init_cookie_response_failed;
                 }
+            }
+            else if (half_open_full)
+            {
+                ++counters->ike_sa_init_half_open_dropped;
+            }
+            else if (source_half_open_full)
+            {
+                ++counters->ike_sa_init_per_source_dropped;
+            }
+            else if (prefix_half_open_full)
+            {
+                ++counters->ike_sa_init_per_prefix_dropped;
             }
             else
             {

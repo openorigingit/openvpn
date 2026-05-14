@@ -5637,7 +5637,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_sa_init_response_failed, 0);
     assert_true(supervisor.runtime_stats.ike_sa_init_duplicate >= 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_retransmit_dropped >= 1);
-    assert_true(supervisor.runtime_stats.ike_sa_init_per_source_dropped >= 1);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_init_per_source_dropped, 0);
     assert_true(supervisor.runtime_stats.ike_sa_init_cookie_required >= 1);
     assert_true(supervisor.runtime_stats.ike_sa_init_cookie_response_tx >= 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_init_cookie_response_failed,
@@ -5809,7 +5809,12 @@ test_provider_helper_spawn_ikev2_prefix_limit(void **state)
     test_send_ikev2_datagram_from(second_fd, port, 0x0202020202020202ull);
     assert_true(test_recv_ikev2_sa_init_response(
                     second_fd, 0x0202020202020202ull) != 0);
+    uint8_t cookie[PROVIDER_HELPER_IKEV2_COOKIE_MAX_BYTES];
     test_send_ikev2_datagram_from(dropped_fd, port, 0x0303030303030303ull);
+    const size_t cookie_len =
+        test_recv_ikev2_cookie_response(dropped_fd, cookie, sizeof(cookie));
+    test_send_ikev2_cookie_datagram_with_cookie_from(
+        dropped_fd, port, 0x0303030303030303ull, cookie, cookie_len);
     test_assert_no_udp_datagram(dropped_fd);
     test_send_ikev2_datagram_from(other_prefix_fd, port, 0x0404040404040404ull);
     assert_true(test_recv_ikev2_sa_init_response(
@@ -5833,6 +5838,9 @@ test_provider_helper_spawn_ikev2_prefix_limit(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
     assert_int_equal(supervisor.runtime_stats.ike_sa_init_accepted, 3);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_init_cookie_required, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_init_cookie_response_tx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_init_cookie_verified, 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_init_per_prefix_dropped,
                      1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 3);
