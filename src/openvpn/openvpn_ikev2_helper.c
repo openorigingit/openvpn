@@ -3601,6 +3601,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
+                if (sa->pending_auth_request_id)
+                {
+                    ++counters->ike_exchange_auth_pending_dropped;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
 
                 uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
                 size_t plaintext_len = 0;

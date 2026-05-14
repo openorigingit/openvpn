@@ -360,6 +360,7 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_create_child_unsupported_rx = 61,
         .ike_create_child_temp_failure_tx = 62,
         .ike_create_child_temp_failure_failed = 63,
+        .ike_exchange_auth_pending_dropped = 64,
         .ike_auth_rx = 26,
         .ike_auth_malformed = 27,
         .ike_auth_no_state = 28,
@@ -462,6 +463,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_create_child_temp_failure_tx);
     assert_int_equal(output.ike_create_child_temp_failure_failed,
                      input.ike_create_child_temp_failure_failed);
+    assert_int_equal(output.ike_exchange_auth_pending_dropped,
+                     input.ike_exchange_auth_pending_dropped);
     assert_int_equal(output.ike_auth_rx, input.ike_auth_rx);
     assert_int_equal(output.ike_auth_malformed, input.ike_auth_malformed);
     assert_int_equal(output.ike_auth_no_state, input.ike_auth_no_state);
@@ -3930,6 +3933,10 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
         response_fd, natt_port, 0xfeedfacecafebeefull, &sa_init_material, true,
         false, cert_der, cert_der_len);
     usleep(10000);
+    test_send_ikev2_encrypted_protected_exchange_from(
+        response_fd, natt_port, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
+        0xfeedfacecafebeefull, &sa_init_material, true, 2);
+    usleep(10000);
     test_send_ikev2_encrypted_ike_auth_datagram_from(
         response_fd, natt_port, 0xfeedfacecafebeefull, &sa_init_material, true,
         false, cert_der, cert_der_len);
@@ -4122,6 +4129,8 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_true(supervisor.runtime_stats.ike_auth_request_tx >= 1);
     assert_true(
         supervisor.runtime_stats.ike_auth_request_pending_dropped >= 1);
+    assert_true(supervisor.runtime_stats.ike_exchange_auth_pending_dropped
+                >= 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_request_failed, 0);
     assert_true(supervisor.runtime_stats.ike_auth_denied >= 1);
     assert_true(supervisor.runtime_stats.ike_auth_deny_response_tx >= 1);
@@ -4144,6 +4153,8 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_auth_request_tx, 0);
     assert_int_equal(
         supervisor.runtime_stats.ike_auth_request_pending_dropped, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_exchange_auth_pending_dropped,
+                     0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_request_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_denied, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_deny_response_tx, 0);
