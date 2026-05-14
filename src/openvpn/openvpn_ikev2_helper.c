@@ -3854,8 +3854,14 @@ ikev2_helper_build_child_sa_xfrm_plan(
     const struct ikev2_helper_ike_sa *sa,
     struct ikev2_helper_child_sa_scaffold *child,
     const struct provider_xfrm_ipv4_selector *local_ts,
-    const struct provider_xfrm_ipv4_selector *remote_ts)
+    const struct provider_xfrm_ipv4_selector *remote_ts,
+    bool apply_xfrm,
+    bool *xfrm_apply_failed)
 {
+    if (xfrm_apply_failed)
+    {
+        *xfrm_apply_failed = false;
+    }
     if (!sa || !child || !local_ts || !remote_ts || !sa->local_endpoint_ready)
     {
         return false;
@@ -3904,10 +3910,19 @@ ikev2_helper_build_child_sa_xfrm_plan(
 
     struct provider_xfrm_result result;
     struct provider_xfrm_linux_message_plan messages;
-    const bool ret = provider_xfrm_child_sa_plan_build(&child->xfrm_plan,
-                                                       &spec, &result)
-                     && provider_xfrm_linux_child_sa_messages_build(
-                         &messages, &child->xfrm_plan, &result);
+    bool ret = provider_xfrm_child_sa_plan_build(&child->xfrm_plan,
+                                                 &spec, &result)
+               && provider_xfrm_linux_child_sa_messages_build(
+                   &messages, &child->xfrm_plan, &result);
+    if (ret && apply_xfrm
+        && !provider_xfrm_linux_message_plan_apply(&messages, &result))
+    {
+        ret = false;
+        if (xfrm_apply_failed)
+        {
+            *xfrm_apply_failed = true;
+        }
+    }
     provider_xfrm_linux_message_plan_clear(&messages);
     return ret;
 }
@@ -3923,7 +3938,9 @@ ikev2_helper_scaffold_child_sa(
     const uint8_t *initiator_nonce,
     size_t initiator_nonce_len,
     uint32_t message_id,
-    time_t now)
+    time_t now,
+    bool apply_xfrm,
+    bool *xfrm_apply_failed)
 {
     if (!table || !sa || !sa->active || !sa->auth_authorized || !selection
         || !selection->selected || !selection->initiator_spi || !lease
@@ -3960,7 +3977,8 @@ ikev2_helper_scaffold_child_sa(
                                    child.responder_nonce_len)
         || !ikev2_helper_derive_child_sa_keys(sa, &child)
         || !ikev2_helper_build_child_sa_xfrm_plan(sa, &child, local_ts,
-                                                  remote_ts))
+                                                  remote_ts, apply_xfrm,
+                                                  xfrm_apply_failed))
     {
         ikev2_helper_secure_zero(&child, sizeof(child));
         return false;
@@ -4359,6 +4377,43 @@ ikev2_helper_send_cached_encrypted_empty_response(
     const bool ret = sent == (ssize_t)response_len
                      && ikev2_helper_cache_protected_response(
                          sa, message_id, response, response_len);
+    ikev2_helper_secure_zero(response, sizeof(response));
+    return ret;
+}
+
+static bool
+ikev2_helper_send_cached_encrypted_child_sa_response(
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_ike_sa *sa,
+    const struct ikev2_helper_child_sa_scaffold *child,
+    uint32_t message_id)
+{
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    uint8_t response[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    size_t plaintext_len = 0;
+    size_t response_len = 0;
+    if (!listener || !sa || !sa->active || !child || !child->ready
+        || !provider_helper_ikev2_build_child_sa_response_plaintext(
+            plaintext, sizeof(plaintext), &child->selection,
+            child->responder_spi, &child->xfrm_lease, child->responder_nonce,
+            child->responder_nonce_len, &plaintext_len)
+        || !ikev2_helper_build_encrypted_payload_response(
+            response, sizeof(response), &response_len, listener, sa,
+            PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA, message_id,
+            PROVIDER_HELPER_IKEV2_PAYLOAD_SA, plaintext, plaintext_len))
+    {
+        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+        ikev2_helper_secure_zero(response, sizeof(response));
+        return false;
+    }
+
+    const ssize_t sent =
+        sendto(listener->fd, response, response_len, 0,
+               (const struct sockaddr *)&sa->peer, sa->peer_len);
+    const bool ret = sent == (ssize_t)response_len
+                     && ikev2_helper_cache_protected_response(
+                         sa, message_id, response, response_len);
+    ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
     ikev2_helper_secure_zero(response, sizeof(response));
     return ret;
 }
@@ -5525,8 +5580,6 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         inner_summary = ike_rekey_summary;
                         ike_rekey_request = true;
                     }
-                    ++counters->ike_create_child_unsupported_rx;
-                    ++counters->ike_exchange_unsupported;
                     const bool rekey_request =
                         ike_rekey_request
                         || ikev2_helper_is_child_rekey_request(
@@ -5539,6 +5592,11 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     bool no_proposal = false;
                     bool ts_unacceptable = false;
                     bool install_unsupported = false;
+                    bool install_enabled = false;
+                    bool install_failed = false;
+                    bool child_response_sent = false;
+                    bool child_response_failed = false;
+                    bool xfrm_apply_failed = false;
                     struct provider_helper_ikev2_child_sa_selection
                         child_selection;
                     struct provider_xfrm_ipv4_selector child_local_ts;
@@ -5573,13 +5631,10 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                                     &sa->authorized_xfrm_lease,
                                     &child_local_ts, &child_remote_ts))
                             {
-                                /*
-                                 * XFRM install is still fail-closed.  Retain
-                                 * a bounded scaffold so the next implementation
-                                 * step can build the CHILD_SA response from
-                                 * real selected state instead of reparsing.
-                                 */
-                                install_unsupported = true;
+                                install_enabled =
+                                    (config->flags
+                                     & PROVIDER_HELPER_CONFIG_APPLY_XFRM) != 0;
+                                install_unsupported = !install_enabled;
                             }
                             else
                             {
@@ -5587,15 +5642,66 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             }
                         }
                     }
+                    if (install_enabled)
+                    {
+                        if (ikev2_helper_scaffold_child_sa(
+                                sa_table, sa, &child_selection,
+                                &sa->authorized_xfrm_lease, &child_local_ts,
+                                &child_remote_ts,
+                                plaintext + inner_summary.nonce_offset,
+                                inner_summary.nonce_len, header.message_id,
+                                time(NULL), true, &xfrm_apply_failed))
+                        {
+                            ++counters->ike_create_child_scaffolded;
+                            ++counters->ike_create_child_keymat_ready;
+                            ++counters->ike_create_child_xfrm_install_ok;
+                            if (ikev2_helper_send_cached_encrypted_child_sa_response(
+                                    listener, sa, &sa->child_sa,
+                                    header.message_id))
+                            {
+                                ++counters->ike_create_child_response_tx;
+                                child_response_sent = true;
+                            }
+                            else
+                            {
+                                ++counters->ike_create_child_response_failed;
+                                child_response_failed = true;
+                                ikev2_helper_clear_ike_sa(sa_table, sa);
+                            }
+                        }
+                        else
+                        {
+                            install_failed = true;
+                            ++counters->ike_create_child_scaffold_failed;
+                            if (xfrm_apply_failed)
+                            {
+                                ++counters
+                                      ->ike_create_child_xfrm_install_failed;
+                            }
+                        }
+                    }
+                    if (rekey_request || install_unsupported)
+                    {
+                        ++counters->ike_create_child_unsupported_rx;
+                        ++counters->ike_exchange_unsupported;
+                    }
                     const uint16_t notify_type =
-                        rekey_request || install_unsupported
+                        rekey_request || install_unsupported || install_failed
                             ? PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE
                             : no_proposal
                                   ? PROVIDER_HELPER_IKEV2_NOTIFY_NO_PROPOSAL_CHOSEN
                               : ts_unacceptable
                                   ? PROVIDER_HELPER_IKEV2_NOTIFY_TS_UNACCEPTABLE
                                   : PROVIDER_HELPER_IKEV2_NOTIFY_NO_ADDITIONAL_SAS;
-                    if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
+                    if (child_response_sent)
+                    {
+                        /* Success response was sent and cached above. */
+                    }
+                    else if (child_response_failed)
+                    {
+                        /* Kernel state may exist; the IKE SA is already closed fail-closed. */
+                    }
+                    else if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
                             listener, sa, header.exchange_type,
                             header.message_id, notify_type))
                     {
@@ -5611,7 +5717,8 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                                     &child_local_ts, &child_remote_ts,
                                     plaintext + inner_summary.nonce_offset,
                                     inner_summary.nonce_len,
-                                    header.message_id, time(NULL)))
+                                    header.message_id, time(NULL), false,
+                                    NULL))
                             {
                                 ++counters->ike_create_child_scaffolded;
                                 ++counters->ike_create_child_keymat_ready;
@@ -5623,6 +5730,10 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             }
                             ++counters
                                   ->ike_create_child_install_unsupported_tx;
+                        }
+                        else if (install_failed)
+                        {
+                            ++counters->ike_create_child_temp_failure_tx;
                         }
                         else if (no_proposal)
                         {
@@ -5649,6 +5760,10 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             ++counters
                                   ->ike_create_child_install_unsupported_failed;
                         }
+                        else if (install_failed)
+                        {
+                            ++counters->ike_create_child_temp_failure_failed;
+                        }
                         else if (no_proposal)
                         {
                             ++counters
@@ -5665,7 +5780,10 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                                   ->ike_create_child_no_additional_sas_failed;
                         }
                     }
-                    sa->message_id = header.message_id;
+                    if (!child_response_failed)
+                    {
+                        sa->message_id = header.message_id;
+                    }
                     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                     counters->ike_sa_active = sa_table->active;
                     counters->ike_child_sa_scaffold_active =
