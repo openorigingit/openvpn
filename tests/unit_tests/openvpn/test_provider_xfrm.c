@@ -525,6 +525,24 @@ test_provider_xfrm_linux_rejects_unrepresentable_selectors(void **state)
 #endif
 }
 
+static void
+test_provider_xfrm_linux_rejects_empty_apply(void **state)
+{
+    (void)state;
+
+    struct provider_xfrm_linux_message_plan messages;
+    struct provider_xfrm_result result;
+    CLEAR(messages);
+
+    assert_false(provider_xfrm_linux_message_plan_apply(&messages, &result));
+    assert_false(result.ok);
+#if defined(TARGET_LINUX)
+    assert_non_null(strstr(result.reason, "missing XFRM Linux messages"));
+#else
+    assert_non_null(strstr(result.reason, "unavailable"));
+#endif
+}
+
 int
 main(void)
 {
@@ -539,6 +557,7 @@ main(void)
         cmocka_unit_test(test_provider_xfrm_rejects_invalid_child_sa_plan),
         cmocka_unit_test(test_provider_xfrm_linux_builds_child_sa_messages),
         cmocka_unit_test(test_provider_xfrm_linux_rejects_unrepresentable_selectors),
+        cmocka_unit_test(test_provider_xfrm_linux_rejects_empty_apply),
     };
 
     return cmocka_run_group_tests_name("provider_xfrm", tests, NULL, NULL);

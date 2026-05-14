@@ -32,6 +32,19 @@ provider_xfrm_linux_set_error(struct provider_xfrm_result *result,
     }
 }
 
+static void
+provider_xfrm_linux_set_errno(struct provider_xfrm_result *result,
+                              const char *operation,
+                              int error_number)
+{
+    if (result)
+    {
+        result->ok = false;
+        snprintf(result->reason, sizeof(result->reason), "%s: %s", operation,
+                 strerror(error_number));
+    }
+}
+
 #if defined(TARGET_LINUX)
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
@@ -439,6 +452,214 @@ provider_xfrm_linux_child_sa_messages_build(
     return true;
 }
 
+static int
+provider_xfrm_linux_netlink_open(struct provider_xfrm_result *result)
+{
+    const int fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_XFRM);
+    if (fd < 0)
+    {
+        provider_xfrm_linux_set_errno(result, "open NETLINK_XFRM socket",
+                                      errno);
+        return -1;
+    }
+
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0)
+    {
+        provider_xfrm_linux_set_errno(result, "set NETLINK_XFRM close-on-exec",
+                                      errno);
+        close(fd);
+        return -1;
+    }
+
+    struct sockaddr_nl local;
+    CLEAR(local);
+    local.nl_family = AF_NETLINK;
+    if (bind(fd, (struct sockaddr *)&local, sizeof(local)) < 0)
+    {
+        provider_xfrm_linux_set_errno(result, "bind NETLINK_XFRM socket",
+                                      errno);
+        close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+static bool
+provider_xfrm_linux_wait_ack(int fd, uint32_t sequence,
+                             struct provider_xfrm_result *result)
+{
+    uint8_t buf[8192];
+    struct sockaddr_nl peer;
+    struct iovec iov = {
+        .iov_base = buf,
+        .iov_len = sizeof(buf),
+    };
+    struct msghdr msg = {
+        .msg_name = &peer,
+        .msg_namelen = sizeof(peer),
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+    };
+
+    while (true)
+    {
+        CLEAR(peer);
+        iov.iov_base = buf;
+        iov.iov_len = sizeof(buf);
+        msg.msg_namelen = sizeof(peer);
+        msg.msg_flags = 0;
+        const ssize_t n = recvmsg(fd, &msg, 0);
+        if (n < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            provider_xfrm_linux_set_errno(result, "receive NETLINK_XFRM ack",
+                                          errno);
+            return false;
+        }
+        if (n == 0 || msg.msg_flags & MSG_TRUNC)
+        {
+            provider_xfrm_linux_set_error(result,
+                                          "invalid NETLINK_XFRM ack");
+            return false;
+        }
+
+        int remaining = (int)n;
+        for (struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
+             NLMSG_OK(nlh, remaining);
+             nlh = NLMSG_NEXT(nlh, remaining))
+        {
+            if (nlh->nlmsg_seq != sequence)
+            {
+                continue;
+            }
+            if (nlh->nlmsg_type == NLMSG_DONE)
+            {
+                return true;
+            }
+            if (nlh->nlmsg_type != NLMSG_ERROR)
+            {
+                continue;
+            }
+
+            const struct nlmsgerr *err = NLMSG_DATA(nlh);
+            if (nlh->nlmsg_len < NLMSG_LENGTH(sizeof(*err)))
+            {
+                provider_xfrm_linux_set_error(result,
+                                              "truncated NETLINK_XFRM error");
+                return false;
+            }
+            if (!err->error)
+            {
+                return true;
+            }
+            provider_xfrm_linux_set_errno(result, "NETLINK_XFRM operation",
+                                          -err->error);
+            return false;
+        }
+    }
+}
+
+static bool
+provider_xfrm_linux_message_apply(int fd,
+                                  const struct provider_xfrm_linux_message *message,
+                                  uint32_t sequence,
+                                  struct provider_xfrm_result *result)
+{
+    if (!message || message->len < sizeof(struct nlmsghdr)
+        || message->len > sizeof(message->data))
+    {
+        provider_xfrm_linux_set_error(result, "invalid XFRM Linux message");
+        return false;
+    }
+
+    uint8_t data[PROVIDER_XFRM_LINUX_MESSAGE_SIZE];
+    memcpy(data, message->data, message->len);
+    struct nlmsghdr *nlh = (struct nlmsghdr *)data;
+    nlh->nlmsg_seq = sequence;
+    nlh->nlmsg_flags |= NLM_F_ACK;
+
+    struct sockaddr_nl peer;
+    CLEAR(peer);
+    peer.nl_family = AF_NETLINK;
+    struct iovec iov = {
+        .iov_base = data,
+        .iov_len = message->len,
+    };
+    struct msghdr msg = {
+        .msg_name = &peer,
+        .msg_namelen = sizeof(peer),
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+    };
+
+    bool ret = false;
+    while (true)
+    {
+        const ssize_t n = sendmsg(fd, &msg, 0);
+        if (n < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            provider_xfrm_linux_set_errno(result, "send NETLINK_XFRM message",
+                                          errno);
+            goto cleanup;
+        }
+        if ((size_t)n != message->len)
+        {
+            provider_xfrm_linux_set_error(result,
+                                          "short NETLINK_XFRM message send");
+            goto cleanup;
+        }
+        break;
+    }
+
+    ret = provider_xfrm_linux_wait_ack(fd, sequence, result);
+
+cleanup:
+    secure_memzero(data, sizeof(data));
+    return ret;
+}
+
+bool
+provider_xfrm_linux_message_plan_apply(
+    const struct provider_xfrm_linux_message_plan *messages,
+    struct provider_xfrm_result *result)
+{
+    provider_xfrm_result_init(result);
+    if (!messages || !messages->count
+        || messages->count > PROVIDER_XFRM_LINUX_MAX_MESSAGES)
+    {
+        provider_xfrm_linux_set_error(result,
+                                      "missing XFRM Linux messages to apply");
+        return false;
+    }
+
+    const int fd = provider_xfrm_linux_netlink_open(result);
+    if (fd < 0)
+    {
+        return false;
+    }
+
+    bool ret = true;
+    for (size_t i = 0; i < messages->count; ++i)
+    {
+        if (!provider_xfrm_linux_message_apply(
+                fd, &messages->messages[i], (uint32_t)(i + 1), result))
+        {
+            ret = false;
+            break;
+        }
+    }
+    close(fd);
+    return ret;
+}
+
 #else  /* if defined(TARGET_LINUX) */
 
 void
@@ -460,6 +681,18 @@ provider_xfrm_linux_child_sa_messages_build(
     (void)plan;
     provider_xfrm_result_init(result);
     provider_xfrm_linux_message_plan_clear(messages);
+    provider_xfrm_linux_set_error(result,
+                                  "Linux XFRM backend is unavailable");
+    return false;
+}
+
+bool
+provider_xfrm_linux_message_plan_apply(
+    const struct provider_xfrm_linux_message_plan *messages,
+    struct provider_xfrm_result *result)
+{
+    (void)messages;
+    provider_xfrm_result_init(result);
     provider_xfrm_linux_set_error(result,
                                   "Linux XFRM backend is unavailable");
     return false;

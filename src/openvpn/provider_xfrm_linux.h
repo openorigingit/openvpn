@@ -41,4 +41,8 @@ bool provider_xfrm_linux_child_sa_messages_build(
     const struct provider_xfrm_child_sa_plan *plan,
     struct provider_xfrm_result *result);
 
+bool provider_xfrm_linux_message_plan_apply(
+    const struct provider_xfrm_linux_message_plan *messages,
+    struct provider_xfrm_result *result);
+
 #endif /* PROVIDER_XFRM_LINUX_H */
