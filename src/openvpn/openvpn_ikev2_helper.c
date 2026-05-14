@@ -5700,10 +5700,14 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 return;
             }
             ++counters->ike_auth_inner_parsed;
-            if (inner_summary.saw_eap)
+            if (!inner_summary.saw_eap || inner_summary.eap_count != 1)
             {
-                ++counters->ike_auth_eap_tls_rx;
+                ++counters->ike_auth_unsupported;
+                ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                counters->ike_sa_active = sa_table->active;
+                return;
             }
+            ++counters->ike_auth_eap_tls_rx;
             if (sa->pending_auth_request_id)
             {
                 ++counters->ike_auth_request_pending_dropped;

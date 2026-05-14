@@ -1927,6 +1927,47 @@ test_make_encrypted_ike_auth_packet(
 }
 
 static size_t
+test_make_encrypted_ike_auth_without_eap_packet(
+    uint8_t *packet,
+    size_t packet_size,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt,
+    const uint8_t *cert_der,
+    size_t cert_der_len)
+{
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    CLEAR(plaintext);
+    assert_non_null(cert_der);
+    assert_true(cert_der_len > 0);
+    assert_true(cert_der_len + 5 <= UINT16_MAX);
+
+    size_t plaintext_len = 0;
+    plaintext_len = test_add_ikev2_payload(plaintext, plaintext_len,
+                                           PROVIDER_HELPER_IKEV2_PAYLOAD_CERT,
+                                           9, 0);
+    plaintext[4] = PROVIDER_HELPER_IKEV2_ID_FQDN;
+    plaintext[8] = 'a';
+
+    const uint16_t cert_payload_len = (uint16_t)(cert_der_len + 5);
+    assert_true(plaintext_len + cert_payload_len + 1 <= sizeof(plaintext));
+    plaintext_len = test_add_ikev2_payload(
+        plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+        cert_payload_len, 0);
+    const size_t cert_body = plaintext_len - cert_payload_len
+                             + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    plaintext[cert_body] = 4;
+    memcpy(plaintext + cert_body + 1, cert_der, cert_der_len);
+    plaintext[plaintext_len++] = 0; /* Pad Length. */
+
+    const size_t packet_len = test_make_encrypted_ike_auth_plaintext_packet(
+        packet, packet_size, initiator_spi, material, natt, plaintext,
+        plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_IDI, 1);
+    secure_memzero(plaintext, sizeof(plaintext));
+    return packet_len;
+}
+
+static size_t
 test_make_encrypted_ike_auth_aggregate_limit_packet(
     uint8_t *packet,
     size_t packet_size,
@@ -2134,6 +2175,32 @@ test_send_ikev2_encrypted_ike_auth_datagram_from(
     const size_t packet_len = test_make_encrypted_ike_auth_packet(
         packet, sizeof(packet), initiator_spi, material, natt, malformed_inner,
         cert_der, cert_der_len);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    assert_int_equal(sendto(fd, packet, packet_len, 0,
+                            (struct sockaddr *)&addr, sizeof(addr)),
+                     packet_len);
+}
+
+static void
+test_send_ikev2_encrypted_ike_auth_without_eap_datagram_from(
+    int fd,
+    uint16_t port,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt,
+    const uint8_t *cert_der,
+    size_t cert_der_len)
+{
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t packet_len = test_make_encrypted_ike_auth_without_eap_packet(
+        packet, sizeof(packet), initiator_spi, material, natt, cert_der,
+        cert_der_len);
 
     struct sockaddr_in addr;
     CLEAR(addr);
@@ -5001,6 +5068,10 @@ test_provider_helper_spawn_ikev2_rejects_inner_aggregate_limits(void **state)
         response_fd, natt_port, initiator_spi, &sa_init_material, true,
         fake_cert_der, sizeof(fake_cert_der), 0xc0);
     usleep(10000);
+    test_send_ikev2_encrypted_ike_auth_without_eap_datagram_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true,
+        fake_cert_der, sizeof(fake_cert_der));
+    usleep(10000);
 
     uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
@@ -5015,13 +5086,14 @@ test_provider_helper_spawn_ikev2_rejects_inner_aggregate_limits(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
-    assert_true(supervisor.runtime_stats.datagrams_rx >= 5);
-    assert_true(supervisor.runtime_stats.datagrams_parsed >= 5);
+    assert_true(supervisor.runtime_stats.datagrams_rx >= 6);
+    assert_true(supervisor.runtime_stats.datagrams_parsed >= 6);
     assert_int_equal(supervisor.runtime_stats.ike_sa_init_accepted, 1);
-    assert_int_equal(supervisor.runtime_stats.ike_auth_rx, 4);
-    assert_int_equal(supervisor.runtime_stats.ike_auth_decrypted, 4);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_rx, 5);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_decrypted, 5);
     assert_int_equal(supervisor.runtime_stats.ike_auth_inner_malformed, 4);
-    assert_int_equal(supervisor.runtime_stats.ike_auth_inner_parsed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_inner_parsed, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_request_tx, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_cert_extracted, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_eap_tls_rx, 0);
