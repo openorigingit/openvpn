@@ -3059,6 +3059,22 @@ ikev2_helper_initial_ike_auth_request_header_valid(
            && header->message_id == IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID;
 }
 
+static bool
+ikev2_helper_ike_auth_listener_allowed(
+    const struct ikev2_helper_listener *listener,
+    const struct provider_helper_runtime_config *config)
+{
+    if (!listener || !config)
+    {
+        return false;
+    }
+    if (config->flags & PROVIDER_HELPER_CONFIG_FORCE_NATT)
+    {
+        return (listener->descriptor.flags & PROVIDER_HELPER_LISTENER_FD_NATT) != 0;
+    }
+    return true;
+}
+
 static void
 ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                              const struct provider_helper_runtime_config *config,
@@ -3270,6 +3286,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
             if (!ikev2_helper_initial_ike_auth_request_header_valid(&header))
             {
                 ++counters->ike_auth_malformed;
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
+            if (!ikev2_helper_ike_auth_listener_allowed(listener, config))
+            {
+                ++counters->ike_auth_unsupported;
                 counters->ike_sa_active = sa_table->active;
                 return;
             }

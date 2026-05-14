@@ -3009,6 +3009,10 @@ test_provider_helper_spawn_ikev2_rejects_initial_state_mismatch(void **state)
     uint8_t cert_der[2048];
     size_t cert_der_len = 0;
     test_make_der_certificate(cert_der, sizeof(cert_der), &cert_der_len);
+    test_send_ikev2_encrypted_ike_auth_datagram_from(
+        response_fd, port, initiator_spi, &sa_init_material, false, false,
+        cert_der, cert_der_len);
+    usleep(10000);
     test_send_ikev2_encrypted_ike_auth_message_id_datagram_from(
         response_fd, natt_port, initiator_spi, &sa_init_material, true, false,
         cert_der, cert_der_len, 2);
@@ -3033,7 +3037,8 @@ test_provider_helper_spawn_ikev2_rejects_initial_state_mismatch(void **state)
     assert_true(supervisor.runtime_stats.datagrams_malformed >= 2);
 #if defined(ENABLE_CRYPTO_OPENSSL)
     assert_int_equal(supervisor.runtime_stats.ike_sa_init_accepted, 1);
-    assert_int_equal(supervisor.runtime_stats.ike_auth_rx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_rx, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_malformed, 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_decrypted, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_request_tx, 0);
