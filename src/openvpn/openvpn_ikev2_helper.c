@@ -5984,6 +5984,13 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                            == PROVIDER_HELPER_IKEV2_PAYLOAD_NONE
                     && plaintext_len == 0)
                 {
+                    if (!peer_matches || peer_migration_candidate)
+                    {
+                        ++counters->ike_mobike_unexpected_peer_dropped;
+                        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                        counters->ike_sa_active = sa_table->active;
+                        return;
+                    }
                     ++counters->ike_informational_empty_rx;
                     if (ikev2_helper_send_cached_encrypted_empty_response(
                             listener, sa, header.exchange_type,

@@ -6491,6 +6491,10 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
         supervisor.runtime_stats.ike_create_child_no_additional_sas_tx, 1);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
 
+    test_send_ikev2_encrypted_protected_exchange_from(
+        migrated_fd, natt_port, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
+        initiator_spi, &sa_init_material, true, 4);
+    usleep(10000);
     test_send_ikev2_encrypted_mobike_update_from(
         migrated_fd, natt_port, initiator_spi, &sa_init_material, true, 4);
     usleep(10000);
@@ -6514,7 +6518,8 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     assert_int_equal(supervisor.runtime_stats.ike_mobike_update_response_tx, 1);
     assert_int_equal(supervisor.runtime_stats.ike_mobike_peer_migrated, 0);
     assert_int_equal(
-        supervisor.runtime_stats.ike_mobike_unexpected_peer_dropped, 1);
+        supervisor.runtime_stats.ike_mobike_unexpected_peer_dropped, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_informational_empty_rx, 0);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
 
     test_send_ikev2_encrypted_child_delete_from(
