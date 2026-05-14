@@ -4579,7 +4579,7 @@ ikev2_helper_apply_auth_response(
         return true;
     }
 
-    return false;
+    return true;
 }
 
 static bool

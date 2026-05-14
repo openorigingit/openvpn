@@ -4111,6 +4111,29 @@ write_helper_header_fd(int fd, uint32_t type, uint64_t sequence,
 }
 
 static void
+write_helper_auth_response_fd(int fd, uint64_t sequence,
+                              uint64_t correlation_id,
+                              const struct provider_helper_auth_response *response)
+{
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE
+                                  + PROVIDER_HELPER_AUTH_RESPONSE_SIZE);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_AUTH_RESPONSE,
+        .sequence = sequence,
+        .correlation_id = correlation_id,
+        .payload_len = PROVIDER_HELPER_AUTH_RESPONSE_SIZE,
+    };
+
+    assert_true(provider_helper_ipc_write_header(&buf, &header));
+    assert_true(provider_helper_ipc_write_auth_response(&buf, response));
+    assert_int_equal(write(fd, BPTR(&buf), (size_t)BLEN(&buf)), BLEN(&buf));
+    free_buf(&buf);
+}
+
+static void
 test_provider_helper_spawn_ikev2_natt_listener(void **state)
 {
     (void)state;
@@ -4170,9 +4193,26 @@ test_provider_helper_spawn_ikev2_natt_listener(void **state)
     close(response_fd);
     close(listener_fd);
 
+    struct provider_helper_auth_response stale_response = {
+        .request_id = 999,
+        .decision = PROVIDER_HELPER_AUTH_DENY,
+    };
+    snprintf(stale_response.reason, sizeof(stale_response.reason), "%s",
+             "stale auth response");
+    stale_response.reason_len = (uint32_t)strlen(stale_response.reason);
+    write_helper_auth_response_fd(supervisor.ipc_fd,
+                                  supervisor.next_tx_sequence++, 89,
+                                  &stale_response);
+    for (int i = 0; i < 20; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+
     const uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           supervisor.next_tx_sequence++, 89);
+                           supervisor.next_tx_sequence++, 90);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
