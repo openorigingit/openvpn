@@ -846,7 +846,19 @@ provider_helper_event_set(struct provider_helper_supervisor *supervisor,
 void
 provider_helper_process_event(struct provider_helper_supervisor *supervisor)
 {
-    if (!supervisor || supervisor->ipc_fd < 0)
+    if (!supervisor)
+    {
+        return;
+    }
+
+#ifndef _WIN32
+    if (supervisor->ipc_fd < 0 && supervisor->pid > 0)
+    {
+        (void)provider_helper_supervisor_reap(supervisor);
+    }
+#endif
+
+    if (supervisor->ipc_fd < 0)
     {
         return;
     }
@@ -871,6 +883,9 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
         {
             provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_DEGRADED);
             provider_helper_close_ipc(supervisor);
+#ifndef _WIN32
+            (void)provider_helper_supervisor_reap(supervisor);
+#endif
             return;
         }
         supervisor->payload_received += (size_t)n;
@@ -955,6 +970,9 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
     {
         provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_DEGRADED);
         provider_helper_close_ipc(supervisor);
+#ifndef _WIN32
+        (void)provider_helper_supervisor_reap(supervisor);
+#endif
         return;
     }
     supervisor->header_len += (size_t)n;

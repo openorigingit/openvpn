@@ -43,6 +43,8 @@
 static const char *noop_helper_path;
 static const char *ikev2_helper_path;
 
+static const char *find_executable(const char *const *paths);
+
 struct provider_helper_status_capture
 {
     char data[4096];
@@ -4185,6 +4187,45 @@ test_provider_helper_spawn_noop(void **state)
     assert_int_equal(supervisor.ipc_fd, -1);
 }
 
+static void
+test_provider_helper_reaps_early_helper_exit(void **state)
+{
+    (void)state;
+
+#ifdef _WIN32
+    skip();
+#else
+    const char *const false_paths[] = {
+        "/usr/bin/false",
+        "/bin/false",
+        NULL
+    };
+    const char *false_path = find_executable(false_paths);
+    if (!false_path)
+    {
+        skip();
+    }
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+
+    char *const argv[] = { (char *)false_path, NULL };
+    assert_true(provider_helper_supervisor_spawn(&supervisor, false_path, argv));
+    assert_true(supervisor.pid > 0);
+
+    for (int i = 0; i < 100 && supervisor.pid > 0; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_DEGRADED);
+    assert_int_equal(supervisor.pid, 0);
+    assert_int_equal(supervisor.ipc_fd, -1);
+    provider_helper_supervisor_free(&supervisor);
+#endif
+}
+
 static int
 test_create_udp_listener(uint16_t *port)
 {
@@ -6490,6 +6531,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_processes_partial_header),
         cmocka_unit_test(test_provider_helper_auth_request_callback),
         cmocka_unit_test(test_provider_helper_spawn_noop),
+        cmocka_unit_test(test_provider_helper_reaps_early_helper_exit),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_natt_listener),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_unsupported_exchange),
         cmocka_unit_test(
