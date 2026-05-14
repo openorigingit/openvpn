@@ -357,6 +357,9 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_informational_delete_rx = 58,
         .ike_informational_delete_response_tx = 59,
         .ike_informational_delete_response_failed = 60,
+        .ike_create_child_unsupported_rx = 61,
+        .ike_create_child_temp_failure_tx = 62,
+        .ike_create_child_temp_failure_failed = 63,
         .ike_auth_rx = 26,
         .ike_auth_malformed = 27,
         .ike_auth_no_state = 28,
@@ -453,6 +456,12 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_informational_delete_response_tx);
     assert_int_equal(output.ike_informational_delete_response_failed,
                      input.ike_informational_delete_response_failed);
+    assert_int_equal(output.ike_create_child_unsupported_rx,
+                     input.ike_create_child_unsupported_rx);
+    assert_int_equal(output.ike_create_child_temp_failure_tx,
+                     input.ike_create_child_temp_failure_tx);
+    assert_int_equal(output.ike_create_child_temp_failure_failed,
+                     input.ike_create_child_temp_failure_failed);
     assert_int_equal(output.ike_auth_rx, input.ike_auth_rx);
     assert_int_equal(output.ike_auth_malformed, input.ike_auth_malformed);
     assert_int_equal(output.ike_auth_no_state, input.ike_auth_no_state);
@@ -2105,10 +2114,12 @@ test_recv_ikev2_natt_sa_init_response(int fd, uint64_t initiator_spi)
 
 #if defined(ENABLE_CRYPTO_OPENSSL)
 static void
-test_recv_ikev2_encrypted_notify_response(
+test_recv_ikev2_encrypted_notify_exchange_response(
     int fd,
     uint64_t initiator_spi,
     const struct test_ikev2_sa_init_response_material *material,
+    uint8_t expected_exchange_type,
+    uint32_t expected_message_id,
     uint16_t expected_notify_type,
     bool expect_natt)
 {
@@ -2138,10 +2149,9 @@ test_recv_ikev2_encrypted_notify_response(
                      PROVIDER_HELPER_IKEV2_PARSE_OK);
     assert_int_equal(header.initiator_spi, initiator_spi);
     assert_int_equal(header.responder_spi, material->responder_spi);
-    assert_int_equal(header.exchange_type,
-                     PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH);
+    assert_int_equal(header.exchange_type, expected_exchange_type);
     assert_int_equal(header.flags, PROVIDER_HELPER_IKEV2_FLAG_RESPONSE);
-    assert_int_equal(header.message_id, 1);
+    assert_int_equal(header.message_id, expected_message_id);
     assert_true(summary.saw_sk);
     assert_int_equal(summary.sk_count, 1);
     assert_int_equal(summary.sk_next_payload,
@@ -2191,6 +2201,19 @@ test_recv_ikev2_encrypted_notify_response(
     secure_memzero(sk_er, sizeof(sk_er));
     secure_memzero(nonce, sizeof(nonce));
     secure_memzero(plaintext, sizeof(plaintext));
+}
+
+static void
+test_recv_ikev2_encrypted_notify_response(
+    int fd,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    uint16_t expected_notify_type,
+    bool expect_natt)
+{
+    test_recv_ikev2_encrypted_notify_exchange_response(
+        fd, initiator_spi, material, PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+        1, expected_notify_type, expect_natt);
 }
 
 static void
@@ -3269,6 +3292,10 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     test_send_ikev2_encrypted_protected_exchange_from(
         state_fd, natt_port, PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA,
         state_initiator_spi, &state_material, true, 2);
+    test_recv_ikev2_encrypted_notify_exchange_response(
+        state_fd, state_initiator_spi, &state_material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA, 2,
+        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
     test_send_ikev2_encrypted_protected_exchange_from(
         state_fd, natt_port, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
         state_initiator_spi, &state_material, true, 3);
@@ -3322,6 +3349,12 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
         supervisor.runtime_stats.ike_informational_delete_response_tx, 1);
     assert_int_equal(
         supervisor.runtime_stats.ike_informational_delete_response_failed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_unsupported_rx,
+                     1);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_temp_failure_tx,
+                     1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_create_child_temp_failure_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
 #else
     assert_int_equal(supervisor.runtime_stats.datagrams_rx, 7);
@@ -3337,6 +3370,12 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
         supervisor.runtime_stats.ike_informational_delete_response_tx, 0);
     assert_int_equal(
         supervisor.runtime_stats.ike_informational_delete_response_failed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_unsupported_rx,
+                     0);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_temp_failure_tx,
+                     0);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_create_child_temp_failure_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
 #endif
     assert_int_equal(supervisor.runtime_stats.datagrams_malformed, 4);

@@ -2734,6 +2734,8 @@ ikev2_helper_build_encrypted_notify_response(
     size_t *response_len,
     const struct ikev2_helper_listener *listener,
     const struct ikev2_helper_ike_sa *sa,
+    uint8_t exchange_type,
+    uint32_t message_id,
     uint16_t notify_type)
 {
     if (response_len)
@@ -2758,17 +2760,18 @@ ikev2_helper_build_encrypted_notify_response(
 
     const bool ret = ikev2_helper_build_encrypted_payload_response(
         response, response_size, response_len, listener, sa,
-        PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH, sa ? sa->message_id : 0,
-        PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY, plaintext,
-        (size_t)(plain_pos - plaintext));
+        exchange_type, message_id, PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY,
+        plaintext, (size_t)(plain_pos - plaintext));
     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
     return ret;
 }
 
 static bool
-ikev2_helper_send_encrypted_notify_response(
+ikev2_helper_send_encrypted_notify_exchange_response(
     const struct ikev2_helper_listener *listener,
     const struct ikev2_helper_ike_sa *sa,
+    uint8_t exchange_type,
+    uint32_t message_id,
     uint16_t notify_type)
 {
     uint8_t response[PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE
@@ -2781,7 +2784,7 @@ ikev2_helper_send_encrypted_notify_response(
     if (!listener || !sa || !sa->active
         || !ikev2_helper_build_encrypted_notify_response(
             response, sizeof(response), &response_len, listener, sa,
-            notify_type))
+            exchange_type, message_id, notify_type))
     {
         return false;
     }
@@ -2791,6 +2794,17 @@ ikev2_helper_send_encrypted_notify_response(
                (const struct sockaddr *)&sa->peer, sa->peer_len);
     ikev2_helper_secure_zero(response, sizeof(response));
     return sent == (ssize_t)response_len;
+}
+
+static bool
+ikev2_helper_send_encrypted_notify_response(
+    const struct ikev2_helper_listener *listener,
+    const struct ikev2_helper_ike_sa *sa,
+    uint16_t notify_type)
+{
+    return ikev2_helper_send_encrypted_notify_exchange_response(
+        listener, sa, PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+        sa ? sa->message_id : 0, notify_type);
 }
 
 static bool
@@ -3658,6 +3672,26 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         counters->ike_sa_active = sa_table->active;
                         return;
                     }
+                }
+                if (header.exchange_type
+                    == PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA)
+                {
+                    ++counters->ike_create_child_unsupported_rx;
+                    ++counters->ike_exchange_unsupported;
+                    if (ikev2_helper_send_encrypted_notify_exchange_response(
+                            listener, sa, header.exchange_type,
+                            header.message_id,
+                            PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
+                    {
+                        ++counters->ike_create_child_temp_failure_tx;
+                    }
+                    else
+                    {
+                        ++counters->ike_create_child_temp_failure_failed;
+                    }
+                    ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                    counters->ike_sa_active = sa_table->active;
+                    return;
                 }
                 ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
             }

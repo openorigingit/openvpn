@@ -36,7 +36,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 36
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  504
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  528
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
 #define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
@@ -329,6 +329,9 @@ struct provider_helper_runtime_stats {
     uint64_t ike_informational_delete_rx;
     uint64_t ike_informational_delete_response_tx;
     uint64_t ike_informational_delete_response_failed;
+    uint64_t ike_create_child_unsupported_rx;
+    uint64_t ike_create_child_temp_failure_tx;
+    uint64_t ike_create_child_temp_failure_failed;
     uint64_t ike_auth_rx;
     uint64_t ike_auth_malformed;
     uint64_t ike_auth_no_state;
