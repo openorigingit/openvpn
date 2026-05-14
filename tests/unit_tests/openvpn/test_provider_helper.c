@@ -101,6 +101,18 @@ test_provider_helper_rejects_bad_framing(void **state)
     assert_false(provider_helper_ipc_write_header(&bad_write, &oversized));
     free_buf(&bad_write);
 
+    struct provider_helper_msg_header bad_flags = test_header(1, 0);
+    bad_flags.flags = 1;
+    bad_write = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE);
+    assert_false(provider_helper_ipc_write_header(&bad_write, &bad_flags));
+    free_buf(&bad_write);
+
+    struct provider_helper_msg_header bad_reserved = test_header(1, 0);
+    bad_reserved.reserved = 1;
+    bad_write = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE);
+    assert_false(provider_helper_ipc_write_header(&bad_write, &bad_reserved));
+    free_buf(&bad_write);
+
     struct provider_helper_msg_header bad_magic = test_header(1, 0);
     bad_magic.magic = 0;
     assert_int_equal(write_and_read_header(&bad_magic, &output, &last_sequence),
@@ -110,6 +122,30 @@ test_provider_helper_rejects_bad_framing(void **state)
     bad_version.version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR + 1;
     assert_int_equal(write_and_read_header(&bad_version, &output, &last_sequence),
                      PROVIDER_HELPER_IPC_BAD_VERSION);
+
+    uint8_t header_buf[PROVIDER_HELPER_IPC_HEADER_SIZE];
+    struct provider_helper_msg_header good = test_header(1, 0);
+    assert_true(provider_helper_ipc_encode_header(header_buf, sizeof(header_buf),
+                                                 &good));
+
+    header_buf[12] = 1; /* flags field */
+    struct buffer bad_read = { 0 };
+    buf_set_read(&bad_read, header_buf, sizeof(header_buf));
+    last_sequence = 0;
+    assert_int_equal(provider_helper_ipc_read_header(
+                         &bad_read, &output, PROVIDER_HELPER_IPC_MAX_MESSAGE,
+                         &last_sequence),
+                     PROVIDER_HELPER_IPC_BAD_FLAGS);
+
+    assert_true(provider_helper_ipc_encode_header(header_buf, sizeof(header_buf),
+                                                 &good));
+    header_buf[39] = 1; /* reserved field */
+    buf_set_read(&bad_read, header_buf, sizeof(header_buf));
+    last_sequence = 0;
+    assert_int_equal(provider_helper_ipc_read_header(
+                         &bad_read, &output, PROVIDER_HELPER_IPC_MAX_MESSAGE,
+                         &last_sequence),
+                     PROVIDER_HELPER_IPC_BAD_FLAGS);
 
     struct provider_helper_msg_header seq = test_header(1, 0);
     last_sequence = 1;

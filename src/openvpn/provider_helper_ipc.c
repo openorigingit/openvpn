@@ -49,6 +49,9 @@ provider_helper_ipc_result_name(enum provider_helper_ipc_result result)
         case PROVIDER_HELPER_IPC_BAD_VERSION:
             return "bad-version";
 
+        case PROVIDER_HELPER_IPC_BAD_FLAGS:
+            return "bad-flags";
+
         case PROVIDER_HELPER_IPC_OVERSIZE:
             return "oversize";
 
@@ -64,7 +67,8 @@ bool
 provider_helper_ipc_write_header(struct buffer *buf,
                                  const struct provider_helper_msg_header *header)
 {
-    if (!buf || !header || header->payload_len > PROVIDER_HELPER_IPC_MAX_MESSAGE)
+    if (!buf || !header || header->flags || header->reserved
+        || header->payload_len > PROVIDER_HELPER_IPC_MAX_MESSAGE)
     {
         return false;
     }

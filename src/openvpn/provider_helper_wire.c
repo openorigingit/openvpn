@@ -2442,6 +2442,7 @@ provider_helper_ipc_encode_header(uint8_t *dst, size_t dst_len,
                                   const struct provider_helper_msg_header *header)
 {
     if (!dst || dst_len < PROVIDER_HELPER_IPC_HEADER_SIZE || !header
+        || header->flags || header->reserved
         || header->payload_len > PROVIDER_HELPER_IPC_MAX_MESSAGE)
     {
         return false;
@@ -2491,6 +2492,10 @@ provider_helper_ipc_decode_header(const uint8_t *src, size_t src_len,
     if (header->version_major != PROVIDER_HELPER_IPC_VERSION_MAJOR)
     {
         return PROVIDER_HELPER_IPC_BAD_VERSION;
+    }
+    if (header->flags || header->reserved)
+    {
+        return PROVIDER_HELPER_IPC_BAD_FLAGS;
     }
     if (!max_message_size || max_message_size > PROVIDER_HELPER_IPC_MAX_MESSAGE)
     {
