@@ -4036,6 +4036,13 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
+                if (sa->message_id >= IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID
+                    && header.message_id != sa->message_id + 1)
+                {
+                    ++counters->ike_exchange_out_of_order_dropped;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
 
                 uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
                 size_t plaintext_len = 0;
