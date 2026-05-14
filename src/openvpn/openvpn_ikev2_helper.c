@@ -3931,6 +3931,10 @@ ikev2_helper_store_ike_sa_init_material(
     {
         return false;
     }
+    ikev2_helper_secure_zero(sa->responder_private_key,
+                             sizeof(sa->responder_private_key));
+    sa->responder_private_key_len = 0;
+
     sa->skeyseed_len = sizeof(sa->skeyseed);
     if (!ikev2_helper_derive_skeyseed(
             sa->initiator_nonce, sa->initiator_nonce_len,
@@ -3940,10 +3944,15 @@ ikev2_helper_store_ike_sa_init_material(
     {
         return false;
     }
+    ikev2_helper_secure_zero(sa->shared_secret, sizeof(sa->shared_secret));
+    sa->shared_secret_len = 0;
+
     if (!ikev2_helper_derive_ike_sa_keys(sa))
     {
         return false;
     }
+    ikev2_helper_secure_zero(sa->skeyseed, sizeof(sa->skeyseed));
+    sa->skeyseed_len = 0;
     return true;
 }
 
