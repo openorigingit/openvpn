@@ -225,6 +225,15 @@ test_provider_helper_runtime_config_roundtrip(void **state)
     input.flags = PROVIDER_HELPER_CONFIG_FORCE_NATT
                   | PROVIDER_HELPER_CONFIG_IPV4_ONLY;
 
+    input.max_half_open_sas = 0;
+    assert_false(provider_helper_runtime_config_valid(&input, reason,
+                                                      sizeof(reason)));
+    assert_non_null(strstr(reason, "max_half_open_sas"));
+    input.max_half_open_sas = PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_SAS + 1;
+    assert_false(provider_helper_runtime_config_valid(&input, reason,
+                                                      sizeof(reason)));
+    assert_non_null(strstr(reason, "max_half_open_sas"));
+    input.max_half_open_sas = PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_SAS;
     input.cookie_threshold = input.max_half_open_sas + 1;
     assert_false(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
     assert_non_null(strstr(reason, "cookie_threshold"));

@@ -94,9 +94,11 @@ provider_helper_runtime_config_valid(const struct provider_helper_runtime_config
         provider_helper_config_reason(reason, reason_size, "IPV4_ONLY is required");
         return false;
     }
-    if (config->max_half_open_sas == 0)
+    if (config->max_half_open_sas == 0
+        || config->max_half_open_sas > PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_SAS)
     {
-        provider_helper_config_reason(reason, reason_size, "max_half_open_sas must be nonzero");
+        provider_helper_config_reason(reason, reason_size,
+                                      "max_half_open_sas outside supported bounds");
         return false;
     }
     if (config->cookie_threshold == 0
