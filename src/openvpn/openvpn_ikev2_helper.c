@@ -4682,18 +4682,27 @@ ikev2_helper_queue_auth_request(
     return true;
 }
 
-static void
+static bool
 ikev2_helper_clear_ike_sa_table(struct ikev2_helper_ike_sa_table *table,
                                 struct provider_helper_runtime_stats *counters)
 {
-    if (table)
+    if (!table)
     {
-        for (size_t i = 0; i < SIZE(table->entries); ++i)
-        {
-            ikev2_helper_clear_ike_sa(table, &table->entries[i], counters);
-        }
-        ikev2_helper_secure_zero(table, sizeof(*table));
+        return true;
     }
+
+    bool ret = true;
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        if (!ikev2_helper_clear_ike_sa(table, &table->entries[i], counters))
+        {
+            ret = false;
+            ikev2_helper_secure_zero(&table->entries[i],
+                                     sizeof(table->entries[i]));
+        }
+    }
+    ikev2_helper_secure_zero(table, sizeof(*table));
+    return ret;
 }
 
 static void
@@ -6346,7 +6355,10 @@ done:
         close(listeners[i].fd);
         listeners[i].fd = -1;
     }
-    ikev2_helper_clear_ike_sa_table(&sa_table, &counters);
+    if (!ikev2_helper_clear_ike_sa_table(&sa_table, &counters) && ret == 0)
+    {
+        ret = 10;
+    }
     ikev2_helper_cookie_context_free(&cookie_ctx);
 
     return ret;
