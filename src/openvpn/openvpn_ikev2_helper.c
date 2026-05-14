@@ -1425,6 +1425,28 @@ ikev2_helper_read_xfrm_lease(int fd, const struct provider_helper_msg_header *he
 }
 
 static bool
+ikev2_helper_sockaddr_len_valid(const struct sockaddr_storage *addr,
+                                socklen_t len)
+{
+    if (!addr)
+    {
+        return false;
+    }
+
+    switch (addr->ss_family)
+    {
+        case AF_INET:
+            return len >= sizeof(struct sockaddr_in);
+
+        case AF_INET6:
+            return len >= sizeof(struct sockaddr_in6);
+
+        default:
+            return false;
+    }
+}
+
+static bool
 ikev2_helper_peer_address_equal(const struct sockaddr_storage *a,
                                 const struct sockaddr_storage *b)
 {
@@ -1492,10 +1514,9 @@ static bool
 ikev2_helper_peer_equal(const struct sockaddr_storage *a, socklen_t a_len,
                         const struct sockaddr_storage *b, socklen_t b_len)
 {
-    (void)a_len;
-    (void)b_len;
-
-    if (!ikev2_helper_peer_address_equal(a, b))
+    if (!ikev2_helper_sockaddr_len_valid(a, a_len)
+        || !ikev2_helper_sockaddr_len_valid(b, b_len)
+        || !ikev2_helper_peer_address_equal(a, b))
     {
         return false;
     }
@@ -3946,7 +3967,9 @@ ikev2_helper_add_ike_sa(struct ikev2_helper_ike_sa_table *table,
         *out_sa = NULL;
     }
     if (!table || !listener || !header || !peer || !selection
-        || !selection->selected || !packet || !summary || !out_sa)
+        || !selection->selected || !ikev2_helper_sockaddr_len_valid(peer,
+                                                                    peer_len)
+        || !packet || !summary || !out_sa)
     {
         return IKEV2_HELPER_ADD_SA_STATE_FAILED;
     }
@@ -5438,6 +5461,11 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
     peer_len = msg.msg_namelen;
 
     ++counters->datagrams_rx;
+    if (!ikev2_helper_sockaddr_len_valid(&peer, peer_len))
+    {
+        ++counters->datagrams_malformed;
+        return;
+    }
     if (msg.msg_flags & MSG_TRUNC)
     {
         ++counters->datagrams_oversize;
