@@ -529,6 +529,18 @@ provider_policy_authorize(const struct provider_policy_auth_context *context,
             "provider credential fingerprint is required");
         return false;
     }
+    if (!context->cert_serial || !*context->cert_serial)
+    {
+        provider_policy_set_auth_result(result, PROVIDER_POLICY_AUTH_DENIED,
+                                        "provider certificate serial is required");
+        return false;
+    }
+    if (!context->cert_issuer || !*context->cert_issuer)
+    {
+        provider_policy_set_auth_result(result, PROVIDER_POLICY_AUTH_DENIED,
+                                        "provider certificate issuer is required");
+        return false;
+    }
 
     provider_policy_set_auth_result(
         result, PROVIDER_POLICY_AUTH_DENIED,

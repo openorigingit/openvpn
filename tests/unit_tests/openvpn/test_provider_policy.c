@@ -243,6 +243,16 @@ test_provider_policy_authorize_fails_closed(void **state)
     context.credential_fingerprint = "sha256:abcd";
     assert_false(provider_policy_authorize(&context, &result));
     assert_int_equal(result.status, PROVIDER_POLICY_AUTH_DENIED);
+    assert_non_null(strstr(result.reason, "serial"));
+
+    context.cert_serial = "1234";
+    assert_false(provider_policy_authorize(&context, &result));
+    assert_int_equal(result.status, PROVIDER_POLICY_AUTH_DENIED);
+    assert_non_null(strstr(result.reason, "issuer"));
+
+    context.cert_issuer = "CN=Example CA";
+    assert_false(provider_policy_authorize(&context, &result));
+    assert_int_equal(result.status, PROVIDER_POLICY_AUTH_DENIED);
     assert_non_null(strstr(result.reason, "lease authorization"));
 }
 
