@@ -432,6 +432,8 @@ static const char usage_message[] =
     "--experimental-ikev2-helper path : Start experimental IKEv2 helper.\n"
     "                  OpenVPN remains the policy owner; unsupported policy\n"
     "                  hooks fail preflight before helper startup.\n"
+    "--experimental-ikev2-helper-apply-xfrm : Allow the experimental IKEv2\n"
+    "                  helper to install OpenVPN-issued Linux XFRM state.\n"
     "--push \"option\" : Push a config file option back to the peer for remote\n"
     "                  execution.  Peer must specify --pull in its config file.\n"
     "--push-reset    : Don't inherit global push list for specific\n"
@@ -1797,6 +1799,7 @@ show_settings(const struct options *o)
     }
 
     SHOW_STR(ikev2_helper_path);
+    SHOW_BOOL(ikev2_helper_apply_xfrm);
 
     show_dns_options(&o->dns_options);
 
@@ -2507,11 +2510,23 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
             msg(M_USAGE, "--mode server requires --tls-server");
         }
 #ifdef _WIN32
-        if (options->ikev2_helper_path)
+        if (options->ikev2_helper_path || options->ikev2_helper_apply_xfrm)
         {
             msg(M_USAGE, "--experimental-ikev2-helper is not supported on Windows");
         }
 #endif
+#if !defined(TARGET_LINUX)
+        if (options->ikev2_helper_apply_xfrm)
+        {
+            msg(M_USAGE,
+                "--experimental-ikev2-helper-apply-xfrm is only supported on Linux");
+        }
+#endif
+        if (options->ikev2_helper_apply_xfrm && !options->ikev2_helper_path)
+        {
+            msg(M_USAGE,
+                "--experimental-ikev2-helper-apply-xfrm requires --experimental-ikev2-helper");
+        }
         MUST_BE_FALSE(ce->remote, "remote");
         MUST_BE_FALSE(!ce->bind_local, "nobind");
         MUST_BE_FALSE(ce->http_proxy_options, "http-proxy");
@@ -2630,6 +2645,8 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
         MUST_BE_UNDEF(client_config_dir, "client-config-dir");
         MUST_BE_UNDEF(ccd_exclusive, "ccd-exclusive");
         MUST_BE_UNDEF(ikev2_helper_path, "experimental-ikev2-helper");
+        MUST_BE_FALSE(options->ikev2_helper_apply_xfrm,
+                      "experimental-ikev2-helper-apply-xfrm");
         MUST_BE_UNDEF(enable_c2c, "client-to-client");
         MUST_BE_UNDEF(duplicate_cn, "duplicate-cn");
         MUST_BE_UNDEF(cf_max, "connect-freq");
@@ -7272,6 +7289,11 @@ add_option(struct options *options, char *p[], bool is_inline, const char *file,
     {
         VERIFY_PERMISSION(OPT_P_GENERAL);
         options->ikev2_helper_path = p[1];
+    }
+    else if (streq(p[0], "experimental-ikev2-helper-apply-xfrm") && !p[1])
+    {
+        VERIFY_PERMISSION(OPT_P_GENERAL);
+        options->ikev2_helper_apply_xfrm = true;
     }
     else if (streq(p[0], "push") && p[1] && !p[2])
     {

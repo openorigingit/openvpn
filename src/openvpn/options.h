@@ -475,6 +475,7 @@ struct options
     unsigned int server_flags;
 
     const char *ikev2_helper_path;
+    bool ikev2_helper_apply_xfrm;
 
     bool server_bridge_proxy_dhcp;
 

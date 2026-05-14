@@ -393,6 +393,10 @@ multi_start_ikev2_helper(struct context *t)
 
     provider_helper_supervisor_set_auth_callback(
         &m->provider_helper, multi_ikev2_helper_auth_request, m);
+    if (t->options.ikev2_helper_apply_xfrm)
+    {
+        m->provider_helper.runtime_config.flags |= PROVIDER_HELPER_CONFIG_APPLY_XFRM;
+    }
 
     char *const argv[] = { (char *)helper_path, NULL };
     if (!provider_helper_supervisor_spawn(&m->provider_helper, helper_path, argv))
