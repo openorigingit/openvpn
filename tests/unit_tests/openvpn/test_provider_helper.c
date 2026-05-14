@@ -1490,15 +1490,15 @@ test_send_ikev2_natt_datagram_from(int fd, uint16_t port,
 }
 
 static void
-test_send_ikev2_exchange_header_from(int fd, uint16_t port,
-                                     uint8_t exchange_type,
-                                     uint64_t initiator_spi,
-                                     uint64_t responder_spi,
-                                     uint32_t message_id)
+test_send_ikev2_exchange_header_fields_from(int fd, uint16_t port,
+                                            uint8_t exchange_type,
+                                            uint8_t flags,
+                                            uint64_t initiator_spi,
+                                            uint64_t responder_spi,
+                                            uint32_t message_id)
 {
     uint8_t packet[PROVIDER_HELPER_IKEV2_HEADER_SIZE];
-    test_make_ikev2_header(packet, false, exchange_type,
-                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+    test_make_ikev2_header(packet, false, exchange_type, flags,
                            responder_spi, PROVIDER_HELPER_IKEV2_HEADER_SIZE);
     test_write_be64(packet, initiator_spi);
     test_write_be32(packet + 20, message_id);
@@ -1512,6 +1512,18 @@ test_send_ikev2_exchange_header_from(int fd, uint16_t port,
     assert_int_equal(sendto(fd, packet, sizeof(packet), 0,
                             (struct sockaddr *)&addr, sizeof(addr)),
                      sizeof(packet));
+}
+
+static void
+test_send_ikev2_exchange_header_from(int fd, uint16_t port,
+                                     uint8_t exchange_type,
+                                     uint64_t initiator_spi,
+                                     uint64_t responder_spi,
+                                     uint32_t message_id)
+{
+    test_send_ikev2_exchange_header_fields_from(
+        fd, port, exchange_type, PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+        initiator_spi, responder_spi, message_id);
 }
 
 static void
@@ -2892,6 +2904,14 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     test_send_ikev2_exchange_header_from(
         datagram_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
         0x0102030405060708ull, 0x8877665544332211ull, 3);
+    test_send_ikev2_exchange_header_fields_from(
+        datagram_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA,
+        PROVIDER_HELPER_IKEV2_FLAG_RESPONSE, 0x0102030405060709ull,
+        0x8877665544332211ull, 2);
+    test_send_ikev2_exchange_header_fields_from(
+        datagram_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
+        PROVIDER_HELPER_IKEV2_FLAG_RESPONSE, 0x0102030405060709ull,
+        0x8877665544332211ull, 3);
     usleep(10000);
     close(datagram_fd);
     close(listener_fd);
@@ -2909,8 +2929,9 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
-    assert_int_equal(supervisor.runtime_stats.datagrams_rx, 2);
-    assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 2);
+    assert_int_equal(supervisor.runtime_stats.datagrams_rx, 4);
+    assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 4);
+    assert_int_equal(supervisor.runtime_stats.datagrams_malformed, 2);
     assert_int_equal(supervisor.runtime_stats.ike_exchange_unsupported, 2);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
 
