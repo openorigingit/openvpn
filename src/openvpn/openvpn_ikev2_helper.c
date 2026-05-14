@@ -4339,6 +4339,7 @@ ikev2_helper_scaffold_child_sa(
     ikev2_helper_secure_zero(&sa->child_sa, sizeof(sa->child_sa));
     child.xfrm_applied = apply_xfrm;
     sa->child_sa = child;
+    ikev2_helper_secure_zero(&child, sizeof(child));
     return true;
 }
 
