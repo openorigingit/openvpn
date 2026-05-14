@@ -239,6 +239,7 @@ test_provider_helper_runtime_config_roundtrip(void **state)
     assert_int_equal(output.cookie_threshold, input.cookie_threshold);
     assert_int_equal(output.max_packet_size, input.max_packet_size);
     assert_int_equal(output.max_cert_chain_bytes, input.max_cert_chain_bytes);
+    assert_int_equal(output.max_cert_chain_depth, input.max_cert_chain_depth);
     assert_int_equal(output.retransmit_limit, input.retransmit_limit);
     assert_int_equal(output.worker_limit, input.worker_limit);
     assert_int_equal(output.half_open_timeout_seconds,
@@ -293,6 +294,15 @@ test_provider_helper_runtime_config_roundtrip(void **state)
                                                       sizeof(reason)));
     assert_non_null(strstr(reason, "max_cert_chain_bytes"));
     input.max_cert_chain_bytes = PROVIDER_HELPER_DEFAULT_MAX_CERT_BYTES;
+    input.max_cert_chain_depth = 0;
+    assert_false(provider_helper_runtime_config_valid(&input, reason,
+                                                      sizeof(reason)));
+    assert_non_null(strstr(reason, "max_cert_chain_depth"));
+    input.max_cert_chain_depth = PROVIDER_HELPER_IKEV2_MAX_PAYLOADS + 1;
+    assert_false(provider_helper_runtime_config_valid(&input, reason,
+                                                      sizeof(reason)));
+    assert_non_null(strstr(reason, "max_cert_chain_depth"));
+    input.max_cert_chain_depth = PROVIDER_HELPER_DEFAULT_MAX_CERT_DEPTH;
     input.half_open_timeout_seconds = 0;
     assert_false(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
     assert_non_null(strstr(reason, "half_open_timeout_seconds"));
@@ -1865,7 +1875,8 @@ test_make_encrypted_ike_auth_aggregate_limit_packet(
 
     uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     CLEAR(plaintext);
-    const uint16_t body_len = 41;
+    const uint16_t body_len =
+        aggregate_payload == PROVIDER_HELPER_IKEV2_PAYLOAD_CERT ? 9 : 41;
     const uint16_t payload_len =
         PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + body_len;
 
@@ -4689,6 +4700,7 @@ test_provider_helper_spawn_ikev2_rejects_inner_aggregate_limits(void **state)
     struct provider_helper_supervisor supervisor;
     provider_helper_supervisor_init(&supervisor);
     supervisor.runtime_config.max_cert_chain_bytes = 64;
+    supervisor.runtime_config.max_cert_chain_depth = 1;
 
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,

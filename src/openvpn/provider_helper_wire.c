@@ -49,6 +49,7 @@ provider_helper_runtime_config_default(struct provider_helper_runtime_config *co
     config->cookie_threshold = PROVIDER_HELPER_DEFAULT_COOKIE_THRESHOLD;
     config->max_packet_size = PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE;
     config->max_cert_chain_bytes = PROVIDER_HELPER_DEFAULT_MAX_CERT_BYTES;
+    config->max_cert_chain_depth = PROVIDER_HELPER_DEFAULT_MAX_CERT_DEPTH;
     config->retransmit_limit = PROVIDER_HELPER_DEFAULT_RETRANSMIT_LIMIT;
     config->worker_limit = PROVIDER_HELPER_DEFAULT_WORKER_LIMIT;
     config->half_open_timeout_seconds =
@@ -123,6 +124,15 @@ provider_helper_runtime_config_valid(const struct provider_helper_runtime_config
     {
         provider_helper_config_reason(reason, reason_size,
                                       "max_cert_chain_bytes outside supported bounds");
+        return false;
+    }
+    if (config->max_cert_chain_depth == 0
+        || config->max_cert_chain_depth
+               > PROVIDER_HELPER_IKEV2_MAX_PAYLOADS)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "max_cert_chain_depth outside supported "
+                                      "bounds");
         return false;
     }
     if (config->retransmit_limit == 0)
@@ -658,6 +668,7 @@ provider_helper_ipc_encode_runtime_config(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u32(&pos, config->cookie_threshold);
     provider_helper_wire_write_u32(&pos, config->max_packet_size);
     provider_helper_wire_write_u32(&pos, config->max_cert_chain_bytes);
+    provider_helper_wire_write_u32(&pos, config->max_cert_chain_depth);
     provider_helper_wire_write_u32(&pos, config->retransmit_limit);
     provider_helper_wire_write_u32(&pos, config->worker_limit);
     provider_helper_wire_write_u32(&pos, config->half_open_timeout_seconds);
@@ -683,6 +694,7 @@ provider_helper_ipc_decode_runtime_config(const uint8_t *src, size_t src_len,
     config->cookie_threshold = provider_helper_wire_read_u32(&pos);
     config->max_packet_size = provider_helper_wire_read_u32(&pos);
     config->max_cert_chain_bytes = provider_helper_wire_read_u32(&pos);
+    config->max_cert_chain_depth = provider_helper_wire_read_u32(&pos);
     config->retransmit_limit = provider_helper_wire_read_u32(&pos);
     config->worker_limit = provider_helper_wire_read_u32(&pos);
     config->half_open_timeout_seconds = provider_helper_wire_read_u32(&pos);

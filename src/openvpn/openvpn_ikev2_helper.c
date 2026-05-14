@@ -2032,6 +2032,7 @@ ikev2_helper_parse_ike_auth_inner_payloads(
     size_t pos = 0;
     uint8_t payload_type = first_payload;
     uint32_t payload_count = 0;
+    uint32_t cert_count = 0;
     size_t cert_bytes = 0;
     size_t eap_bytes = 0;
     while (payload_type != PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
@@ -2076,6 +2077,11 @@ ikev2_helper_parse_ike_auth_inner_payloads(
         if (payload_type == PROVIDER_HELPER_IKEV2_PAYLOAD_CERT
             || payload_type == PROVIDER_HELPER_IKEV2_PAYLOAD_CERTREQ)
         {
+            if (payload_type == PROVIDER_HELPER_IKEV2_PAYLOAD_CERT
+                && ++cert_count > config->max_cert_chain_depth)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
             if (!ikev2_helper_add_bounded_payload_bytes(
                     &cert_bytes, body_len, config->max_cert_chain_bytes))
             {
