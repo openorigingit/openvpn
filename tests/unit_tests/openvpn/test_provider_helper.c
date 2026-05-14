@@ -363,6 +363,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_create_child_no_additional_sas_failed = 77,
         .ike_create_child_temp_failure_tx = 62,
         .ike_create_child_temp_failure_failed = 63,
+        .ike_create_child_no_proposal_tx = 78,
+        .ike_create_child_no_proposal_failed = 79,
         .ike_exchange_auth_pending_dropped = 64,
         .ike_exchange_replay_dropped = 65,
         .ike_exchange_out_of_order_dropped = 66,
@@ -482,6 +484,10 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_create_child_temp_failure_tx);
     assert_int_equal(output.ike_create_child_temp_failure_failed,
                      input.ike_create_child_temp_failure_failed);
+    assert_int_equal(output.ike_create_child_no_proposal_tx,
+                     input.ike_create_child_no_proposal_tx);
+    assert_int_equal(output.ike_create_child_no_proposal_failed,
+                     input.ike_create_child_no_proposal_failed);
     assert_int_equal(output.ike_exchange_auth_pending_dropped,
                      input.ike_exchange_auth_pending_dropped);
     assert_int_equal(output.ike_exchange_replay_dropped,
@@ -1953,6 +1959,7 @@ test_send_ikev2_encrypted_create_child_impl(
     const struct test_ikev2_sa_init_response_material *material,
     bool natt,
     uint32_t message_id,
+    uint16_t encr_id,
     bool rekey)
 {
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
@@ -1983,8 +1990,7 @@ test_send_ikev2_encrypted_create_child_impl(
                              + 4;
     test_write_be16(plaintext + transform + 2, TEST_IKEV2_ENCR_TRANSFORM_LEN);
     plaintext[transform + 4] = PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR;
-    test_write_be16(plaintext + transform + 6,
-                    PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16);
+    test_write_be16(plaintext + transform + 6, encr_id);
     test_write_be16(plaintext + transform + 8,
                     0x8000u | PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH);
     test_write_be16(plaintext + transform + 10, 256);
@@ -2068,7 +2074,8 @@ test_send_ikev2_encrypted_create_child_from(
     uint32_t message_id)
 {
     test_send_ikev2_encrypted_create_child_impl(
-        fd, port, initiator_spi, material, natt, message_id, false);
+        fd, port, initiator_spi, material, natt, message_id,
+        PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16, false);
 }
 
 static void
@@ -2081,7 +2088,21 @@ test_send_ikev2_encrypted_create_child_rekey_from(
     uint32_t message_id)
 {
     test_send_ikev2_encrypted_create_child_impl(
-        fd, port, initiator_spi, material, natt, message_id, true);
+        fd, port, initiator_spi, material, natt, message_id,
+        PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16, true);
+}
+
+static void
+test_send_ikev2_encrypted_create_child_no_proposal_from(
+    int fd,
+    uint16_t port,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt,
+    uint32_t message_id)
+{
+    test_send_ikev2_encrypted_create_child_impl(
+        fd, port, initiator_spi, material, natt, message_id, 999, false);
 }
 
 static void
@@ -3820,28 +3841,34 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
         PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 3, true);
     test_send_ikev2_encrypted_create_child_from(
         state_fd, natt_port, state_initiator_spi, &state_material, true, 2);
-    test_send_ikev2_encrypted_create_child_rekey_from(
+    test_send_ikev2_encrypted_create_child_no_proposal_from(
         state_fd, natt_port, state_initiator_spi, &state_material, true, 4);
     test_recv_ikev2_encrypted_notify_exchange_response(
         state_fd, state_initiator_spi, &state_material,
         PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA, 4,
-        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
-    test_send_ikev2_encrypted_ike_sa_rekey_from(
+        PROVIDER_HELPER_IKEV2_NOTIFY_NO_PROPOSAL_CHOSEN, true);
+    test_send_ikev2_encrypted_create_child_rekey_from(
         state_fd, natt_port, state_initiator_spi, &state_material, true, 5);
     test_recv_ikev2_encrypted_notify_exchange_response(
         state_fd, state_initiator_spi, &state_material,
         PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA, 5,
         PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
+    test_send_ikev2_encrypted_ike_sa_rekey_from(
+        state_fd, natt_port, state_initiator_spi, &state_material, true, 6);
+    test_recv_ikev2_encrypted_notify_exchange_response(
+        state_fd, state_initiator_spi, &state_material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA, 6,
+        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
     test_send_ikev2_encrypted_mobike_update_from(
-        migrated_fd, natt_port, state_initiator_spi, &state_material, true, 6);
-    test_recv_ikev2_encrypted_empty_response(
-        migrated_fd, state_initiator_spi, &state_material,
-        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 6, true);
-    test_send_ikev2_encrypted_ike_delete_from(
         migrated_fd, natt_port, state_initiator_spi, &state_material, true, 7);
     test_recv_ikev2_encrypted_empty_response(
         migrated_fd, state_initiator_spi, &state_material,
         PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 7, true);
+    test_send_ikev2_encrypted_ike_delete_from(
+        migrated_fd, natt_port, state_initiator_spi, &state_material, true, 8);
+    test_recv_ikev2_encrypted_empty_response(
+        migrated_fd, state_initiator_spi, &state_material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 8, true);
 #endif
     test_send_ikev2_exchange_header_fields_from(
         datagram_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA,
@@ -3875,9 +3902,9 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
 #if defined(ENABLE_CRYPTO_OPENSSL)
-    assert_int_equal(supervisor.runtime_stats.datagrams_rx, 22);
-    assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 22);
-    assert_int_equal(supervisor.runtime_stats.ike_exchange_unsupported, 5);
+    assert_int_equal(supervisor.runtime_stats.datagrams_rx, 23);
+    assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 23);
+    assert_int_equal(supervisor.runtime_stats.ike_exchange_unsupported, 6);
     assert_int_equal(supervisor.runtime_stats.ike_informational_empty_rx, 1);
     assert_int_equal(supervisor.runtime_stats.ike_informational_empty_response_tx,
                      1);
@@ -3889,7 +3916,7 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     assert_int_equal(
         supervisor.runtime_stats.ike_informational_delete_response_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_create_child_unsupported_rx,
-                     3);
+                     4);
     assert_int_equal(supervisor.runtime_stats.ike_create_child_rekey_rx, 2);
     assert_int_equal(supervisor.runtime_stats.ike_create_child_no_additional_sas_tx,
                      1);
@@ -3899,6 +3926,10 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
                      2);
     assert_int_equal(
         supervisor.runtime_stats.ike_create_child_temp_failure_failed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_no_proposal_tx,
+                     1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_create_child_no_proposal_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_exchange_replay_dropped, 2);
     assert_int_equal(supervisor.runtime_stats.ike_exchange_out_of_order_dropped,
                      1);
@@ -3941,6 +3972,10 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
                      0);
     assert_int_equal(
         supervisor.runtime_stats.ike_create_child_temp_failure_failed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_no_proposal_tx,
+                     0);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_create_child_no_proposal_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_exchange_replay_dropped, 0);
     assert_int_equal(supervisor.runtime_stats.ike_exchange_out_of_order_dropped,
                      0);

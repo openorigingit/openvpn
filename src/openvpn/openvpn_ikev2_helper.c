@@ -4768,10 +4768,36 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     {
                         ++counters->ike_create_child_rekey_rx;
                     }
+                    bool no_proposal = false;
+                    if (!rekey_request)
+                    {
+                        struct provider_helper_ikev2_child_sa_selection
+                            child_selection;
+                        const enum provider_helper_ikev2_parse_result
+                            select_result =
+                                provider_helper_ikev2_select_child_sa_proposal(
+                                    plaintext, plaintext_len, &inner_summary,
+                                    &child_selection);
+                        if (select_result
+                            == PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN)
+                        {
+                            no_proposal = true;
+                        }
+                        else if (select_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+                        {
+                            ++counters->datagrams_malformed;
+                            ikev2_helper_secure_zero(plaintext,
+                                                     sizeof(plaintext));
+                            counters->ike_sa_active = sa_table->active;
+                            return;
+                        }
+                    }
                     const uint16_t notify_type =
                         rekey_request
-                        ? PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE
-                        : PROVIDER_HELPER_IKEV2_NOTIFY_NO_ADDITIONAL_SAS;
+                            ? PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE
+                            : no_proposal
+                                  ? PROVIDER_HELPER_IKEV2_NOTIFY_NO_PROPOSAL_CHOSEN
+                                  : PROVIDER_HELPER_IKEV2_NOTIFY_NO_ADDITIONAL_SAS;
                     if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
                             listener, sa, header.exchange_type,
                             header.message_id, notify_type))
@@ -4779,6 +4805,10 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         if (rekey_request)
                         {
                             ++counters->ike_create_child_temp_failure_tx;
+                        }
+                        else if (no_proposal)
+                        {
+                            ++counters->ike_create_child_no_proposal_tx;
                         }
                         else
                         {
@@ -4791,6 +4821,11 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         if (rekey_request)
                         {
                             ++counters->ike_create_child_temp_failure_failed;
+                        }
+                        else if (no_proposal)
+                        {
+                            ++counters
+                                  ->ike_create_child_no_proposal_failed;
                         }
                         else
                         {
