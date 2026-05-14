@@ -791,6 +791,10 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
 #define TEST_IKEV2_CHILD_SA_PAYLOAD_LEN \
     (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE \
      + TEST_IKEV2_CHILD_SA_PROPOSAL_LEN)
+#define TEST_IKEV2_TS_IPV4_PAYLOAD_LEN \
+    (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE \
+     + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE \
+     + PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE)
 #define TEST_IKEV2_PRF_SHA256_BYTES 32
 #define TEST_IKEV2_AES_GCM_SALT_BYTES 4
 #define TEST_IKEV2_AES_GCM_IV_BYTES 8
@@ -1855,8 +1859,7 @@ test_send_ikev2_encrypted_create_child_from(
     uint8_t plaintext[TEST_IKEV2_CHILD_SA_PAYLOAD_LEN
                       + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
                       + PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
-                      + 2 * (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4)
-                      + 1];
+                      + 2 * TEST_IKEV2_TS_IPV4_PAYLOAD_LEN + 1];
     CLEAR(plaintext);
     size_t plaintext_len = 0;
 
@@ -1892,15 +1895,33 @@ test_send_ikev2_encrypted_create_child_from(
     memset(plaintext + nonce_offset, 0xa5,
            PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES);
 
+    const size_t tsi_offset = plaintext_len
+                              + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
     plaintext_len = test_add_ikev2_payload(
         plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_TSR,
-        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4, 0);
-    plaintext[plaintext_len - 4] = 1;
+        TEST_IKEV2_TS_IPV4_PAYLOAD_LEN, 0);
+    plaintext[tsi_offset] = 1;
+    const size_t tsi = tsi_offset + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+    plaintext[tsi] = PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE;
+    test_write_be16(plaintext + tsi + 2,
+                    PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
+    test_write_be16(plaintext + tsi + 6, 65535);
+    test_write_be32(plaintext + tsi + 8, 0x0a580002);
+    test_write_be32(plaintext + tsi + 12, 0x0a580002);
 
+    const size_t tsr_offset = plaintext_len
+                              + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
     plaintext_len = test_add_ikev2_payload(
         plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
-        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4, 0);
-    plaintext[plaintext_len - 4] = 1;
+        TEST_IKEV2_TS_IPV4_PAYLOAD_LEN, 0);
+    plaintext[tsr_offset] = 1;
+    const size_t tsr = tsr_offset + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+    plaintext[tsr] = PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE;
+    test_write_be16(plaintext + tsr + 2,
+                    PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
+    test_write_be16(plaintext + tsr + 6, 65535);
+    test_write_be32(plaintext + tsr + 8, 0x0a580001);
+    test_write_be32(plaintext + tsr + 12, 0x0a580001);
 
     plaintext[plaintext_len++] = 0; /* Pad Length. */
     const size_t packet_len = test_make_encrypted_ikev2_plaintext_packet(
