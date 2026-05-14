@@ -185,7 +185,9 @@ openvpn_ikev2_helper_CFLAGS = $(AM_CFLAGS)
 openvpn_ikev2_helper_SOURCES = \
 	openvpn_ikev2_helper.c \
 	provider_helper.h \
-	provider_helper_wire.c
+	provider_helper_wire.c \
+	provider_xfrm.c \
+	provider_xfrm.h
 openvpn_ikev2_helper_LDADD = \
 	$(top_builddir)/src/compat/libcompat.la \
 	$(SOCKETS_LIBS) \

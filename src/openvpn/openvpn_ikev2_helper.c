@@ -54,6 +54,7 @@
 #endif
 
 #include "provider_helper.h"
+#include "provider_xfrm.h"
 
 #include "memdbg.h"
 
@@ -120,6 +121,7 @@ struct ikev2_helper_child_sa_scaffold {
     time_t updated;
     struct provider_helper_ikev2_child_sa_selection selection;
     struct provider_helper_xfrm_lease xfrm_lease;
+    struct provider_xfrm_child_sa_plan xfrm_plan;
     size_t initiator_nonce_len;
     uint8_t initiator_nonce[PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES];
     size_t responder_nonce_len;
@@ -2523,11 +2525,32 @@ ikev2_helper_ipv4_ts_allowed(
 }
 
 static bool
-ikev2_helper_child_ts_matches_xfrm_lease(
+ikev2_helper_xfrm_selector_from_ipv4_ts(
+    const struct ikev2_helper_ipv4_ts_range *src,
+    struct provider_xfrm_ipv4_selector *dst)
+{
+    if (!src || !dst)
+    {
+        return false;
+    }
+
+    CLEAR(*dst);
+    dst->start_addr = src->start_addr;
+    dst->end_addr = src->end_addr;
+    dst->start_port = src->start_port;
+    dst->end_port = src->end_port;
+    dst->ip_protocol_id = src->ip_protocol_id;
+    return true;
+}
+
+static bool
+ikev2_helper_child_ts_for_xfrm_lease(
     const uint8_t *plaintext,
     size_t plaintext_len,
     const struct provider_helper_ikev2_payload_summary *summary,
-    const struct provider_helper_xfrm_lease *lease)
+    const struct provider_helper_xfrm_lease *lease,
+    struct provider_xfrm_ipv4_selector *local_ts,
+    struct provider_xfrm_ipv4_selector *remote_ts)
 {
     if (!plaintext || !summary || !lease || lease->address_family != AF_INET
         || !ikev2_helper_body_inside(plaintext_len, summary->tsi_offset,
@@ -2548,14 +2571,29 @@ ikev2_helper_child_ts_matches_xfrm_lease(
         return false;
     }
 
-    return ikev2_helper_ipv4_ts_allowed(
-               &tsi, lease->remote_ts_start_ipv4, lease->remote_ts_end_ipv4,
-               lease->remote_ts_start_port, lease->remote_ts_end_port,
-               lease->ip_protocol_id)
-           && ikev2_helper_ipv4_ts_allowed(
-               &tsr, lease->local_ts_start_ipv4, lease->local_ts_end_ipv4,
-               lease->local_ts_start_port, lease->local_ts_end_port,
-               lease->ip_protocol_id);
+    if (!ikev2_helper_ipv4_ts_allowed(
+            &tsi, lease->remote_ts_start_ipv4, lease->remote_ts_end_ipv4,
+            lease->remote_ts_start_port, lease->remote_ts_end_port,
+            lease->ip_protocol_id)
+        || !ikev2_helper_ipv4_ts_allowed(
+            &tsr, lease->local_ts_start_ipv4, lease->local_ts_end_ipv4,
+            lease->local_ts_start_port, lease->local_ts_end_port,
+            lease->ip_protocol_id))
+    {
+        return false;
+    }
+
+    if (local_ts
+        && !ikev2_helper_xfrm_selector_from_ipv4_ts(&tsr, local_ts))
+    {
+        return false;
+    }
+    if (remote_ts
+        && !ikev2_helper_xfrm_selector_from_ipv4_ts(&tsi, remote_ts))
+    {
+        return false;
+    }
+    return true;
 }
 
 static enum provider_helper_ikev2_parse_result
@@ -3781,11 +3819,93 @@ ikev2_helper_count_child_sa_scaffolds(
 }
 
 static bool
+ikev2_helper_sockaddr_ipv4_host(const struct sockaddr_storage *addr,
+                                socklen_t addr_len,
+                                uint32_t *host_ipv4)
+{
+    if (!addr || !host_ipv4 || addr->ss_family != AF_INET
+        || addr_len < sizeof(struct sockaddr_in))
+    {
+        return false;
+    }
+
+    const struct sockaddr_in *in = (const struct sockaddr_in *)addr;
+    *host_ipv4 = ntohl(in->sin_addr.s_addr);
+    return *host_ipv4 != 0;
+}
+
+static enum provider_xfrm_cipher
+ikev2_helper_xfrm_cipher_from_child_selection(
+    const struct provider_helper_ikev2_child_sa_selection *selection)
+{
+    if (selection && selection->selected
+        && selection->encr_id == PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16)
+    {
+        return PROVIDER_XFRM_CIPHER_AES_GCM_16;
+    }
+    return PROVIDER_XFRM_CIPHER_NONE;
+}
+
+static bool
+ikev2_helper_build_child_sa_xfrm_plan(
+    const struct ikev2_helper_ike_sa *sa,
+    struct ikev2_helper_child_sa_scaffold *child,
+    const struct provider_xfrm_ipv4_selector *local_ts,
+    const struct provider_xfrm_ipv4_selector *remote_ts)
+{
+    if (!sa || !child || !local_ts || !remote_ts || !sa->local_endpoint_ready)
+    {
+        return false;
+    }
+
+    uint32_t local_outer_ipv4 = 0;
+    uint32_t remote_outer_ipv4 = 0;
+    if (!ikev2_helper_sockaddr_ipv4_host(&sa->local_endpoint,
+                                         sa->local_endpoint_len,
+                                         &local_outer_ipv4)
+        || !ikev2_helper_sockaddr_ipv4_host(&sa->peer, sa->peer_len,
+                                            &remote_outer_ipv4))
+    {
+        return false;
+    }
+
+    const struct provider_helper_xfrm_lease *lease = &child->xfrm_lease;
+    const struct provider_xfrm_child_sa_spec spec = {
+        .lease_id = child->xfrm_lease_id,
+        .provider_session_id = child->provider_session_id,
+        .policy_revision = child->policy_revision,
+        .mark_value = lease->mark_value,
+        .mark_mask = lease->mark_mask,
+        .if_id = lease->if_id,
+        .reqid = lease->reqid,
+        .local_outer_ipv4 = local_outer_ipv4,
+        .remote_outer_ipv4 = remote_outer_ipv4,
+        .local_ts = *local_ts,
+        .remote_ts = *remote_ts,
+        .initiator_inbound_spi = child->initiator_spi,
+        .responder_inbound_spi = child->responder_spi,
+        .cipher = ikev2_helper_xfrm_cipher_from_child_selection(
+            &child->selection),
+        .key_bits = child->selection.encr_key_bits,
+        .initiator_to_responder_key = child->sk_ei,
+        .initiator_to_responder_key_len = child->sk_ei_len,
+        .responder_to_initiator_key = child->sk_er,
+        .responder_to_initiator_key_len = child->sk_er_len,
+    };
+
+    struct provider_xfrm_result result;
+    return provider_xfrm_child_sa_plan_build(&child->xfrm_plan, &spec,
+                                             &result);
+}
+
+static bool
 ikev2_helper_scaffold_child_sa(
     const struct ikev2_helper_ike_sa_table *table,
     struct ikev2_helper_ike_sa *sa,
     const struct provider_helper_ikev2_child_sa_selection *selection,
     const struct provider_helper_xfrm_lease *lease,
+    const struct provider_xfrm_ipv4_selector *local_ts,
+    const struct provider_xfrm_ipv4_selector *remote_ts,
     const uint8_t *initiator_nonce,
     size_t initiator_nonce_len,
     uint32_t message_id,
@@ -3793,7 +3913,7 @@ ikev2_helper_scaffold_child_sa(
 {
     if (!table || !sa || !sa->active || !sa->auth_authorized || !selection
         || !selection->selected || !selection->initiator_spi || !lease
-        || !initiator_nonce
+        || !local_ts || !remote_ts || !initiator_nonce
         || initiator_nonce_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
         || initiator_nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES
         || !message_id)
@@ -3824,7 +3944,9 @@ ikev2_helper_scaffold_child_sa(
     child.responder_nonce_len = sizeof(child.responder_nonce);
     if (!ikev2_helper_random_bytes(child.responder_nonce,
                                    child.responder_nonce_len)
-        || !ikev2_helper_derive_child_sa_keys(sa, &child))
+        || !ikev2_helper_derive_child_sa_keys(sa, &child)
+        || !ikev2_helper_build_child_sa_xfrm_plan(sa, &child, local_ts,
+                                                  remote_ts))
     {
         ikev2_helper_secure_zero(&child, sizeof(child));
         return false;
@@ -5405,7 +5527,11 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     bool install_unsupported = false;
                     struct provider_helper_ikev2_child_sa_selection
                         child_selection;
+                    struct provider_xfrm_ipv4_selector child_local_ts;
+                    struct provider_xfrm_ipv4_selector child_remote_ts;
                     CLEAR(child_selection);
+                    CLEAR(child_local_ts);
+                    CLEAR(child_remote_ts);
                     if (!rekey_request)
                     {
                         const enum provider_helper_ikev2_parse_result
@@ -5428,9 +5554,10 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         }
                         else
                         {
-                            if (ikev2_helper_child_ts_matches_xfrm_lease(
+                            if (ikev2_helper_child_ts_for_xfrm_lease(
                                     plaintext, plaintext_len, &inner_summary,
-                                    &sa->authorized_xfrm_lease))
+                                    &sa->authorized_xfrm_lease,
+                                    &child_local_ts, &child_remote_ts))
                             {
                                 /*
                                  * XFRM install is still fail-closed.  Retain
@@ -5467,6 +5594,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             if (ikev2_helper_scaffold_child_sa(
                                     sa_table, sa, &child_selection,
                                     &sa->authorized_xfrm_lease,
+                                    &child_local_ts, &child_remote_ts,
                                     plaintext + inner_summary.nonce_offset,
                                     inner_summary.nonce_len,
                                     header.message_id, time(NULL)))
