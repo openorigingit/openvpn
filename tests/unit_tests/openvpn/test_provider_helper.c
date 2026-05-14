@@ -289,6 +289,7 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_auth_deny_response_failed = 46,
         .ike_auth_allow_temp_failure_tx = 48,
         .ike_auth_allow_temp_failure_failed = 49,
+        .ike_auth_allow_missing_xfrm_lease = 50,
         .ike_auth_allow_unsupported = 42,
         .ike_auth_unsupported = 43,
     };
@@ -382,6 +383,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_auth_allow_temp_failure_tx);
     assert_int_equal(output.ike_auth_allow_temp_failure_failed,
                      input.ike_auth_allow_temp_failure_failed);
+    assert_int_equal(output.ike_auth_allow_missing_xfrm_lease,
+                     input.ike_auth_allow_missing_xfrm_lease);
     assert_int_equal(output.ike_auth_allow_unsupported,
                      input.ike_auth_allow_unsupported);
     assert_int_equal(output.ike_auth_unsupported, input.ike_auth_unsupported);
@@ -3135,6 +3138,8 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_auth_allow_temp_failure_tx, 0);
     assert_int_equal(
         supervisor.runtime_stats.ike_auth_allow_temp_failure_failed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_allow_missing_xfrm_lease,
+                     0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_allow_unsupported, 0);
 #else
     assert_int_equal(supervisor.runtime_stats.ike_auth_decrypted, 0);
@@ -3155,6 +3160,8 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_auth_allow_temp_failure_tx, 0);
     assert_int_equal(
         supervisor.runtime_stats.ike_auth_allow_temp_failure_failed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_allow_missing_xfrm_lease,
+                     0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_allow_unsupported, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 0);
 #endif
@@ -3311,6 +3318,7 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     assert_true(supervisor.runtime_stats.ike_auth_allow_temp_failure_tx >= 1);
     assert_int_equal(
         supervisor.runtime_stats.ike_auth_allow_temp_failure_failed, 0);
+    assert_true(supervisor.runtime_stats.ike_auth_allow_missing_xfrm_lease >= 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
 
     close(response_fd);

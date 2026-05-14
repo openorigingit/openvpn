@@ -2414,6 +2414,29 @@ ikev2_helper_find_listener(const struct ikev2_helper_listener *listeners,
     return NULL;
 }
 
+static const struct provider_helper_xfrm_lease *
+ikev2_helper_find_xfrm_lease(const struct provider_helper_xfrm_lease *leases,
+                             size_t lease_count,
+                             const struct provider_helper_auth_response *response)
+{
+    if (!leases || !response)
+    {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < lease_count; ++i)
+    {
+        const struct provider_helper_xfrm_lease *lease = &leases[i];
+        if (lease->lease_id == response->xfrm_lease_id
+            && lease->provider_session_id == response->provider_session_id
+            && lease->policy_revision == response->policy_revision)
+        {
+            return lease;
+        }
+    }
+    return NULL;
+}
+
 static bool
 ikev2_helper_build_encrypted_notify_response(
     uint8_t *response,
@@ -2550,6 +2573,8 @@ ikev2_helper_apply_auth_response(
     struct ikev2_helper_ike_sa_table *table,
     const struct ikev2_helper_listener *listeners,
     size_t listener_count,
+    const struct provider_helper_xfrm_lease *xfrm_leases,
+    size_t xfrm_lease_count,
     const struct provider_helper_auth_response *response,
     struct provider_helper_runtime_stats *counters)
 {
@@ -2587,6 +2612,11 @@ ikev2_helper_apply_auth_response(
         }
         else
         {
+            if (!ikev2_helper_find_xfrm_lease(xfrm_leases, xfrm_lease_count,
+                                              response))
+            {
+                ++counters->ike_auth_allow_missing_xfrm_lease;
+            }
             const struct ikev2_helper_listener *listener =
                 ikev2_helper_find_listener(listeners, listener_count,
                                            sa->listener_id);
@@ -3301,6 +3331,8 @@ ikev2_helper_loop(int fd)
                     || !ikev2_helper_read_auth_response(fd, &header, &response)
                     || !ikev2_helper_apply_auth_response(&sa_table, listeners,
                                                          listener_count,
+                                                         xfrm_leases,
+                                                         xfrm_lease_count,
                                                          &response,
                                                          &counters))
                 {
