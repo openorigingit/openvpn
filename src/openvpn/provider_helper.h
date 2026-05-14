@@ -34,9 +34,9 @@
 #define PROVIDER_HELPER_FEATURE_SET_SIZE  16
 #define PROVIDER_HELPER_CHILD_FD          3
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
-#define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 48
+#define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 56
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  792
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  808
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     88
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
 #define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
@@ -119,6 +119,8 @@
 #define PROVIDER_HELPER_DEFAULT_RETRANSMIT_LIMIT  5
 #define PROVIDER_HELPER_DEFAULT_WORKER_LIMIT      4
 #define PROVIDER_HELPER_DEFAULT_HALF_OPEN_TIMEOUT 30
+#define PROVIDER_HELPER_DEFAULT_MAX_SA_INIT_PER_SECOND        256
+#define PROVIDER_HELPER_DEFAULT_MAX_SA_INIT_PER_SOURCE_SECOND 32
 
 enum provider_helper_state {
     PROVIDER_HELPER_STATE_DISABLED = 0,
@@ -301,6 +303,8 @@ struct provider_helper_runtime_config {
     uint32_t half_open_timeout_seconds;
     uint32_t max_half_open_sas_per_source;
     uint32_t max_half_open_sas_per_prefix;
+    uint32_t max_ike_sa_init_per_second;
+    uint32_t max_ike_sa_init_per_source_per_second;
 };
 
 struct provider_helper_listener_fd {
@@ -341,6 +345,8 @@ struct provider_helper_runtime_stats {
     uint64_t ike_sa_init_half_open_dropped;
     uint64_t ike_sa_init_per_source_dropped;
     uint64_t ike_sa_init_per_prefix_dropped;
+    uint64_t ike_sa_init_rate_dropped;
+    uint64_t ike_sa_init_source_rate_dropped;
     uint64_t ike_sa_init_duplicate;
     uint64_t ike_sa_init_retransmit_dropped;
     uint64_t ike_sa_table_full_dropped;

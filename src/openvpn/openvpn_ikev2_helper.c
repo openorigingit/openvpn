@@ -99,6 +99,7 @@
 #define IKEV2_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED 0x80
 #define IKEV2_HELPER_EAP_TLS_FLAGS_ALLOWED \
     IKEV2_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED
+#define IKEV2_HELPER_RATE_BUCKETS 64
 #define IKEV2_HELPER_POLL_TIMEOUT_MS 1000
 #define IKEV2_HELPER_IKE_SA_INIT_MESSAGE_ID 0
 #define IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID 1
@@ -206,6 +207,20 @@ struct ikev2_helper_ike_sa_table {
 struct ikev2_helper_cookie_context {
     bool ready;
     uint8_t key[IKEV2_HELPER_COOKIE_KEY_BYTES];
+};
+
+struct ikev2_helper_sa_init_rate_bucket {
+    bool active;
+    uint64_t window_start_ms;
+    uint32_t count;
+    struct sockaddr_storage peer;
+};
+
+struct ikev2_helper_sa_init_rate_state {
+    uint64_t global_window_start_ms;
+    uint32_t global_count;
+    uint32_t next_bucket;
+    struct ikev2_helper_sa_init_rate_bucket buckets[IKEV2_HELPER_RATE_BUCKETS];
 };
 
 enum ikev2_helper_add_sa_result {
@@ -1486,6 +1501,123 @@ ikev2_helper_peer_equal(const struct sockaddr_storage *a, socklen_t a_len,
         default:
             return false;
     }
+}
+
+static uint64_t
+ikev2_helper_now_milliseconds(void)
+{
+    struct timeval tv;
+    CLEAR(tv);
+    if (gettimeofday(&tv, NULL) != 0)
+    {
+        return 0;
+    }
+
+    return ((uint64_t)tv.tv_sec * 1000u) + ((uint64_t)tv.tv_usec / 1000u);
+}
+
+static bool
+ikev2_helper_rate_counter_allow(uint64_t *window_start_ms,
+                                uint32_t *count,
+                                uint64_t now_ms,
+                                uint32_t limit)
+{
+    if (!window_start_ms || !count || limit == 0)
+    {
+        return false;
+    }
+    if (!*window_start_ms || now_ms < *window_start_ms
+        || now_ms - *window_start_ms >= 1000)
+    {
+        *window_start_ms = now_ms;
+        *count = 0;
+    }
+    if (*count >= limit)
+    {
+        return false;
+    }
+
+    ++*count;
+    return true;
+}
+
+static struct ikev2_helper_sa_init_rate_bucket *
+ikev2_helper_find_sa_init_rate_bucket(
+    struct ikev2_helper_sa_init_rate_state *rate_state,
+    const struct sockaddr_storage *peer,
+    uint64_t now_ms)
+{
+    struct ikev2_helper_sa_init_rate_bucket *reusable = NULL;
+
+    if (!rate_state || !peer)
+    {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < SIZE(rate_state->buckets); ++i)
+    {
+        struct ikev2_helper_sa_init_rate_bucket *bucket =
+            &rate_state->buckets[i];
+        if (bucket->active
+            && ikev2_helper_peer_address_equal(&bucket->peer, peer))
+        {
+            return bucket;
+        }
+        if (!reusable
+            && (!bucket->active || now_ms < bucket->window_start_ms
+                || now_ms - bucket->window_start_ms >= 1000))
+        {
+            reusable = bucket;
+        }
+    }
+
+    if (!reusable)
+    {
+        reusable = &rate_state->buckets[
+            rate_state->next_bucket % SIZE(rate_state->buckets)];
+        ++rate_state->next_bucket;
+    }
+
+    CLEAR(*reusable);
+    reusable->active = true;
+    reusable->peer = *peer;
+    return reusable;
+}
+
+static bool
+ikev2_helper_allow_sa_init_rate(
+    struct ikev2_helper_sa_init_rate_state *rate_state,
+    const struct provider_helper_runtime_config *config,
+    struct provider_helper_runtime_stats *counters,
+    const struct sockaddr_storage *peer,
+    uint64_t now_ms)
+{
+    if (!rate_state || !config || !counters || !peer)
+    {
+        return false;
+    }
+
+    if (!ikev2_helper_rate_counter_allow(
+            &rate_state->global_window_start_ms, &rate_state->global_count,
+            now_ms,
+            config->max_ike_sa_init_per_second))
+    {
+        ++counters->ike_sa_init_rate_dropped;
+        return false;
+    }
+
+    struct ikev2_helper_sa_init_rate_bucket *bucket =
+        ikev2_helper_find_sa_init_rate_bucket(rate_state, peer, now_ms);
+    if (!bucket
+        || !ikev2_helper_rate_counter_allow(
+            &bucket->window_start_ms, &bucket->count, now_ms,
+            config->max_ike_sa_init_per_source_per_second))
+    {
+        ++counters->ike_sa_init_source_rate_dropped;
+        return false;
+    }
+
+    return true;
 }
 
 static uint32_t
@@ -5216,6 +5348,7 @@ static void
 ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                              const struct provider_helper_runtime_config *config,
                              struct ikev2_helper_ike_sa_table *sa_table,
+                             struct ikev2_helper_sa_init_rate_state *rate_state,
                              struct provider_helper_runtime_stats *counters,
                              struct ikev2_helper_cookie_context *cookie_ctx,
                              int ipc_fd,
@@ -5359,6 +5492,13 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
 
             const uint32_t half_open_sas =
                 ikev2_helper_count_half_open_ike_sas(sa_table);
+            if (!ikev2_helper_allow_sa_init_rate(rate_state, config, counters,
+                                                 &peer,
+                                                 ikev2_helper_now_milliseconds()))
+            {
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
             if (half_open_sas >= max_half_open_sas)
             {
                 ++counters->ike_sa_init_half_open_dropped;
@@ -6168,11 +6308,13 @@ ikev2_helper_loop(int fd)
     size_t xfrm_lease_count = 0;
     struct provider_helper_runtime_stats counters;
     struct ikev2_helper_ike_sa_table sa_table;
+    struct ikev2_helper_sa_init_rate_state sa_init_rate_state;
     struct ikev2_helper_cookie_context cookie_ctx;
     struct provider_helper_runtime_config config;
     provider_helper_runtime_config_default(&config);
     CLEAR(counters);
     CLEAR(sa_table);
+    CLEAR(sa_init_rate_state);
     CLEAR(listeners);
     for (size_t i = 0; i < SIZE(listeners); ++i)
     {
@@ -6237,8 +6379,8 @@ ikev2_helper_loop(int fd)
             if (pfds[i].revents & POLLIN)
             {
                 ikev2_helper_handle_datagram(&listeners[i - 1], &config, &sa_table,
-                                             &counters, &cookie_ctx, fd,
-                                             &tx_sequence,
+                                             &sa_init_rate_state, &counters,
+                                             &cookie_ctx, fd, &tx_sequence,
                                              &next_auth_request_id);
             }
         }

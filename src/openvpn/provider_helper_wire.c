@@ -59,6 +59,10 @@ provider_helper_runtime_config_default(struct provider_helper_runtime_config *co
         PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_PER_SOURCE;
     config->max_half_open_sas_per_prefix =
         PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_PER_PREFIX;
+    config->max_ike_sa_init_per_second =
+        PROVIDER_HELPER_DEFAULT_MAX_SA_INIT_PER_SECOND;
+    config->max_ike_sa_init_per_source_per_second =
+        PROVIDER_HELPER_DEFAULT_MAX_SA_INIT_PER_SOURCE_SECOND;
 }
 
 static void
@@ -176,6 +180,25 @@ provider_helper_runtime_config_valid(const struct provider_helper_runtime_config
         provider_helper_config_reason(reason, reason_size,
                                       "max_half_open_sas_per_prefix outside "
                                       "supported bounds");
+        return false;
+    }
+    if (config->max_ike_sa_init_per_second == 0
+        || config->max_ike_sa_init_per_second
+               > PROVIDER_HELPER_DEFAULT_MAX_SA_INIT_PER_SECOND)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "max_ike_sa_init_per_second outside "
+                                      "supported bounds");
+        return false;
+    }
+    if (config->max_ike_sa_init_per_source_per_second == 0
+        || config->max_ike_sa_init_per_source_per_second
+               > config->max_ike_sa_init_per_second)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "max_ike_sa_init_per_source_per_second "
+                                      "must be nonzero and <= "
+                                      "max_ike_sa_init_per_second");
         return false;
     }
 
@@ -683,6 +706,9 @@ provider_helper_ipc_encode_runtime_config(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u32(&pos, config->half_open_timeout_seconds);
     provider_helper_wire_write_u32(&pos, config->max_half_open_sas_per_source);
     provider_helper_wire_write_u32(&pos, config->max_half_open_sas_per_prefix);
+    provider_helper_wire_write_u32(&pos, config->max_ike_sa_init_per_second);
+    provider_helper_wire_write_u32(&pos,
+                                   config->max_ike_sa_init_per_source_per_second);
 
     return (size_t)(pos - dst) == PROVIDER_HELPER_RUNTIME_CONFIG_SIZE;
 }
@@ -710,6 +736,9 @@ provider_helper_ipc_decode_runtime_config(const uint8_t *src, size_t src_len,
     config->half_open_timeout_seconds = provider_helper_wire_read_u32(&pos);
     config->max_half_open_sas_per_source = provider_helper_wire_read_u32(&pos);
     config->max_half_open_sas_per_prefix = provider_helper_wire_read_u32(&pos);
+    config->max_ike_sa_init_per_second = provider_helper_wire_read_u32(&pos);
+    config->max_ike_sa_init_per_source_per_second =
+        provider_helper_wire_read_u32(&pos);
 
     return (size_t)(pos - src) == PROVIDER_HELPER_RUNTIME_CONFIG_SIZE;
 }
@@ -799,6 +828,8 @@ provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_half_open_dropped);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_per_source_dropped);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_per_prefix_dropped);
+    provider_helper_wire_write_u64(&pos, stats->ike_sa_init_rate_dropped);
+    provider_helper_wire_write_u64(&pos, stats->ike_sa_init_source_rate_dropped);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_duplicate);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_init_retransmit_dropped);
     provider_helper_wire_write_u64(&pos, stats->ike_sa_table_full_dropped);
@@ -950,6 +981,9 @@ provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
     stats->ike_sa_init_half_open_dropped = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_per_source_dropped = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_per_prefix_dropped = provider_helper_wire_read_u64(&pos);
+    stats->ike_sa_init_rate_dropped = provider_helper_wire_read_u64(&pos);
+    stats->ike_sa_init_source_rate_dropped =
+        provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_duplicate = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_init_retransmit_dropped = provider_helper_wire_read_u64(&pos);
     stats->ike_sa_table_full_dropped = provider_helper_wire_read_u64(&pos);
