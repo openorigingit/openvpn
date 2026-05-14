@@ -392,6 +392,14 @@ static bool
 provider_helper_supervisor_send_config(struct provider_helper_supervisor *supervisor,
                                        uint64_t correlation_id)
 {
+    char reason[128];
+    if (!provider_helper_runtime_config_valid(&supervisor->runtime_config, reason,
+                                              sizeof(reason)))
+    {
+        msg(M_WARN, "provider-helper: invalid runtime config: %s", reason);
+        return false;
+    }
+
     struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE
                                   + PROVIDER_HELPER_RUNTIME_CONFIG_SIZE);
     const struct provider_helper_msg_header header = {

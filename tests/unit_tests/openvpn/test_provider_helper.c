@@ -4188,6 +4188,40 @@ test_provider_helper_spawn_noop(void **state)
 }
 
 static void
+test_provider_helper_spawn_rejects_invalid_runtime_config(void **state)
+{
+    (void)state;
+
+#ifdef _WIN32
+    skip();
+#else
+    if (!noop_helper_path)
+    {
+        skip();
+    }
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.runtime_config.max_half_open_sas = 0;
+
+    char *const argv[] = { (char *)noop_helper_path, NULL };
+    assert_true(provider_helper_supervisor_spawn(&supervisor, noop_helper_path, argv));
+    assert_true(supervisor.pid > 0);
+
+    for (int i = 0; i < 100 && (supervisor.pid > 0 || supervisor.ipc_fd >= 0); ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_FAILED);
+    assert_int_equal(supervisor.pid, 0);
+    assert_int_equal(supervisor.ipc_fd, -1);
+    provider_helper_supervisor_free(&supervisor);
+#endif
+}
+
+static void
 test_provider_helper_reaps_early_helper_exit(void **state)
 {
     (void)state;
@@ -6579,6 +6613,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_processes_partial_header),
         cmocka_unit_test(test_provider_helper_auth_request_callback),
         cmocka_unit_test(test_provider_helper_spawn_noop),
+        cmocka_unit_test(test_provider_helper_spawn_rejects_invalid_runtime_config),
         cmocka_unit_test(test_provider_helper_reaps_early_helper_exit),
         cmocka_unit_test(test_provider_helper_reaps_after_bad_ipc_header),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_natt_listener),
