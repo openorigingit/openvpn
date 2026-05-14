@@ -4030,6 +4030,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
+                if (header.message_id <= sa->message_id)
+                {
+                    ++counters->ike_exchange_replay_dropped;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
 
                 uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
                 size_t plaintext_len = 0;
@@ -4059,6 +4065,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     {
                         ++counters->ike_informational_empty_response_failed;
                     }
+                    sa->message_id = header.message_id;
                     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                     counters->ike_sa_active = sa_table->active;
                     return;
@@ -4096,6 +4103,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             ++counters
                                   ->ike_informational_delete_response_failed;
                         }
+                        sa->message_id = header.message_id;
                         ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                         ikev2_helper_clear_ike_sa(sa_table, sa);
                         counters->ike_sa_active = sa_table->active;
@@ -4131,6 +4139,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     {
                         ++counters->ike_create_child_temp_failure_failed;
                     }
+                    sa->message_id = header.message_id;
                     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                     counters->ike_sa_active = sa_table->active;
                     return;
