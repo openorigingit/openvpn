@@ -31,6 +31,8 @@
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <linux/xfrm.h>
+#include <sched.h>
+#include <sys/wait.h>
 
 #ifndef UDP_ENCAP_ESPINUDP
 #define UDP_ENCAP_ESPINUDP 2
@@ -543,6 +545,65 @@ test_provider_xfrm_linux_rejects_empty_apply(void **state)
 #endif
 }
 
+#if defined(TARGET_LINUX)
+static int
+test_provider_xfrm_linux_apply_in_child_netns(void)
+{
+    if (unshare(CLONE_NEWNET) != 0)
+    {
+        return (errno == EPERM || errno == EACCES) ? 77 : 2;
+    }
+
+    struct provider_xfrm_child_sa_plan plan;
+    struct provider_xfrm_linux_message_plan messages;
+    struct provider_xfrm_result result;
+    struct provider_xfrm_child_sa_spec spec = default_child_sa_spec();
+
+    const bool ret =
+        provider_xfrm_child_sa_plan_build(&plan, &spec, &result)
+        && provider_xfrm_linux_child_sa_messages_build(&messages, &plan,
+                                                       &result)
+        && provider_xfrm_linux_message_plan_apply(&messages, &result);
+    if (!ret)
+    {
+        fprintf(stderr, "XFRM apply failed: %s\n", result.reason);
+    }
+    provider_xfrm_linux_message_plan_clear(&messages);
+    provider_xfrm_child_sa_plan_clear(&plan);
+    return ret ? 0 : 3;
+}
+#endif
+
+static void
+test_provider_xfrm_linux_applies_in_private_netns(void **state)
+{
+    (void)state;
+#if !defined(TARGET_LINUX)
+    skip();
+#else
+    if (geteuid() != 0)
+    {
+        skip();
+    }
+
+    const pid_t pid = fork();
+    assert_true(pid >= 0);
+    if (pid == 0)
+    {
+        _exit(test_provider_xfrm_linux_apply_in_child_netns());
+    }
+
+    int status = 0;
+    assert_int_equal(waitpid(pid, &status, 0), pid);
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 77)
+    {
+        skip();
+    }
+    assert_true(WIFEXITED(status));
+    assert_int_equal(WEXITSTATUS(status), 0);
+#endif
+}
+
 int
 main(void)
 {
@@ -558,6 +619,7 @@ main(void)
         cmocka_unit_test(test_provider_xfrm_linux_builds_child_sa_messages),
         cmocka_unit_test(test_provider_xfrm_linux_rejects_unrepresentable_selectors),
         cmocka_unit_test(test_provider_xfrm_linux_rejects_empty_apply),
+        cmocka_unit_test(test_provider_xfrm_linux_applies_in_private_netns),
     };
 
     return cmocka_run_group_tests_name("provider_xfrm", tests, NULL, NULL);
