@@ -4095,6 +4095,7 @@ ikev2_helper_store_xfrm_lease(
     const struct provider_helper_xfrm_lease *lease,
     bool *replaced,
     bool *unchanged,
+    size_t *replace_index,
     struct provider_helper_xfrm_lease *replaced_lease)
 {
     if (!leases || !lease_count || !lease)
@@ -4108,6 +4109,10 @@ ikev2_helper_store_xfrm_lease(
     if (unchanged)
     {
         *unchanged = false;
+    }
+    if (replace_index)
+    {
+        *replace_index = SIZE_MAX;
     }
     if (replaced_lease)
     {
@@ -4130,7 +4135,10 @@ ikev2_helper_store_xfrm_lease(
             {
                 *replaced_lease = leases[i];
             }
-            leases[i] = *lease;
+            if (replace_index)
+            {
+                *replace_index = i;
+            }
             if (replaced)
             {
                 *replaced = true;
@@ -4145,6 +4153,28 @@ ikev2_helper_store_xfrm_lease(
     }
 
     leases[(*lease_count)++] = *lease;
+    return true;
+}
+
+static bool
+ikev2_helper_commit_xfrm_lease_replacement(
+    struct provider_helper_xfrm_lease *leases,
+    size_t lease_count,
+    size_t replace_index,
+    const struct provider_helper_xfrm_lease *replacement,
+    const struct provider_helper_xfrm_lease *expected_current)
+{
+    if (!leases || !replacement || !expected_current
+        || replace_index >= lease_count
+        || !ikev2_helper_xfrm_lease_equal(&leases[replace_index],
+                                          expected_current)
+        || !ikev2_helper_xfrm_lease_same_slot(&leases[replace_index],
+                                              replacement))
+    {
+        return false;
+    }
+
+    leases[replace_index] = *replacement;
     return true;
 }
 
@@ -6160,17 +6190,23 @@ ikev2_helper_loop(int fd)
                 struct provider_helper_xfrm_lease replaced_lease;
                 bool replaced = false;
                 bool unchanged = false;
+                size_t replace_index = SIZE_MAX;
                 uint32_t revoked = 0;
                 CLEAR(replaced_lease);
                 if (!configured
                     || !ikev2_helper_read_xfrm_lease(fd, &header, &lease)
                     || !ikev2_helper_store_xfrm_lease(
                         xfrm_leases, &xfrm_lease_count, SIZE(xfrm_leases),
-                        &lease, &replaced, &unchanged, &replaced_lease)
+                        &lease, &replaced, &unchanged, &replace_index,
+                        &replaced_lease)
                     || (replaced
                         && !ikev2_helper_clear_ike_sas_for_xfrm_lease(
                             &sa_table, &replaced_lease, &counters,
                             &revoked))
+                    || (replaced
+                        && !ikev2_helper_commit_xfrm_lease_replacement(
+                            xfrm_leases, xfrm_lease_count, replace_index,
+                            &lease, &replaced_lease))
                     || !ikev2_helper_send_header(
                         fd, PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL_ACK,
                         tx_sequence++, header.sequence))
