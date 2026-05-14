@@ -351,6 +351,9 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_sa_init_state_failed = 22,
         .ike_sa_active = 8,
         .ike_sa_expired = 6,
+        .ike_informational_empty_rx = 55,
+        .ike_informational_empty_response_tx = 56,
+        .ike_informational_empty_response_failed = 57,
         .ike_auth_rx = 26,
         .ike_auth_malformed = 27,
         .ike_auth_no_state = 28,
@@ -435,6 +438,12 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_sa_init_state_failed);
     assert_int_equal(output.ike_sa_active, input.ike_sa_active);
     assert_int_equal(output.ike_sa_expired, input.ike_sa_expired);
+    assert_int_equal(output.ike_informational_empty_rx,
+                     input.ike_informational_empty_rx);
+    assert_int_equal(output.ike_informational_empty_response_tx,
+                     input.ike_informational_empty_response_tx);
+    assert_int_equal(output.ike_informational_empty_response_failed,
+                     input.ike_informational_empty_response_failed);
     assert_int_equal(output.ike_auth_rx, input.ike_auth_rx);
     assert_int_equal(output.ike_auth_malformed, input.ike_auth_malformed);
     assert_int_equal(output.ike_auth_no_state, input.ike_auth_no_state);
@@ -2135,6 +2144,86 @@ test_recv_ikev2_encrypted_notify_response(
     secure_memzero(nonce, sizeof(nonce));
     secure_memzero(plaintext, sizeof(plaintext));
 }
+
+static void
+test_recv_ikev2_encrypted_empty_response(
+    int fd,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    uint8_t expected_exchange_type,
+    uint32_t expected_message_id,
+    bool expect_natt)
+{
+    uint8_t response[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    struct sockaddr_in from;
+    socklen_t from_len = sizeof(from);
+    struct pollfd pfd = {
+        .fd = fd,
+        .events = POLLIN,
+    };
+    struct provider_helper_ikev2_header header;
+    struct provider_helper_ikev2_payload_summary summary;
+
+    assert_non_null(material);
+    assert_int_equal(poll(&pfd, 1, 1000), 1);
+    assert_true(pfd.revents & POLLIN);
+    const ssize_t n = recvfrom(fd, response, sizeof(response), 0,
+                               (struct sockaddr *)&from, &from_len);
+    assert_true(n > 0);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         response, (size_t)n, PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE,
+                         expect_natt, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(header.natt, expect_natt);
+    assert_int_equal(provider_helper_ikev2_parse_payloads(
+                         response, (size_t)n, &header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(header.initiator_spi, initiator_spi);
+    assert_int_equal(header.responder_spi, material->responder_spi);
+    assert_int_equal(header.exchange_type, expected_exchange_type);
+    assert_int_equal(header.flags, PROVIDER_HELPER_IKEV2_FLAG_RESPONSE);
+    assert_int_equal(header.message_id, expected_message_id);
+    assert_true(summary.saw_sk);
+    assert_int_equal(summary.sk_count, 1);
+    assert_int_equal(summary.sk_next_payload,
+                     PROVIDER_HELPER_IKEV2_PAYLOAD_NONE);
+    assert_true(summary.sk_len > TEST_IKEV2_AES_GCM_IV_BYTES
+                                 + TEST_IKEV2_AES_GCM_TAG_BYTES);
+
+    uint8_t sk_er[TEST_IKEV2_AES_GCM_KEYMAT_BYTES];
+    assert_true(test_derive_ike_auth_keymat(initiator_spi, material, NULL, 0,
+                                            sk_er, sizeof(sk_er)));
+
+    const uint8_t *iv = response + summary.sk_offset;
+    const uint8_t *ciphertext = iv + TEST_IKEV2_AES_GCM_IV_BYTES;
+    const size_t ciphertext_len = summary.sk_len
+                                  - TEST_IKEV2_AES_GCM_IV_BYTES
+                                  - TEST_IKEV2_AES_GCM_TAG_BYTES;
+    const uint8_t *tag = response + summary.sk_offset + summary.sk_len
+                         - TEST_IKEV2_AES_GCM_TAG_BYTES;
+    uint8_t nonce[TEST_IKEV2_AES_GCM_SALT_BYTES
+                  + TEST_IKEV2_AES_GCM_IV_BYTES];
+    memcpy(nonce, sk_er + 32, TEST_IKEV2_AES_GCM_SALT_BYTES);
+    memcpy(nonce + TEST_IKEV2_AES_GCM_SALT_BYTES, iv,
+           TEST_IKEV2_AES_GCM_IV_BYTES);
+
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    size_t plaintext_len = 0;
+    assert_true(test_aes_gcm_decrypt(
+                    sk_er, 32, nonce, sizeof(nonce),
+                    response + header.header_offset,
+                    summary.sk_offset - header.header_offset, ciphertext,
+                    ciphertext_len, tag, TEST_IKEV2_AES_GCM_TAG_BYTES,
+                    plaintext, sizeof(plaintext), &plaintext_len));
+    assert_true(plaintext_len >= 1);
+    const size_t padding_len = (size_t)plaintext[plaintext_len - 1] + 1;
+    assert_true(padding_len <= plaintext_len);
+    assert_int_equal(plaintext_len - padding_len, 0);
+
+    secure_memzero(sk_er, sizeof(sk_er));
+    secure_memzero(nonce, sizeof(nonce));
+    secure_memzero(plaintext, sizeof(plaintext));
+}
 #endif
 
 struct test_cookie_mac_ctx {
@@ -3135,6 +3224,9 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     test_send_ikev2_encrypted_protected_exchange_from(
         state_fd, natt_port, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
         state_initiator_spi, &state_material, true, 3);
+    test_recv_ikev2_encrypted_empty_response(
+        state_fd, state_initiator_spi, &state_material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 3, true);
 #endif
     test_send_ikev2_exchange_header_fields_from(
         datagram_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA,
@@ -3166,11 +3258,21 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
 #if defined(ENABLE_CRYPTO_OPENSSL)
     assert_int_equal(supervisor.runtime_stats.datagrams_rx, 9);
     assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 9);
-    assert_int_equal(supervisor.runtime_stats.ike_exchange_unsupported, 4);
+    assert_int_equal(supervisor.runtime_stats.ike_exchange_unsupported, 3);
+    assert_int_equal(supervisor.runtime_stats.ike_informational_empty_rx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_informational_empty_response_tx,
+                     1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_informational_empty_response_failed, 0);
 #else
     assert_int_equal(supervisor.runtime_stats.datagrams_rx, 7);
     assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 7);
     assert_int_equal(supervisor.runtime_stats.ike_exchange_unsupported, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_informational_empty_rx, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_informational_empty_response_tx,
+                     0);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_informational_empty_response_failed, 0);
 #endif
     assert_int_equal(supervisor.runtime_stats.datagrams_malformed, 4);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
