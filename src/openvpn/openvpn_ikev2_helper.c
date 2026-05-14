@@ -3061,6 +3061,36 @@ ikev2_helper_initial_ike_auth_request_header_valid(
 }
 
 static bool
+ikev2_helper_protected_exchange_request_header_valid(
+    const struct provider_helper_ikev2_header *header)
+{
+    return header
+           && (header->flags & PROVIDER_HELPER_IKEV2_FLAG_INITIATOR)
+           && !(header->flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE)
+           && header->initiator_spi && header->responder_spi
+           && header->message_id > IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID;
+}
+
+static bool
+ikev2_helper_protected_exchange_request_shape_valid(
+    const uint8_t *packet,
+    size_t packet_len,
+    const struct provider_helper_ikev2_header *header)
+{
+    struct provider_helper_ikev2_payload_summary summary;
+    if (provider_helper_ikev2_parse_payloads(packet, packet_len, header,
+                                             &summary)
+        != PROVIDER_HELPER_IKEV2_PARSE_OK)
+    {
+        return false;
+    }
+
+    return summary.saw_sk && summary.sk_count == 1
+           && summary.sk_len > IKEV2_HELPER_AES_GCM_IV_BYTES
+                              + IKEV2_HELPER_AES_GCM_TAG_BYTES;
+}
+
+static bool
 ikev2_helper_ike_auth_listener_allowed(
     const struct ikev2_helper_listener *listener,
     const struct provider_helper_runtime_config *config)
@@ -3408,6 +3438,27 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
         }
         else if (!(header.flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE))
         {
+            if (header.exchange_type
+                    == PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA
+                || header.exchange_type
+                       == PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL)
+            {
+                if (!ikev2_helper_protected_exchange_request_header_valid(
+                        &header)
+                    || !ikev2_helper_protected_exchange_request_shape_valid(
+                        packet, (size_t)n, &header))
+                {
+                    ++counters->datagrams_malformed;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+                if (!ikev2_helper_ike_auth_listener_allowed(listener, config))
+                {
+                    ++counters->ike_exchange_unsupported;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+            }
             ++counters->ike_exchange_unsupported;
             counters->ike_sa_active = sa_table->active;
         }
