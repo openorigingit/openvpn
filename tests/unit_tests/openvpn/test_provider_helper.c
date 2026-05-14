@@ -573,6 +573,15 @@ test_provider_helper_xfrm_lease_roundtrip(void **state)
         .reqid = 1100,
         .address_family = AF_INET,
         .flags = PROVIDER_HELPER_XFRM_LEASE_IPV4,
+        .local_ts_start_ipv4 = 0x0a580001,
+        .local_ts_end_ipv4 = 0x0a580001,
+        .local_ts_start_port = 0,
+        .local_ts_end_port = 65535,
+        .remote_ts_start_ipv4 = 0x0a580002,
+        .remote_ts_end_ipv4 = 0x0a580002,
+        .remote_ts_start_port = 0,
+        .remote_ts_end_port = 65535,
+        .ip_protocol_id = 0,
     };
     struct provider_helper_xfrm_lease output;
     char reason[128];
@@ -590,10 +599,30 @@ test_provider_helper_xfrm_lease_roundtrip(void **state)
     assert_int_equal(output.reqid, input.reqid);
     assert_int_equal(output.address_family, input.address_family);
     assert_int_equal(output.flags, input.flags);
+    assert_int_equal(output.local_ts_start_ipv4, input.local_ts_start_ipv4);
+    assert_int_equal(output.local_ts_end_ipv4, input.local_ts_end_ipv4);
+    assert_int_equal(output.local_ts_start_port, input.local_ts_start_port);
+    assert_int_equal(output.local_ts_end_port, input.local_ts_end_port);
+    assert_int_equal(output.remote_ts_start_ipv4, input.remote_ts_start_ipv4);
+    assert_int_equal(output.remote_ts_end_ipv4, input.remote_ts_end_ipv4);
+    assert_int_equal(output.remote_ts_start_port, input.remote_ts_start_port);
+    assert_int_equal(output.remote_ts_end_port, input.remote_ts_end_port);
+    assert_int_equal(output.ip_protocol_id, input.ip_protocol_id);
 
     input.reqid = 0;
     assert_false(provider_helper_xfrm_lease_valid(&input, reason, sizeof(reason)));
     assert_non_null(strstr(reason, "reqid"));
+    input.reqid = 1100;
+    input.local_ts_start_ipv4 = 0x0a580003;
+    input.local_ts_end_ipv4 = 0x0a580001;
+    assert_false(provider_helper_xfrm_lease_valid(&input, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "selector"));
+    input.local_ts_start_ipv4 = 0x0a580001;
+    input.local_ts_end_ipv4 = 0x0a580001;
+    input.remote_ts_start_port = 65535;
+    input.remote_ts_end_port = 0;
+    assert_false(provider_helper_xfrm_lease_valid(&input, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "selector"));
 }
 
 static void
@@ -4509,6 +4538,15 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
         .reqid = 1100,
         .address_family = AF_INET,
         .flags = PROVIDER_HELPER_XFRM_LEASE_IPV4,
+        .local_ts_start_ipv4 = 0x0a580001,
+        .local_ts_end_ipv4 = 0x0a580001,
+        .local_ts_start_port = 0,
+        .local_ts_end_port = 65535,
+        .remote_ts_start_ipv4 = 0x0a580002,
+        .remote_ts_end_ipv4 = 0x0a580002,
+        .remote_ts_start_port = 0,
+        .remote_ts_end_port = 65535,
+        .ip_protocol_id = 0,
     };
     assert_true(provider_helper_supervisor_send_xfrm_lease(&supervisor, &xfrm_lease,
                                                            99));
@@ -4946,6 +4984,15 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
         .reqid = 1100,
         .address_family = AF_INET,
         .flags = PROVIDER_HELPER_XFRM_LEASE_IPV4,
+        .local_ts_start_ipv4 = 0x0a580001,
+        .local_ts_end_ipv4 = 0x0a580001,
+        .local_ts_start_port = 0,
+        .local_ts_end_port = 65535,
+        .remote_ts_start_ipv4 = 0x0a580002,
+        .remote_ts_end_ipv4 = 0x0a580002,
+        .remote_ts_start_port = 0,
+        .remote_ts_end_port = 65535,
+        .ip_protocol_id = 0,
     };
     uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
     assert_true(provider_helper_supervisor_send_xfrm_lease(&supervisor, &xfrm_lease,

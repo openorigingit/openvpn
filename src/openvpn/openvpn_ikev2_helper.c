@@ -3297,7 +3297,16 @@ ikev2_helper_xfrm_lease_equal(const struct provider_helper_xfrm_lease *a,
            && a->if_id == b->if_id
            && a->reqid == b->reqid
            && a->address_family == b->address_family
-           && a->flags == b->flags;
+           && a->flags == b->flags
+           && a->local_ts_start_ipv4 == b->local_ts_start_ipv4
+           && a->local_ts_end_ipv4 == b->local_ts_end_ipv4
+           && a->local_ts_start_port == b->local_ts_start_port
+           && a->local_ts_end_port == b->local_ts_end_port
+           && a->remote_ts_start_ipv4 == b->remote_ts_start_ipv4
+           && a->remote_ts_end_ipv4 == b->remote_ts_end_ipv4
+           && a->remote_ts_start_port == b->remote_ts_start_port
+           && a->remote_ts_end_port == b->remote_ts_end_port
+           && a->ip_protocol_id == b->ip_protocol_id;
 }
 
 static bool

@@ -37,7 +37,7 @@
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 36
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
 #define PROVIDER_HELPER_RUNTIME_STATS_SIZE  672
-#define PROVIDER_HELPER_XFRM_LEASE_SIZE     48
+#define PROVIDER_HELPER_XFRM_LEASE_SIZE     88
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
 #define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
 #define PROVIDER_HELPER_AUTH_SERIAL_SIZE      128
@@ -401,6 +401,16 @@ struct provider_helper_xfrm_lease {
     uint32_t reqid;
     uint32_t address_family;
     uint32_t flags;
+    uint32_t local_ts_start_ipv4;
+    uint32_t local_ts_end_ipv4;
+    uint32_t local_ts_start_port;
+    uint32_t local_ts_end_port;
+    uint32_t remote_ts_start_ipv4;
+    uint32_t remote_ts_end_ipv4;
+    uint32_t remote_ts_start_port;
+    uint32_t remote_ts_end_port;
+    uint32_t ip_protocol_id;
+    uint32_t reserved;
 };
 
 struct provider_helper_ikev2_header {

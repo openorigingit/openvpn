@@ -258,6 +258,26 @@ provider_helper_xfrm_lease_valid(const struct provider_helper_xfrm_lease *lease,
                                       "unsupported XFRM lease address family");
         return false;
     }
+    if (lease->address_family == AF_INET
+        && (lease->local_ts_start_ipv4 > lease->local_ts_end_ipv4
+            || lease->remote_ts_start_ipv4 > lease->remote_ts_end_ipv4))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "invalid XFRM lease IPv4 selector range");
+        return false;
+    }
+    if (lease->local_ts_start_port > 65535
+        || lease->local_ts_end_port > 65535
+        || lease->remote_ts_start_port > 65535
+        || lease->remote_ts_end_port > 65535
+        || lease->local_ts_start_port > lease->local_ts_end_port
+        || lease->remote_ts_start_port > lease->remote_ts_end_port
+        || lease->ip_protocol_id > 255)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "invalid XFRM lease traffic selector");
+        return false;
+    }
     if (!lease->flags || (lease->flags & ~allowed_flags))
     {
         provider_helper_config_reason(reason, reason_size,
@@ -975,6 +995,16 @@ provider_helper_ipc_encode_xfrm_lease(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u32(&pos, lease->reqid);
     provider_helper_wire_write_u32(&pos, lease->address_family);
     provider_helper_wire_write_u32(&pos, lease->flags);
+    provider_helper_wire_write_u32(&pos, lease->local_ts_start_ipv4);
+    provider_helper_wire_write_u32(&pos, lease->local_ts_end_ipv4);
+    provider_helper_wire_write_u32(&pos, lease->local_ts_start_port);
+    provider_helper_wire_write_u32(&pos, lease->local_ts_end_port);
+    provider_helper_wire_write_u32(&pos, lease->remote_ts_start_ipv4);
+    provider_helper_wire_write_u32(&pos, lease->remote_ts_end_ipv4);
+    provider_helper_wire_write_u32(&pos, lease->remote_ts_start_port);
+    provider_helper_wire_write_u32(&pos, lease->remote_ts_end_port);
+    provider_helper_wire_write_u32(&pos, lease->ip_protocol_id);
+    provider_helper_wire_write_u32(&pos, lease->reserved);
 
     return (size_t)(pos - dst) == PROVIDER_HELPER_XFRM_LEASE_SIZE;
 }
@@ -999,6 +1029,16 @@ provider_helper_ipc_decode_xfrm_lease(const uint8_t *src, size_t src_len,
     lease->reqid = provider_helper_wire_read_u32(&pos);
     lease->address_family = provider_helper_wire_read_u32(&pos);
     lease->flags = provider_helper_wire_read_u32(&pos);
+    lease->local_ts_start_ipv4 = provider_helper_wire_read_u32(&pos);
+    lease->local_ts_end_ipv4 = provider_helper_wire_read_u32(&pos);
+    lease->local_ts_start_port = provider_helper_wire_read_u32(&pos);
+    lease->local_ts_end_port = provider_helper_wire_read_u32(&pos);
+    lease->remote_ts_start_ipv4 = provider_helper_wire_read_u32(&pos);
+    lease->remote_ts_end_ipv4 = provider_helper_wire_read_u32(&pos);
+    lease->remote_ts_start_port = provider_helper_wire_read_u32(&pos);
+    lease->remote_ts_end_port = provider_helper_wire_read_u32(&pos);
+    lease->ip_protocol_id = provider_helper_wire_read_u32(&pos);
+    lease->reserved = provider_helper_wire_read_u32(&pos);
 
     return (size_t)(pos - src) == PROVIDER_HELPER_XFRM_LEASE_SIZE;
 }
