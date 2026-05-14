@@ -3007,6 +3007,60 @@ test_provider_helper_ikev2_payload_parser(void **state)
                      PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE
                      + PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
 
+    packet_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                 + TEST_IKEV2_CHILD_SA_PAYLOAD_LEN;
+    memset(packet, 0, sizeof(packet));
+    test_make_ikev2_header(packet, false,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA,
+                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+                           0x8877665544332211ull, (uint32_t)packet_len);
+    ts_pos = PROVIDER_HELPER_IKEV2_HEADER_SIZE;
+    const size_t child_sa_body =
+        ts_pos + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    ts_pos = test_add_ikev2_payload(packet, ts_pos,
+                                    PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+                                    TEST_IKEV2_CHILD_SA_PAYLOAD_LEN, 0);
+    test_write_be16(packet + child_sa_body + 2,
+                    TEST_IKEV2_CHILD_SA_PROPOSAL_LEN);
+    packet[child_sa_body + 4] = 1;
+    packet[child_sa_body + 5] = PROVIDER_HELPER_IKEV2_PROTOCOL_ESP;
+    packet[child_sa_body + 6] = 4;
+    packet[child_sa_body + 7] = 1;
+    test_write_be32(packet + child_sa_body + 8, 0x01020304);
+    const size_t child_transform =
+        child_sa_body + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE + 4;
+    test_write_be16(packet + child_transform + 2,
+                    TEST_IKEV2_ENCR_TRANSFORM_LEN);
+    packet[child_transform + 4] = PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR;
+    test_write_be16(packet + child_transform + 6,
+                    PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16);
+    test_write_be16(packet + child_transform + 8,
+                    0x8000u | PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH);
+    test_write_be16(packet + child_transform + 10, 256);
+    assert_int_equal(ts_pos, packet_len);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, packet_len, PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE,
+                         false, &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_parse_payloads(
+                         packet, packet_len, &header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    struct provider_helper_ikev2_child_sa_selection child_selection;
+    assert_int_equal(provider_helper_ikev2_select_child_sa_proposal(
+                         packet, packet_len, &summary, &child_selection),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_true(child_selection.selected);
+    assert_int_equal(child_selection.proposal_number, 1);
+    assert_int_equal(child_selection.initiator_spi, 0x01020304);
+    assert_int_equal(child_selection.encr_id,
+                     PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16);
+    assert_int_equal(child_selection.encr_key_bits, 256);
+
+    test_write_be32(packet + child_sa_body + 8, 0);
+    assert_int_equal(provider_helper_ikev2_select_child_sa_proposal(
+                         packet, packet_len, &summary, &child_selection),
+                     PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN);
+
     packet_len = test_make_ike_auth_packet(packet, sizeof(packet),
                                            0x1122334455667788ull,
                                            0x8877665544332211ull, false);

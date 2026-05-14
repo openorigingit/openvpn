@@ -532,6 +532,14 @@ provider_helper_wire_peek_u16(const uint8_t *pos)
 }
 
 static uint32_t
+provider_helper_wire_peek_u32(const uint8_t *pos)
+{
+    uint32_t value;
+    memcpy(&value, pos, sizeof(value));
+    return ntohl(value);
+}
+
+static uint32_t
 provider_helper_wire_read_u32(const uint8_t **pos)
 {
     uint32_t value;
@@ -1685,6 +1693,87 @@ provider_helper_ikev2_validate_sa_payload(const uint8_t *packet,
 }
 
 static enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_validate_child_sa_payload(const uint8_t *packet,
+                                                size_t packet_len,
+                                                size_t body_offset,
+                                                size_t body_len)
+{
+    if (!provider_helper_ikev2_body_inside(packet_len, body_offset, body_len)
+        || body_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE + 4
+                      + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    bool saw_last = false;
+    uint8_t previous_proposal_number = 0;
+    size_t pos = body_offset;
+    const size_t end = body_offset + body_len;
+    uint32_t proposal_count = 0;
+    while (pos < end)
+    {
+        if (++proposal_count > PROVIDER_HELPER_IKEV2_MAX_PROPOSALS)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_PAYLOAD_LIMIT;
+        }
+        if (end - pos < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const uint8_t next_proposal = packet[pos];
+        const uint16_t proposal_len =
+            provider_helper_wire_peek_u16(packet + pos + 2);
+        const uint8_t proposal_number = packet[pos + 4];
+        const uint8_t protocol_id = packet[pos + 5];
+        const uint8_t spi_size = packet[pos + 6];
+        const uint8_t transform_count = packet[pos + 7];
+        if (next_proposal != PROVIDER_HELPER_IKEV2_PAYLOAD_NONE
+            && next_proposal != PROVIDER_HELPER_IKEV2_PROPOSAL_MORE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+        if (proposal_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                           + spi_size
+                           + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
+            || proposal_len > end - pos || !proposal_number
+            || (proposal_count == 1 && proposal_number != 1)
+            || proposal_number < previous_proposal_number
+            || protocol_id != PROVIDER_HELPER_IKEV2_PROTOCOL_ESP
+            || spi_size != 4 || !transform_count)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const size_t transform_start =
+            pos + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE + spi_size;
+        const size_t transform_end = pos + proposal_len;
+        const enum provider_helper_ikev2_parse_result result =
+            provider_helper_ikev2_validate_transforms(
+                packet, transform_start, transform_end, transform_count);
+        if (result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+        {
+            return result;
+        }
+
+        pos = transform_end;
+        previous_proposal_number = proposal_number;
+        if (next_proposal == PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
+        {
+            saw_last = true;
+            if (pos != end)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+        }
+    }
+
+    return pos == end && saw_last && proposal_count
+           ? PROVIDER_HELPER_IKEV2_PARSE_OK
+           : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+}
+
+static enum provider_helper_ikev2_parse_result
 provider_helper_ikev2_parse_transform_attrs(const uint8_t *packet,
                                             size_t start,
                                             size_t end,
@@ -1973,6 +2062,226 @@ provider_helper_ikev2_select_ike_sa_init_proposal(
                 return PROVIDER_HELPER_IKEV2_PARSE_OK;
             }
             return PROVIDER_HELPER_IKEV2_PARSE_INVALID_KE_PAYLOAD;
+        }
+
+        pos += proposal_len;
+    }
+
+    return PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN;
+}
+
+static bool
+provider_helper_ikev2_child_selection_supported(
+    const struct provider_helper_ikev2_child_sa_selection *selection,
+    bool has_encr,
+    bool has_integ,
+    bool has_dh,
+    bool has_esn)
+{
+    return selection && has_encr && !has_integ && !has_dh
+           && selection->encr_id == PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16
+           && (!selection->encr_key_bits
+               || selection->encr_key_bits == 128
+               || selection->encr_key_bits == 256)
+           && (!has_esn
+               || selection->esn_id
+                      == PROVIDER_HELPER_IKEV2_ESN_NO_EXTENDED);
+}
+
+static enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_select_child_transform(
+    const uint8_t *packet,
+    size_t pos,
+    size_t end,
+    struct provider_helper_ikev2_child_sa_selection *selection,
+    bool *has_encr,
+    bool *has_integ,
+    bool *has_dh,
+    bool *has_esn)
+{
+    if (end - pos < PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    const uint16_t transform_len = provider_helper_wire_peek_u16(packet + pos + 2);
+    const uint8_t transform_type = packet[pos + 4];
+    const uint16_t transform_id = provider_helper_wire_peek_u16(packet + pos + 6);
+    uint16_t key_bits = 0;
+    if (transform_len < PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
+        || transform_len > end - pos || !transform_type)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    enum provider_helper_ikev2_parse_result result =
+        provider_helper_ikev2_parse_transform_attrs(
+            packet, pos + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE,
+            pos + transform_len, &key_bits);
+    if (result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+    {
+        return result;
+    }
+
+    switch (transform_type)
+    {
+        case PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR:
+            if (*has_encr)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN;
+            }
+            *has_encr = true;
+            selection->encr_id = transform_id;
+            selection->encr_key_bits = key_bits;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_TRANSFORM_INTEG:
+            if (*has_integ)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN;
+            }
+            *has_integ = true;
+            selection->integ_id = transform_id;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_TRANSFORM_DH:
+            if (*has_dh)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN;
+            }
+            *has_dh = true;
+            selection->dh_id = transform_id;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_TRANSFORM_ESN:
+            if (*has_esn)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN;
+            }
+            *has_esn = true;
+            selection->has_esn = true;
+            selection->esn_id = transform_id;
+            break;
+
+        default:
+            return PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN;
+    }
+
+    return PROVIDER_HELPER_IKEV2_PARSE_OK;
+}
+
+enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_select_child_sa_proposal(
+    const uint8_t *packet,
+    size_t packet_len,
+    const struct provider_helper_ikev2_payload_summary *summary,
+    struct provider_helper_ikev2_child_sa_selection *selection)
+{
+    if (selection)
+    {
+        CLEAR(*selection);
+    }
+    if (!packet || !summary || !selection
+        || !provider_helper_ikev2_body_inside(packet_len, summary->sa_offset,
+                                              summary->sa_len)
+        || summary->sa_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE + 4
+                           + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+    enum provider_helper_ikev2_parse_result structural_result =
+        provider_helper_ikev2_validate_child_sa_payload(packet, packet_len,
+                                                        summary->sa_offset,
+                                                        summary->sa_len);
+    if (structural_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+    {
+        return structural_result;
+    }
+
+    size_t pos = summary->sa_offset;
+    const size_t end = summary->sa_offset + summary->sa_len;
+    uint32_t proposal_count = 0;
+    while (pos < end)
+    {
+        if (++proposal_count > PROVIDER_HELPER_IKEV2_MAX_PROPOSALS)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_PAYLOAD_LIMIT;
+        }
+        if (end - pos < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const uint16_t proposal_len = provider_helper_wire_peek_u16(packet + pos + 2);
+        const uint8_t proposal_number = packet[pos + 4];
+        const uint8_t protocol_id = packet[pos + 5];
+        const uint8_t spi_size = packet[pos + 6];
+        const uint8_t transform_count = packet[pos + 7];
+        if (proposal_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                           + spi_size
+            || proposal_len > end - pos
+            || protocol_id != PROVIDER_HELPER_IKEV2_PROTOCOL_ESP
+            || spi_size != 4 || !transform_count)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        struct provider_helper_ikev2_child_sa_selection candidate = {
+            .proposal_number = proposal_number,
+            .initiator_spi =
+                provider_helper_wire_peek_u32(
+                    packet + pos + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE),
+        };
+        bool has_encr = false;
+        bool has_integ = false;
+        bool has_dh = false;
+        bool has_esn = false;
+        bool candidate_invalid = false;
+        size_t transform_pos =
+            pos + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE + spi_size;
+        const size_t transform_end = pos + proposal_len;
+        uint32_t parsed = 0;
+        while (transform_pos < transform_end)
+        {
+            if (++parsed > PROVIDER_HELPER_IKEV2_MAX_TRANSFORMS)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_PAYLOAD_LIMIT;
+            }
+            enum provider_helper_ikev2_parse_result result =
+                provider_helper_ikev2_select_child_transform(
+                    packet, transform_pos, transform_end, &candidate,
+                    &has_encr, &has_integ, &has_dh, &has_esn);
+            if (result == PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN)
+            {
+                candidate_invalid = true;
+            }
+            else if (result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+            {
+                return result;
+            }
+            if (transform_end - transform_pos
+                < PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+            const uint16_t transform_len =
+                provider_helper_wire_peek_u16(packet + transform_pos + 2);
+            if (transform_len < PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
+                || transform_len > transform_end - transform_pos)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+            transform_pos += transform_len;
+        }
+
+        if (!candidate_invalid && parsed == transform_count
+            && candidate.initiator_spi
+            && provider_helper_ikev2_child_selection_supported(
+                &candidate, has_encr, has_integ, has_dh, has_esn))
+        {
+            candidate.selected = true;
+            *selection = candidate;
+            return PROVIDER_HELPER_IKEV2_PARSE_OK;
         }
 
         pos += proposal_len;

@@ -101,6 +101,7 @@
 #define PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16 20
 #define PROVIDER_HELPER_IKEV2_PRF_HMAC_SHA2_256 5
 #define PROVIDER_HELPER_IKEV2_DH_ECP_256 19
+#define PROVIDER_HELPER_IKEV2_ESN_NO_EXTENDED 0
 #define PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH 14
 #define PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES 64
 #define PROVIDER_HELPER_IKEV2_ID_FQDN       2
@@ -481,6 +482,18 @@ struct provider_helper_ikev2_sa_selection {
     uint16_t dh_id;
 };
 
+struct provider_helper_ikev2_child_sa_selection {
+    bool selected;
+    uint8_t proposal_number;
+    uint32_t initiator_spi;
+    uint16_t encr_id;
+    uint16_t encr_key_bits;
+    uint16_t integ_id;
+    uint16_t dh_id;
+    uint16_t esn_id;
+    bool has_esn;
+};
+
 typedef bool (*provider_helper_ikev2_cookie_mac_fn)(
     void *ctx,
     const uint8_t *input,
@@ -650,6 +663,12 @@ provider_helper_ikev2_select_ike_sa_init_proposal(
     size_t packet_len,
     const struct provider_helper_ikev2_payload_summary *summary,
     struct provider_helper_ikev2_sa_selection *selection);
+enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_select_child_sa_proposal(
+    const uint8_t *packet,
+    size_t packet_len,
+    const struct provider_helper_ikev2_payload_summary *summary,
+    struct provider_helper_ikev2_child_sa_selection *selection);
 bool provider_helper_ikev2_build_cookie_response(
     uint8_t *dst,
     size_t dst_len,
