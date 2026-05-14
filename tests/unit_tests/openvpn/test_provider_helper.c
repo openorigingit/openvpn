@@ -837,6 +837,19 @@ test_write_be32(uint8_t *dst, uint32_t value)
     dst[3] = (uint8_t)value;
 }
 
+static uint16_t
+test_read_be16(const uint8_t *src)
+{
+    return ((uint16_t)src[0] << 8) | src[1];
+}
+
+static uint32_t
+test_read_be32(const uint8_t *src)
+{
+    return ((uint32_t)src[0] << 24) | ((uint32_t)src[1] << 16)
+           | ((uint32_t)src[2] << 8) | src[3];
+}
+
 static void
 test_write_be64(uint8_t *dst, uint64_t value)
 {
@@ -3493,6 +3506,149 @@ test_provider_helper_ikev2_sa_init_response(void **state)
 }
 
 static void
+test_provider_helper_ikev2_child_sa_response_plaintext(void **state)
+{
+    (void)state;
+
+    uint8_t plaintext[512];
+    uint8_t packet[PROVIDER_HELPER_IKEV2_HEADER_SIZE + sizeof(plaintext)];
+    uint8_t responder_nonce[PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES];
+    const uint32_t responder_spi = 0xaabbccdd;
+    const struct provider_helper_ikev2_child_sa_selection selection = {
+        .selected = true,
+        .proposal_number = 1,
+        .initiator_spi = 0x01020304,
+        .encr_id = PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16,
+        .encr_key_bits = 256,
+        .has_esn = true,
+        .esn_id = PROVIDER_HELPER_IKEV2_ESN_NO_EXTENDED,
+    };
+    const struct provider_helper_xfrm_lease lease = {
+        .lease_id = 17,
+        .provider_session_id = 7,
+        .policy_revision = 3,
+        .mark_value = 0x4200,
+        .mark_mask = 0xffff,
+        .if_id = 12,
+        .reqid = 1100,
+        .address_family = AF_INET,
+        .flags = PROVIDER_HELPER_XFRM_LEASE_IPV4,
+        .local_ts_start_ipv4 = 0x0a580001,
+        .local_ts_end_ipv4 = 0x0a580001,
+        .local_ts_start_port = 443,
+        .local_ts_end_port = 443,
+        .remote_ts_start_ipv4 = 0x0a580002,
+        .remote_ts_end_ipv4 = 0x0a580002,
+        .remote_ts_start_port = 10000,
+        .remote_ts_end_port = 10000,
+        .ip_protocol_id = IPPROTO_TCP,
+    };
+    for (size_t i = 0; i < sizeof(responder_nonce); ++i)
+    {
+        responder_nonce[i] = (uint8_t)(0xa0 + i);
+    }
+
+    size_t plaintext_len = 0;
+    assert_true(provider_helper_ikev2_build_child_sa_response_plaintext(
+                    plaintext, sizeof(plaintext), &selection, responder_spi,
+                    &lease, responder_nonce, sizeof(responder_nonce),
+                    &plaintext_len));
+    assert_true(plaintext_len > 1);
+    assert_int_equal(plaintext[plaintext_len - 1], 0);
+
+    const size_t esn_transform_len = PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE;
+    const size_t proposal_len = TEST_IKEV2_CHILD_SA_PROPOSAL_LEN
+                                + esn_transform_len;
+    const size_t sa_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + proposal_len;
+    const size_t nonce_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + sizeof(responder_nonce);
+    assert_int_equal(plaintext[0], PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE);
+    assert_int_equal(test_read_be16(plaintext + 2), sa_payload_len);
+    const size_t proposal = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    assert_int_equal(test_read_be16(plaintext + proposal + 2), proposal_len);
+    assert_int_equal(plaintext[proposal + 4], selection.proposal_number);
+    assert_int_equal(plaintext[proposal + 5], PROVIDER_HELPER_IKEV2_PROTOCOL_ESP);
+    assert_int_equal(plaintext[proposal + 6], 4);
+    assert_int_equal(plaintext[proposal + 7], 2);
+    assert_int_equal(test_read_be32(plaintext + proposal + 8), responder_spi);
+
+    const size_t nonce_payload = sa_payload_len;
+    assert_int_equal(plaintext[nonce_payload], PROVIDER_HELPER_IKEV2_PAYLOAD_TSI);
+    assert_int_equal(test_read_be16(plaintext + nonce_payload + 2),
+                     nonce_payload_len);
+    assert_memory_equal(plaintext + nonce_payload
+                        + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE,
+                        responder_nonce, sizeof(responder_nonce));
+
+    const size_t tsi_payload = sa_payload_len + nonce_payload_len;
+    const size_t tsi_body =
+        tsi_payload + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    const size_t tsi_selector = tsi_body + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+    assert_int_equal(plaintext[tsi_payload], PROVIDER_HELPER_IKEV2_PAYLOAD_TSR);
+    assert_int_equal(plaintext[tsi_body], 1);
+    assert_int_equal(plaintext[tsi_selector + 1], IPPROTO_TCP);
+    assert_int_equal(test_read_be16(plaintext + tsi_selector + 4), 10000);
+    assert_int_equal(test_read_be16(plaintext + tsi_selector + 6), 10000);
+    assert_int_equal(test_read_be32(plaintext + tsi_selector + 8),
+                     lease.remote_ts_start_ipv4);
+    assert_int_equal(test_read_be32(plaintext + tsi_selector + 12),
+                     lease.remote_ts_end_ipv4);
+
+    const size_t tsr_payload =
+        tsi_payload + TEST_IKEV2_TS_IPV4_PAYLOAD_LEN;
+    const size_t tsr_body =
+        tsr_payload + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    const size_t tsr_selector = tsr_body + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+    assert_int_equal(plaintext[tsr_payload], PROVIDER_HELPER_IKEV2_PAYLOAD_NONE);
+    assert_int_equal(plaintext[tsr_body], 1);
+    assert_int_equal(plaintext[tsr_selector + 1], IPPROTO_TCP);
+    assert_int_equal(test_read_be16(plaintext + tsr_selector + 4), 443);
+    assert_int_equal(test_read_be16(plaintext + tsr_selector + 6), 443);
+    assert_int_equal(test_read_be32(plaintext + tsr_selector + 8),
+                     lease.local_ts_start_ipv4);
+    assert_int_equal(test_read_be32(plaintext + tsr_selector + 12),
+                     lease.local_ts_end_ipv4);
+
+    const size_t packet_len =
+        PROVIDER_HELPER_IKEV2_HEADER_SIZE + plaintext_len - 1;
+    test_make_ikev2_header(packet, false,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA,
+                           PROVIDER_HELPER_IKEV2_FLAG_RESPONSE,
+                           0x8877665544332211ull, (uint32_t)packet_len);
+    memcpy(packet + PROVIDER_HELPER_IKEV2_HEADER_SIZE, plaintext,
+           plaintext_len - 1);
+
+    struct provider_helper_ikev2_header header;
+    struct provider_helper_ikev2_payload_summary summary;
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, packet_len,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, false,
+                         &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_parse_payloads(
+                         packet, packet_len, &header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_true(summary.saw_sa);
+    assert_true(summary.saw_nonce);
+    assert_true(summary.saw_tsi);
+    assert_true(summary.saw_tsr);
+
+    struct provider_helper_ikev2_child_sa_selection selected;
+    assert_int_equal(provider_helper_ikev2_select_child_sa_proposal(
+                         packet, packet_len, &summary, &selected),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_true(selected.selected);
+    assert_int_equal(selected.initiator_spi, responder_spi);
+    assert_true(selected.has_esn);
+    assert_int_equal(selected.esn_id, PROVIDER_HELPER_IKEV2_ESN_NO_EXTENDED);
+
+    assert_false(provider_helper_ikev2_build_child_sa_response_plaintext(
+                     plaintext, sizeof(plaintext), &selection, 0, &lease,
+                     responder_nonce, sizeof(responder_nonce), &plaintext_len));
+}
+
+static void
 test_provider_helper_processes_partial_header(void **state)
 {
     (void)state;
@@ -5094,6 +5250,8 @@ main(void)
         cmocka_unit_test(test_provider_helper_ikev2_payload_parser),
         cmocka_unit_test(test_provider_helper_ikev2_cookie_response),
         cmocka_unit_test(test_provider_helper_ikev2_sa_init_response),
+        cmocka_unit_test(
+            test_provider_helper_ikev2_child_sa_response_plaintext),
         cmocka_unit_test(test_provider_helper_ikev2_cookie_builder),
         cmocka_unit_test(test_provider_helper_processes_partial_header),
         cmocka_unit_test(test_provider_helper_auth_request_callback),

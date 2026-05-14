@@ -721,6 +721,15 @@ bool provider_helper_ikev2_build_sa_init_response(
     size_t responder_nonce_len,
     bool force_natt,
     size_t *out_len);
+bool provider_helper_ikev2_build_child_sa_response_plaintext(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_ikev2_child_sa_selection *selection,
+    uint32_t responder_spi,
+    const struct provider_helper_xfrm_lease *lease,
+    const uint8_t *responder_nonce,
+    size_t responder_nonce_len,
+    size_t *out_len);
 bool provider_helper_ikev2_build_cookie(
     uint8_t *dst,
     size_t dst_len,

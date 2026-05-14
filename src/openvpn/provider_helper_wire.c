@@ -2658,6 +2658,22 @@ provider_helper_ikev2_selected_suite_valid(
            && selection->dh_id == PROVIDER_HELPER_IKEV2_DH_ECP_256;
 }
 
+static bool
+provider_helper_ikev2_selected_child_suite_valid(
+    const struct provider_helper_ikev2_child_sa_selection *selection)
+{
+    return selection && selection->selected && selection->proposal_number
+           && selection->initiator_spi
+           && selection->encr_id == PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16
+           && (!selection->encr_key_bits
+               || selection->encr_key_bits == 128
+               || selection->encr_key_bits == 256)
+           && !selection->integ_id && !selection->dh_id
+           && (!selection->has_esn
+               || selection->esn_id
+                      == PROVIDER_HELPER_IKEV2_ESN_NO_EXTENDED);
+}
+
 static uint16_t
 provider_helper_ikev2_transform_len(uint16_t key_bits)
 {
@@ -2705,6 +2721,152 @@ provider_helper_ikev2_write_notify(uint8_t **pos,
         memcpy(*pos, data, data_len);
         *pos += data_len;
     }
+}
+
+static bool
+provider_helper_ikev2_write_ipv4_ts(uint8_t **pos,
+                                    uint8_t next_payload,
+                                    uint32_t start_addr,
+                                    uint32_t end_addr,
+                                    uint32_t start_port,
+                                    uint32_t end_port,
+                                    uint32_t ip_protocol_id)
+{
+    if (!pos || !*pos || start_addr > end_addr || start_port > end_port
+        || start_port > 65535 || end_port > 65535 || ip_protocol_id > 255)
+    {
+        return false;
+    }
+
+    *(*pos)++ = next_payload;
+    *(*pos)++ = 0;
+    provider_helper_wire_write_u16(
+        pos, PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+             + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE
+             + PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
+    *(*pos)++ = 1;
+    *(*pos)++ = 0;
+    *(*pos)++ = 0;
+    *(*pos)++ = 0;
+    *(*pos)++ = PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE;
+    *(*pos)++ = (uint8_t)ip_protocol_id;
+    provider_helper_wire_write_u16(
+        pos, PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
+    provider_helper_wire_write_u16(pos, (uint16_t)start_port);
+    provider_helper_wire_write_u16(pos, (uint16_t)end_port);
+    provider_helper_wire_write_u32(pos, start_addr);
+    provider_helper_wire_write_u32(pos, end_addr);
+    return true;
+}
+
+bool
+provider_helper_ikev2_build_child_sa_response_plaintext(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_ikev2_child_sa_selection *selection,
+    uint32_t responder_spi,
+    const struct provider_helper_xfrm_lease *lease,
+    const uint8_t *responder_nonce,
+    size_t responder_nonce_len,
+    size_t *out_len)
+{
+    if (out_len)
+    {
+        *out_len = 0;
+    }
+    if (!dst || !provider_helper_ikev2_selected_child_suite_valid(selection)
+        || !responder_spi || !provider_helper_xfrm_lease_valid(lease, NULL, 0)
+        || lease->address_family != AF_INET
+        || !(lease->flags & PROVIDER_HELPER_XFRM_LEASE_IPV4)
+        || !responder_nonce
+        || responder_nonce_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+        || responder_nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES)
+    {
+        return false;
+    }
+
+    const uint16_t encr_transform_len =
+        provider_helper_ikev2_transform_len(selection->encr_key_bits);
+    const uint16_t esn_transform_len =
+        selection->has_esn ? provider_helper_ikev2_transform_len(0) : 0;
+    const uint8_t transform_count = selection->has_esn ? 2 : 1;
+    const uint16_t proposal_len =
+        (uint16_t)(PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE + 4
+                   + encr_transform_len + esn_transform_len);
+    const uint16_t sa_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + proposal_len;
+    const uint16_t nonce_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+        + (uint16_t)responder_nonce_len;
+    const uint16_t ts_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+        + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE
+        + PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE;
+    const size_t plaintext_len =
+        sa_payload_len + nonce_payload_len + (2u * ts_payload_len) + 1u;
+    if (dst_len < plaintext_len)
+    {
+        return false;
+    }
+
+    memset(dst, 0, plaintext_len);
+    uint8_t *pos = dst;
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE;
+    *pos++ = 0;
+    provider_helper_wire_write_u16(&pos, sa_payload_len);
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+    *pos++ = 0;
+    provider_helper_wire_write_u16(&pos, proposal_len);
+    *pos++ = selection->proposal_number;
+    *pos++ = PROVIDER_HELPER_IKEV2_PROTOCOL_ESP;
+    *pos++ = 4;
+    *pos++ = transform_count;
+    provider_helper_wire_write_u32(&pos, responder_spi);
+    provider_helper_ikev2_write_transform(
+        &pos,
+        selection->has_esn ? PROVIDER_HELPER_IKEV2_TRANSFORM_MORE
+                           : PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+        PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR, selection->encr_id,
+        selection->encr_key_bits);
+    if (selection->has_esn)
+    {
+        provider_helper_ikev2_write_transform(
+            &pos, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+            PROVIDER_HELPER_IKEV2_TRANSFORM_ESN, selection->esn_id, 0);
+    }
+
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_TSI;
+    *pos++ = 0;
+    provider_helper_wire_write_u16(&pos, nonce_payload_len);
+    memcpy(pos, responder_nonce, responder_nonce_len);
+    pos += responder_nonce_len;
+
+    if (!provider_helper_ikev2_write_ipv4_ts(
+            &pos, PROVIDER_HELPER_IKEV2_PAYLOAD_TSR,
+            lease->remote_ts_start_ipv4, lease->remote_ts_end_ipv4,
+            lease->remote_ts_start_port, lease->remote_ts_end_port,
+            lease->ip_protocol_id)
+        || !provider_helper_ikev2_write_ipv4_ts(
+            &pos, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+            lease->local_ts_start_ipv4, lease->local_ts_end_ipv4,
+            lease->local_ts_start_port, lease->local_ts_end_port,
+            lease->ip_protocol_id))
+    {
+        memset(dst, 0, plaintext_len);
+        return false;
+    }
+
+    *pos++ = 0; /* Pad Length: no padding bytes for AEAD. */
+    if ((size_t)(pos - dst) != plaintext_len)
+    {
+        memset(dst, 0, plaintext_len);
+        return false;
+    }
+    if (out_len)
+    {
+        *out_len = plaintext_len;
+    }
+    return true;
 }
 
 bool
