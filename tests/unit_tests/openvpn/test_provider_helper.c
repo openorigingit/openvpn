@@ -3029,6 +3029,12 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 3);
 
+    int state_fd = test_create_udp_sender(0x7f000006u);
+    const uint64_t state_initiator_spi = 0x0102030405060708ull;
+    test_send_ikev2_datagram_from(state_fd, port, state_initiator_spi);
+    const uint64_t state_responder_spi =
+        test_recv_ikev2_sa_init_response(state_fd, state_initiator_spi);
+
     int datagram_fd = test_create_udp_sender(0x7f000007u);
     test_send_ikev2_exchange_header_from(
         datagram_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA,
@@ -3037,11 +3043,11 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
         datagram_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
         0x0102030405060708ull, 0x8877665544332211ull, 3);
     test_send_ikev2_protected_exchange_from(
-        datagram_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA,
-        0x0102030405060708ull, 0x8877665544332211ull, 2);
+        state_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA,
+        state_initiator_spi, state_responder_spi, 2);
     test_send_ikev2_protected_exchange_from(
-        datagram_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
-        0x0102030405060708ull, 0x8877665544332211ull, 3);
+        state_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
+        state_initiator_spi, state_responder_spi, 3);
     test_send_ikev2_exchange_header_fields_from(
         datagram_fd, port, PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA,
         PROVIDER_HELPER_IKEV2_FLAG_RESPONSE, 0x0102030405060709ull,
@@ -3052,6 +3058,7 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
         0x8877665544332211ull, 3);
     usleep(10000);
     close(datagram_fd);
+    close(state_fd);
     close(listener_fd);
 
     const uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
@@ -3067,11 +3074,11 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
-    assert_int_equal(supervisor.runtime_stats.datagrams_rx, 6);
-    assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 6);
+    assert_int_equal(supervisor.runtime_stats.datagrams_rx, 7);
+    assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 7);
     assert_int_equal(supervisor.runtime_stats.datagrams_malformed, 4);
     assert_int_equal(supervisor.runtime_stats.ike_exchange_unsupported, 2);
-    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
 
     provider_helper_supervisor_stop(&supervisor);
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);

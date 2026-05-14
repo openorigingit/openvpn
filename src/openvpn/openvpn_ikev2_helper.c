@@ -3090,6 +3090,35 @@ ikev2_helper_protected_exchange_request_shape_valid(
                               + IKEV2_HELPER_AES_GCM_TAG_BYTES;
 }
 
+static struct ikev2_helper_ike_sa *
+ikev2_helper_find_protected_exchange_sa(
+    struct ikev2_helper_ike_sa_table *table,
+    const struct ikev2_helper_listener *listener,
+    const struct provider_helper_ikev2_header *header,
+    const struct sockaddr_storage *peer,
+    socklen_t peer_len)
+{
+    if (!table || !listener || !header || !peer)
+    {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        if (sa->active
+            && sa->listener_id == listener->descriptor.listener_id
+            && sa->initiator_spi == header->initiator_spi
+            && sa->responder_spi == header->responder_spi
+            && ikev2_helper_peer_equal(&sa->peer, sa->peer_len, peer,
+                                       peer_len))
+        {
+            return sa;
+        }
+    }
+    return NULL;
+}
+
 static bool
 ikev2_helper_ike_auth_listener_allowed(
     const struct ikev2_helper_listener *listener,
@@ -3455,6 +3484,13 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 if (!ikev2_helper_ike_auth_listener_allowed(listener, config))
                 {
                     ++counters->ike_exchange_unsupported;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+                if (!ikev2_helper_find_protected_exchange_sa(
+                        sa_table, listener, &header, &peer, peer_len))
+                {
+                    ++counters->datagrams_malformed;
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
