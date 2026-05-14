@@ -120,6 +120,14 @@ struct ikev2_helper_child_sa_scaffold {
     time_t updated;
     struct provider_helper_ikev2_child_sa_selection selection;
     struct provider_helper_xfrm_lease xfrm_lease;
+    size_t initiator_nonce_len;
+    uint8_t initiator_nonce[PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES];
+    size_t responder_nonce_len;
+    uint8_t responder_nonce[IKEV2_HELPER_RESPONDER_NONCE_BYTES];
+    size_t sk_ei_len;
+    uint8_t sk_ei[IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES];
+    size_t sk_er_len;
+    uint8_t sk_er[IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES];
 };
 
 struct ikev2_helper_ike_sa {
@@ -787,6 +795,35 @@ ikev2_helper_suite_has_ike_key_sizes(
 }
 
 static bool
+ikev2_helper_suite_has_child_key_sizes(
+    const struct provider_helper_ikev2_child_sa_selection *selection,
+    size_t *sk_ei_len,
+    size_t *sk_er_len)
+{
+    if (!selection || !selection->selected || !selection->initiator_spi
+        || selection->encr_id != PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16
+        || selection->integ_id || selection->dh_id
+        || (selection->has_esn
+            && selection->esn_id != PROVIDER_HELPER_IKEV2_ESN_NO_EXTENDED)
+        || !sk_ei_len || !sk_er_len)
+    {
+        return false;
+    }
+
+    const size_t encr_keymat_len =
+        ikev2_helper_aes_gcm_keymat_bytes(selection->encr_key_bits);
+    if (!encr_keymat_len
+        || encr_keymat_len > IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES)
+    {
+        return false;
+    }
+
+    *sk_ei_len = encr_keymat_len;
+    *sk_er_len = encr_keymat_len;
+    return true;
+}
+
+static bool
 ikev2_helper_derive_ike_sa_keys(struct ikev2_helper_ike_sa *sa)
 {
     if (!sa
@@ -852,6 +889,59 @@ ikev2_helper_derive_ike_sa_keys(struct ikev2_helper_ike_sa *sa)
     pos += sa->sk_pi_len;
     sa->sk_pr_len = IKEV2_HELPER_PRF_SHA256_BYTES;
     memcpy(sa->sk_pr, pos, sa->sk_pr_len);
+
+    ikev2_helper_secure_zero(seed, sizeof(seed));
+    ikev2_helper_secure_zero(keymat, sizeof(keymat));
+    return true;
+}
+
+static bool
+ikev2_helper_derive_child_sa_keys(struct ikev2_helper_ike_sa *sa,
+                                  struct ikev2_helper_child_sa_scaffold *child)
+{
+    if (!sa || !child || !sa->sk_d_len
+        || sa->sk_d_len != IKEV2_HELPER_PRF_SHA256_BYTES
+        || child->initiator_nonce_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+        || child->initiator_nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES
+        || child->responder_nonce_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+        || child->responder_nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES)
+    {
+        return false;
+    }
+
+    size_t sk_ei_len = 0;
+    size_t sk_er_len = 0;
+    if (!ikev2_helper_suite_has_child_key_sizes(&child->selection, &sk_ei_len,
+                                                &sk_er_len))
+    {
+        return false;
+    }
+
+    uint8_t seed[2 * PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES];
+    size_t seed_len = 0;
+    memcpy(seed, child->initiator_nonce, child->initiator_nonce_len);
+    seed_len += child->initiator_nonce_len;
+    memcpy(seed + seed_len, child->responder_nonce,
+           child->responder_nonce_len);
+    seed_len += child->responder_nonce_len;
+
+    uint8_t keymat[2 * IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES];
+    const size_t keymat_len = sk_ei_len + sk_er_len;
+    if (keymat_len > sizeof(keymat)
+        || !ikev2_helper_prf_plus_sha256(sa->sk_d, sa->sk_d_len, seed,
+                                         seed_len, keymat, keymat_len))
+    {
+        ikev2_helper_secure_zero(seed, sizeof(seed));
+        ikev2_helper_secure_zero(keymat, sizeof(keymat));
+        return false;
+    }
+
+    const uint8_t *pos = keymat;
+    child->sk_ei_len = sk_ei_len;
+    memcpy(child->sk_ei, pos, child->sk_ei_len);
+    pos += child->sk_ei_len;
+    child->sk_er_len = sk_er_len;
+    memcpy(child->sk_er, pos, child->sk_er_len);
 
     ikev2_helper_secure_zero(seed, sizeof(seed));
     ikev2_helper_secure_zero(keymat, sizeof(keymat));
@@ -3553,11 +3643,16 @@ ikev2_helper_scaffold_child_sa(
     struct ikev2_helper_ike_sa *sa,
     const struct provider_helper_ikev2_child_sa_selection *selection,
     const struct provider_helper_xfrm_lease *lease,
+    const uint8_t *initiator_nonce,
+    size_t initiator_nonce_len,
     uint32_t message_id,
     time_t now)
 {
     if (!table || !sa || !sa->active || !sa->auth_authorized || !selection
         || !selection->selected || !selection->initiator_spi || !lease
+        || !initiator_nonce
+        || initiator_nonce_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+        || initiator_nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES
         || !message_id)
     {
         return false;
@@ -3581,6 +3676,16 @@ ikev2_helper_scaffold_child_sa(
     child.updated = now;
     child.selection = *selection;
     child.xfrm_lease = *lease;
+    child.initiator_nonce_len = initiator_nonce_len;
+    memcpy(child.initiator_nonce, initiator_nonce, initiator_nonce_len);
+    child.responder_nonce_len = sizeof(child.responder_nonce);
+    if (!ikev2_helper_random_bytes(child.responder_nonce,
+                                   child.responder_nonce_len)
+        || !ikev2_helper_derive_child_sa_keys(sa, &child))
+    {
+        ikev2_helper_secure_zero(&child, sizeof(child));
+        return false;
+    }
 
     ikev2_helper_secure_zero(&sa->child_sa, sizeof(sa->child_sa));
     sa->child_sa = child;
@@ -5192,9 +5297,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             if (ikev2_helper_scaffold_child_sa(
                                     sa_table, sa, &child_selection,
                                     &sa->authorized_xfrm_lease,
+                                    plaintext + inner_summary.nonce_offset,
+                                    inner_summary.nonce_len,
                                     header.message_id, time(NULL)))
                             {
                                 ++counters->ike_create_child_scaffolded;
+                                ++counters->ike_create_child_keymat_ready;
                             }
                             else
                             {
