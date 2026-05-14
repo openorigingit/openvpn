@@ -104,6 +104,13 @@
 #define IKEV2_HELPER_IKE_SA_INIT_MESSAGE_ID 0
 #define IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID 1
 #define IKEV2_HELPER_PROTECTED_RESPONSE_CACHE_BYTES 2048
+#ifdef MSG_DONTWAIT
+#define IKEV2_HELPER_RECV_FLAGS MSG_DONTWAIT
+#define IKEV2_HELPER_CAN_DRAIN_LISTENER 1
+#else
+#define IKEV2_HELPER_RECV_FLAGS 0
+#define IKEV2_HELPER_CAN_DRAIN_LISTENER 0
+#endif
 
 static volatile sig_atomic_t helper_stop;
 
@@ -5378,7 +5385,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
     msg.msg_control = control;
     msg.msg_controllen = sizeof(control);
 
-    const ssize_t n = recvmsg(listener->fd, &msg, 0);
+    const ssize_t n = recvmsg(listener->fd, &msg, IKEV2_HELPER_RECV_FLAGS);
     if (n < 0)
     {
         if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
@@ -6378,10 +6385,17 @@ ikev2_helper_loop(int fd)
             }
             if (pfds[i].revents & POLLIN)
             {
-                ikev2_helper_handle_datagram(&listeners[i - 1], &config, &sa_table,
-                                             &sa_init_rate_state, &counters,
-                                             &cookie_ctx, fd, &tx_sequence,
-                                             &next_auth_request_id);
+                const uint32_t drain_budget =
+                    IKEV2_HELPER_CAN_DRAIN_LISTENER ? config.worker_limit : 1;
+                for (uint32_t j = 0; j < drain_budget; ++j)
+                {
+                    ikev2_helper_handle_datagram(&listeners[i - 1], &config,
+                                                 &sa_table,
+                                                 &sa_init_rate_state,
+                                                 &counters, &cookie_ctx, fd,
+                                                 &tx_sequence,
+                                                 &next_auth_request_id);
+                }
             }
         }
 
