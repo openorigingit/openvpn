@@ -1758,7 +1758,7 @@ ikev2_helper_validate_eap_tls_payload(
                           | ((uint32_t)body[7] << 16)
                           | ((uint32_t)body[8] << 8)
                           | body[9];
-        if (!tls_message_len || tls_message_len > config->max_cert_chain_bytes)
+        if (!tls_message_len || tls_message_len > config->max_eap_tls_bytes)
         {
             return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
         }
@@ -1766,7 +1766,7 @@ ikev2_helper_validate_eap_tls_payload(
     }
 
     const size_t fragment_len = body_len - fragment_offset;
-    if (fragment_len > config->max_cert_chain_bytes)
+    if (fragment_len > config->max_eap_tls_bytes)
     {
         return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
     }
@@ -2096,7 +2096,7 @@ ikev2_helper_parse_ike_auth_inner_payloads(
         else if (payload_type == PROVIDER_HELPER_IKEV2_PAYLOAD_EAP)
         {
             if (!ikev2_helper_add_bounded_payload_bytes(
-                    &eap_bytes, body_len, config->max_cert_chain_bytes))
+                    &eap_bytes, body_len, config->max_eap_tls_bytes))
             {
                 return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
             }
