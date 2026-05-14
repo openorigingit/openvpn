@@ -36,7 +36,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 36
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  696
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  704
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     88
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
 #define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
@@ -393,6 +393,7 @@ struct provider_helper_runtime_stats {
     uint64_t ike_exchange_pre_auth_dropped;
     uint64_t ike_create_child_ts_unacceptable_tx;
     uint64_t ike_create_child_ts_unacceptable_failed;
+    uint64_t ike_sa_xfrm_lease_revoked;
 };
 
 struct provider_helper_xfrm_lease {

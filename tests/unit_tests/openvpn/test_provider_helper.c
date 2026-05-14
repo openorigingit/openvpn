@@ -405,6 +405,7 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_exchange_pre_auth_dropped = 82,
         .ike_create_child_ts_unacceptable_tx = 83,
         .ike_create_child_ts_unacceptable_failed = 84,
+        .ike_sa_xfrm_lease_revoked = 85,
     };
     struct provider_helper_runtime_stats output;
     uint8_t payload[PROVIDER_HELPER_RUNTIME_STATS_SIZE];
@@ -565,6 +566,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_create_child_ts_unacceptable_tx);
     assert_int_equal(output.ike_create_child_ts_unacceptable_failed,
                      input.ike_create_child_ts_unacceptable_failed);
+    assert_int_equal(output.ike_sa_xfrm_lease_revoked,
+                     input.ike_sa_xfrm_lease_revoked);
 }
 
 static void
@@ -4994,6 +4997,36 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_replaced, 0);
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_deleted, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
+
+    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    assert_true(provider_helper_supervisor_send_xfrm_lease_delete(
+                    &supervisor, &xfrm_lease, 100));
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+
+    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 101);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+    assert_int_equal(supervisor.runtime_stats.xfrm_leases_active, 0);
+    assert_int_equal(supervisor.runtime_stats.xfrm_lease_deleted, 1);
+    assert_true(supervisor.runtime_stats.ike_sa_xfrm_lease_revoked >= 1);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
 
     close(response_fd);
     close(listener_fd);

@@ -3436,6 +3436,40 @@ ikev2_helper_authorize_ike_sa(
 }
 
 static bool
+ikev2_helper_ike_sa_uses_xfrm_lease(
+    const struct ikev2_helper_ike_sa *sa,
+    const struct provider_helper_xfrm_lease *lease)
+{
+    return sa && lease && sa->active && sa->auth_authorized
+           && sa->xfrm_lease_id == lease->lease_id
+           && sa->provider_session_id == lease->provider_session_id
+           && sa->policy_revision == lease->policy_revision;
+}
+
+static uint32_t
+ikev2_helper_clear_ike_sas_for_xfrm_lease(
+    struct ikev2_helper_ike_sa_table *table,
+    const struct provider_helper_xfrm_lease *lease)
+{
+    if (!table || !lease)
+    {
+        return 0;
+    }
+
+    uint32_t cleared = 0;
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        if (ikev2_helper_ike_sa_uses_xfrm_lease(sa, lease))
+        {
+            ikev2_helper_clear_ike_sa(table, sa);
+            ++cleared;
+        }
+    }
+    return cleared;
+}
+
+static bool
 ikev2_helper_store_xfrm_lease(
     struct provider_helper_xfrm_lease *leases,
     size_t *lease_count,
@@ -5212,12 +5246,16 @@ ikev2_helper_loop(int fd)
                 if (replaced)
                 {
                     ++counters.xfrm_lease_replaced;
+                    counters.ike_sa_xfrm_lease_revoked +=
+                        ikev2_helper_clear_ike_sas_for_xfrm_lease(&sa_table,
+                                                                  &lease);
                 }
                 else
                 {
                     ++counters.xfrm_lease_installed;
                 }
                 counters.xfrm_leases_active = xfrm_lease_count;
+                counters.ike_sa_active = sa_table.active;
                 break;
             }
 
@@ -5237,7 +5275,14 @@ ikev2_helper_loop(int fd)
                     goto done;
                 }
                 counters.xfrm_lease_deleted += deleted;
+                if (deleted)
+                {
+                    counters.ike_sa_xfrm_lease_revoked +=
+                        ikev2_helper_clear_ike_sas_for_xfrm_lease(&sa_table,
+                                                                  &lease);
+                }
                 counters.xfrm_leases_active = xfrm_lease_count;
+                counters.ike_sa_active = sa_table.active;
                 break;
             }
 
