@@ -266,16 +266,42 @@ provider_xfrm_linux_add_mark_and_if_id(
 }
 
 static bool
-provider_xfrm_linux_state_valid(
+provider_xfrm_linux_state_identity_valid(
     const struct provider_xfrm_child_sa_state *state,
     enum provider_xfrm_direction direction)
 {
     return state && state->direction == direction && state->src_outer_ipv4
            && state->dst_outer_ipv4 && state->src_outer_port
            && state->dst_outer_port && state->spi && state->reqid
-           && state->mark_mask
+           && state->mark_mask;
+}
+
+static bool
+provider_xfrm_linux_state_key_valid(
+    const struct provider_xfrm_child_sa_state *state,
+    enum provider_xfrm_direction direction)
+{
+    return provider_xfrm_linux_state_identity_valid(state, direction)
            && state->cipher == PROVIDER_XFRM_CIPHER_AES_GCM_16
            && state->key_len && state->key_len <= sizeof(state->key);
+}
+
+static bool
+provider_xfrm_linux_policy_state_valid(
+    const struct provider_xfrm_child_sa_state *state,
+    uint8_t policy_dir)
+{
+    if (policy_dir == XFRM_POLICY_OUT)
+    {
+        return provider_xfrm_linux_state_identity_valid(
+            state, PROVIDER_XFRM_DIRECTION_OUT);
+    }
+    if (policy_dir == XFRM_POLICY_IN || policy_dir == XFRM_POLICY_FWD)
+    {
+        return provider_xfrm_linux_state_identity_valid(
+            state, PROVIDER_XFRM_DIRECTION_IN);
+    }
+    return false;
 }
 
 static bool
@@ -285,7 +311,7 @@ provider_xfrm_linux_sa_message_build(
     enum provider_xfrm_direction direction,
     struct provider_xfrm_result *result)
 {
-    if (!provider_xfrm_linux_state_valid(state, direction))
+    if (!provider_xfrm_linux_state_key_valid(state, direction))
     {
         provider_xfrm_linux_set_error(result, "invalid XFRM Linux SA state");
         return false;
@@ -357,7 +383,7 @@ provider_xfrm_linux_sa_delete_message_build(
     enum provider_xfrm_direction direction,
     struct provider_xfrm_result *result)
 {
-    if (!provider_xfrm_linux_state_valid(state, direction))
+    if (!provider_xfrm_linux_state_identity_valid(state, direction))
     {
         provider_xfrm_linux_set_error(result,
                                       "invalid XFRM Linux SA delete state");
@@ -412,7 +438,7 @@ provider_xfrm_linux_policy_message_build(
     uint8_t dir,
     struct provider_xfrm_result *result)
 {
-    if (!state)
+    if (!provider_xfrm_linux_policy_state_valid(state, dir))
     {
         provider_xfrm_linux_set_error(result,
                                       "invalid XFRM Linux policy state");
@@ -462,7 +488,7 @@ provider_xfrm_linux_policy_delete_message_build(
     uint8_t dir,
     struct provider_xfrm_result *result)
 {
-    if (!state)
+    if (!provider_xfrm_linux_policy_state_valid(state, dir))
     {
         provider_xfrm_linux_set_error(result,
                                       "invalid XFRM Linux policy delete state");

@@ -256,6 +256,19 @@ provider_xfrm_child_sa_plan_clear(struct provider_xfrm_child_sa_plan *plan)
     }
 }
 
+void
+provider_xfrm_child_sa_plan_zero_key_material(
+    struct provider_xfrm_child_sa_plan *plan)
+{
+    if (plan)
+    {
+        secure_memzero(plan->inbound.key, sizeof(plan->inbound.key));
+        plan->inbound.key_len = 0;
+        secure_memzero(plan->outbound.key, sizeof(plan->outbound.key));
+        plan->outbound.key_len = 0;
+    }
+}
+
 bool
 provider_xfrm_lease_build(struct provider_xfrm_lease *lease,
                           const struct provider_xfrm_lease_spec *spec,

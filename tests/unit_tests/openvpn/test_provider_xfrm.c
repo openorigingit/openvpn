@@ -575,6 +575,18 @@ test_provider_xfrm_linux_builds_child_sa_delete_messages(void **state)
     assert_int_equal(ntohl(out_sa->daddr.a4), spec.remote_outer_ipv4);
 
     provider_xfrm_linux_message_plan_clear(&messages);
+    provider_xfrm_child_sa_plan_zero_key_material(&plan);
+    assert_int_equal(plan.inbound.key_len, 0);
+    assert_int_equal(plan.outbound.key_len, 0);
+    assert_false(provider_xfrm_linux_child_sa_messages_build(&messages, &plan,
+                                                             &result));
+    assert_false(result.ok);
+    assert_true(provider_xfrm_linux_child_sa_delete_messages_build(
+                    &messages, &plan, &result));
+    assert_true(result.ok);
+    assert_int_equal(messages.count, 5);
+
+    provider_xfrm_linux_message_plan_clear(&messages);
     provider_xfrm_child_sa_plan_clear(&plan);
 #endif
 }

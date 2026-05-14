@@ -3748,6 +3748,22 @@ ikev2_helper_child_responder_spi_exists(
     return false;
 }
 
+static void
+ikev2_helper_child_sa_zero_key_material(
+    struct ikev2_helper_child_sa_scaffold *child)
+{
+    if (!child)
+    {
+        return;
+    }
+
+    ikev2_helper_secure_zero(child->sk_ei, sizeof(child->sk_ei));
+    child->sk_ei_len = 0;
+    ikev2_helper_secure_zero(child->sk_er, sizeof(child->sk_er));
+    child->sk_er_len = 0;
+    provider_xfrm_child_sa_plan_zero_key_material(&child->xfrm_plan);
+}
+
 static bool
 ikev2_helper_delete_child_sa_xfrm(
     struct ikev2_helper_child_sa_scaffold *child,
@@ -4339,6 +4355,7 @@ ikev2_helper_scaffold_child_sa(
     ikev2_helper_secure_zero(&sa->child_sa, sizeof(sa->child_sa));
     child.xfrm_applied = apply_xfrm;
     sa->child_sa = child;
+    ikev2_helper_child_sa_zero_key_material(&sa->child_sa);
     ikev2_helper_secure_zero(&child, sizeof(child));
     return true;
 }

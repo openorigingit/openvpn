@@ -173,6 +173,8 @@ struct provider_xfrm_result {
 void provider_xfrm_result_init(struct provider_xfrm_result *result);
 void provider_xfrm_lease_init(struct provider_xfrm_lease *lease);
 void provider_xfrm_child_sa_plan_clear(struct provider_xfrm_child_sa_plan *plan);
+void provider_xfrm_child_sa_plan_zero_key_material(
+    struct provider_xfrm_child_sa_plan *plan);
 
 bool provider_xfrm_lease_build(struct provider_xfrm_lease *lease,
                                const struct provider_xfrm_lease_spec *spec,
