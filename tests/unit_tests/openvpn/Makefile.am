@@ -306,8 +306,10 @@ provider_helper_testdriver_SOURCES = test_provider_helper.c \
 	$(top_srcdir)/src/openvpn/provider_helper.c \
 	$(top_srcdir)/src/openvpn/provider_helper_ipc.c \
 	$(top_srcdir)/src/openvpn/provider_helper_wire.c \
+	$(top_srcdir)/src/openvpn/status.c \
 	$(top_srcdir)/src/openvpn/buffer.c \
 	$(top_srcdir)/src/openvpn/otime.c \
+	$(top_srcdir)/src/openvpn/interval.c \
 	$(top_srcdir)/src/openvpn/fdmisc.c \
 	$(top_srcdir)/src/openvpn/platform.c \
 	$(top_srcdir)/src/openvpn/win32-util.c

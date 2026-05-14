@@ -556,6 +556,8 @@ struct provider_helper_supervisor {
     void *auth_request_arg;
 };
 
+struct status_output;
+
 const char *provider_helper_state_name(enum provider_helper_state state);
 const char *provider_helper_ipc_result_name(enum provider_helper_ipc_result result);
 const char *provider_helper_ikev2_parse_result_name(
@@ -782,10 +784,16 @@ bool provider_helper_supervisor_send_xfrm_lease_delete(
     const struct provider_helper_xfrm_lease *lease,
     uint64_t correlation_id);
 #endif
+bool provider_helper_supervisor_send_stats_request(
+    struct provider_helper_supervisor *supervisor,
+    uint64_t correlation_id);
 void provider_helper_supervisor_stop(struct provider_helper_supervisor *supervisor);
 void provider_helper_event_set(struct provider_helper_supervisor *supervisor,
                                struct event_set *es,
                                void *arg);
 void provider_helper_process_event(struct provider_helper_supervisor *supervisor);
+void provider_helper_print_status(const struct provider_helper_supervisor *supervisor,
+                                  struct status_output *so,
+                                  int version);
 
 #endif /* PROVIDER_HELPER_H */

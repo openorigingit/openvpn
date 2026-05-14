@@ -55,6 +55,8 @@
 #include "dco.h"
 #include "reflect_filter.h"
 
+#define PROVIDER_HELPER_STATS_INTERVAL 5
+
 /*#define MULTI_DEBUG_EVENT_LOOP*/
 
 #ifdef MULTI_DEBUG_EVENT_LOOP
@@ -483,6 +485,11 @@ multi_init(struct context *t)
      * Different status file format options are available
      */
     m->status_file_version = t->options.status_file_version;
+    if (t->options.ikev2_helper_path)
+    {
+        event_timeout_init(&m->provider_helper_stats_et,
+                           PROVIDER_HELPER_STATS_INTERVAL, now);
+    }
 
     /*
      * Possibly allocate an ifconfig pool, do it
@@ -979,6 +986,7 @@ multi_print_status(struct multi_context *m, struct status_output *so, const int 
             hash_iterator_free(&hi);
 
             provider_session_print_status(&m->provider_sessions, so, version);
+            provider_helper_print_status(&m->provider_helper, so, version);
 
             status_printf(so, "ROUTING TABLE");
             status_printf(so, "Virtual Address,Common Name,Real Address,Last Ref");
@@ -1069,6 +1077,7 @@ multi_print_status(struct multi_context *m, struct status_output *so, const int 
             hash_iterator_free(&hi);
 
             provider_session_print_status(&m->provider_sessions, so, version);
+            provider_helper_print_status(&m->provider_helper, so, version);
 
             status_printf(
                 so,
@@ -3890,6 +3899,15 @@ stale_route_check_trigger(struct multi_context *m)
     return event_timeout_trigger(&m->stale_routes_check_et, &null, ETT_DEFAULT);
 }
 
+static bool
+provider_helper_stats_trigger(struct multi_context *m)
+{
+    struct timeval null;
+    CLEAR(null);
+    return event_timeout_trigger(&m->provider_helper_stats_et, &null,
+                                 ETT_DEFAULT);
+}
+
 /*
  * Process timers in the top-level context
  */
@@ -3898,6 +3916,12 @@ multi_process_per_second_timers_dowork(struct multi_context *m)
 {
     /* possibly reap instances/routes in vhash */
     multi_reap_process(m);
+
+    if (m->top.options.ikev2_helper_path && provider_helper_stats_trigger(m))
+    {
+        (void)provider_helper_supervisor_send_stats_request(
+            &m->provider_helper, (uint64_t)now);
+    }
 
     /* possibly print to status log */
     if (m->top.c1.status_output)

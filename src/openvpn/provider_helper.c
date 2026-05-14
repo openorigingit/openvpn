@@ -33,6 +33,7 @@
 #include "error.h"
 #include "fdmisc.h"
 #include "otime.h"
+#include "status.h"
 
 #include "memdbg.h"
 
@@ -118,6 +119,156 @@ provider_helper_supervisor_set_state(struct provider_helper_supervisor *supervis
         supervisor->state = state;
         supervisor->last_state_change = now;
     }
+}
+
+struct provider_helper_status_counter {
+    const char *name;
+    uint64_t value;
+};
+
+static void
+provider_helper_print_status_counter_v1(
+    struct status_output *so,
+    const struct provider_helper_status_counter *counter)
+{
+    if (counter->value)
+    {
+        status_printf(so, "Provider Helper Stat,%s,%" PRIu64,
+                      counter->name, counter->value);
+    }
+}
+
+static void
+provider_helper_print_status_counter_v2(
+    struct status_output *so,
+    int version,
+    const struct provider_helper_status_counter *counter)
+{
+    if (counter->value)
+    {
+        const char sep = (version == 3) ? '\t' : ',';
+        status_printf(so, "PROVIDER_HELPER_STAT%c%s%c%" PRIu64,
+                      sep, counter->name, sep, counter->value);
+    }
+}
+
+static void
+provider_helper_print_status_counters(
+    const struct provider_helper_runtime_stats *stats,
+    struct status_output *so,
+    int version)
+{
+    const struct provider_helper_status_counter counters[] = {
+        { "datagrams_rx", stats->datagrams_rx },
+        { "datagrams_parsed", stats->datagrams_parsed },
+        { "datagrams_malformed", stats->datagrams_malformed },
+        { "datagrams_oversize", stats->datagrams_oversize },
+        { "xfrm_leases_active", stats->xfrm_leases_active },
+        { "xfrm_lease_installed", stats->xfrm_lease_installed },
+        { "xfrm_lease_deleted", stats->xfrm_lease_deleted },
+        { "ike_sa_active", stats->ike_sa_active },
+        { "ike_sa_expired", stats->ike_sa_expired },
+        { "ike_auth_rx", stats->ike_auth_rx },
+        { "ike_auth_denied", stats->ike_auth_denied },
+        { "ike_auth_allow_missing_xfrm_lease",
+          stats->ike_auth_allow_missing_xfrm_lease },
+        { "ike_auth_allow_unsupported", stats->ike_auth_allow_unsupported },
+        { "ike_exchange_unsupported", stats->ike_exchange_unsupported },
+        { "ike_informational_empty_rx", stats->ike_informational_empty_rx },
+        { "ike_informational_delete_rx", stats->ike_informational_delete_rx },
+        { "ike_mobike_update_rx", stats->ike_mobike_update_rx },
+        { "ike_mobike_peer_migrated", stats->ike_mobike_peer_migrated },
+        { "ike_create_child_scaffolded", stats->ike_create_child_scaffolded },
+        { "ike_child_sa_scaffold_active",
+          stats->ike_child_sa_scaffold_active },
+        { "ike_create_child_xfrm_install_ok",
+          stats->ike_create_child_xfrm_install_ok },
+        { "ike_create_child_xfrm_install_failed",
+          stats->ike_create_child_xfrm_install_failed },
+        { "ike_create_child_response_tx",
+          stats->ike_create_child_response_tx },
+        { "ike_create_child_response_failed",
+          stats->ike_create_child_response_failed },
+        { "ike_child_sa_xfrm_delete_ok",
+          stats->ike_child_sa_xfrm_delete_ok },
+        { "ike_child_sa_xfrm_delete_failed",
+          stats->ike_child_sa_xfrm_delete_failed },
+        { "ike_sa_xfrm_lease_revoked", stats->ike_sa_xfrm_lease_revoked },
+    };
+
+    if (version == 1)
+    {
+        for (size_t i = 0; i < SIZE(counters); ++i)
+        {
+            provider_helper_print_status_counter_v1(so, &counters[i]);
+        }
+    }
+    else if (version == 2 || version == 3)
+    {
+        const char sep = (version == 3) ? '\t' : ',';
+        status_printf(so, "HEADER%cPROVIDER_HELPER_STAT%cName%cValue",
+                      sep, sep, sep);
+        for (size_t i = 0; i < SIZE(counters); ++i)
+        {
+            provider_helper_print_status_counter_v2(so, version, &counters[i]);
+        }
+    }
+}
+
+void
+provider_helper_print_status(const struct provider_helper_supervisor *supervisor,
+                             struct status_output *so,
+                             int version)
+{
+    if (!supervisor || !so || supervisor->state == PROVIDER_HELPER_STATE_DISABLED)
+    {
+        return;
+    }
+
+#ifndef _WIN32
+    const long pid = (long)supervisor->pid;
+#else
+    const long pid = 0;
+#endif
+    const bool apply_xfrm =
+        (supervisor->runtime_config.flags & PROVIDER_HELPER_CONFIG_APPLY_XFRM) != 0;
+
+    if (version == 1)
+    {
+        status_printf(so, "PROVIDER HELPER");
+        status_printf(so, "State,%s", provider_helper_state_name(supervisor->state));
+        status_printf(so, "PID,%ld", pid);
+        status_printf(so, "Restart Count,%u", supervisor->restart_count);
+        status_printf(so, "Negotiated Features,0x%" PRIx64,
+                      supervisor->negotiated_features);
+        status_printf(so, "Runtime Flags,0x%" PRIx32,
+                      supervisor->runtime_config.flags);
+        status_printf(so, "Runtime Apply XFRM,%s",
+                      apply_xfrm ? "enabled" : "disabled");
+    }
+    else if (version == 2 || version == 3)
+    {
+        const char sep = (version == 3) ? '\t' : ',';
+        status_printf(so,
+                      "HEADER%cPROVIDER_HELPER%cState%cPID%cRestart Count%c"
+                      "Negotiated Features%cRuntime Flags%cApply XFRM",
+                      sep, sep, sep, sep, sep, sep, sep);
+        status_printf(so, "PROVIDER_HELPER%c%s%c%ld%c%u%c0x%" PRIx64
+                      "%c0x%" PRIx32 "%c%d",
+                      sep, provider_helper_state_name(supervisor->state),
+                      sep, pid,
+                      sep, supervisor->restart_count,
+                      sep, supervisor->negotiated_features,
+                      sep, supervisor->runtime_config.flags,
+                      sep, apply_xfrm ? 1 : 0);
+    }
+    else
+    {
+        return;
+    }
+
+    provider_helper_print_status_counters(&supervisor->runtime_stats, so,
+                                          version);
 }
 
 void
@@ -599,6 +750,42 @@ provider_helper_supervisor_reap(struct provider_helper_supervisor *supervisor)
     return false;
 }
 #endif /* ifndef _WIN32 */
+
+bool
+provider_helper_supervisor_send_stats_request(
+    struct provider_helper_supervisor *supervisor,
+    uint64_t correlation_id)
+{
+    if (!supervisor || supervisor->ipc_fd < 0
+        || supervisor->state != PROVIDER_HELPER_STATE_READY)
+    {
+        return false;
+    }
+
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_STATS_REQUEST,
+        .sequence = supervisor->next_tx_sequence++,
+        .correlation_id = correlation_id,
+        .payload_len = 0,
+    };
+
+    const bool written =
+        provider_helper_ipc_write_header(&buf, &header)
+        && provider_helper_write_all(supervisor->ipc_fd, BPTR(&buf),
+                                     (size_t)BLEN(&buf));
+    free_buf(&buf);
+    if (!written)
+    {
+        provider_helper_supervisor_set_state(supervisor,
+                                             PROVIDER_HELPER_STATE_DEGRADED);
+        provider_helper_close_ipc(supervisor);
+    }
+    return written;
+}
 
 #ifndef _WIN32
 static void

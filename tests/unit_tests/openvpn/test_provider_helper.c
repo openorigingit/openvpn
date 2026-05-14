@@ -31,10 +31,40 @@
 #endif
 
 #include "provider_helper.h"
+#include "status.h"
 #include "test_common.h"
 
 static const char *noop_helper_path;
 static const char *ikev2_helper_path;
+
+struct provider_helper_status_capture
+{
+    char data[4096];
+    size_t len;
+};
+
+static void
+provider_helper_capture_status(void *arg, const unsigned int flags,
+                               const char *str)
+{
+    struct provider_helper_status_capture *capture = arg;
+    const size_t remaining = sizeof(capture->data) - capture->len;
+
+    (void)flags;
+    if (remaining <= 1)
+    {
+        return;
+    }
+
+    const int written =
+        snprintf(capture->data + capture->len, remaining, "%s\n", str);
+    if (written > 0)
+    {
+        const size_t used =
+            (size_t)written < remaining ? (size_t)written : remaining - 1;
+        capture->len += used;
+    }
+}
 
 static struct provider_helper_msg_header
 test_header(uint64_t sequence, uint32_t payload_len)
@@ -606,6 +636,110 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_child_sa_xfrm_delete_ok);
     assert_int_equal(output.ike_child_sa_xfrm_delete_failed,
                      input.ike_child_sa_xfrm_delete_failed);
+}
+
+static void
+test_provider_helper_stats_request_message(void **state)
+{
+    (void)state;
+
+    int fds[2] = { -1, -1 };
+    assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.ipc_fd = fds[0];
+    provider_helper_supervisor_set_state(&supervisor,
+                                         PROVIDER_HELPER_STATE_READY);
+
+    assert_true(provider_helper_supervisor_send_stats_request(&supervisor, 77));
+    assert_int_equal(supervisor.next_tx_sequence, 2);
+
+    uint8_t header_buf[PROVIDER_HELPER_IPC_HEADER_SIZE];
+    assert_int_equal(read(fds[1], header_buf, sizeof(header_buf)),
+                     sizeof(header_buf));
+
+    struct buffer buf = {
+        .capacity = sizeof(header_buf),
+        .offset = 0,
+        .len = sizeof(header_buf),
+        .data = header_buf,
+    };
+    struct provider_helper_msg_header header;
+    uint64_t last_sequence = 0;
+    assert_int_equal(provider_helper_ipc_read_header(
+                         &buf, &header, PROVIDER_HELPER_IPC_MAX_MESSAGE,
+                         &last_sequence),
+                     PROVIDER_HELPER_IPC_OK);
+    assert_int_equal(header.type, PROVIDER_HELPER_MSG_STATS_REQUEST);
+    assert_int_equal(header.sequence, 1);
+    assert_int_equal(header.correlation_id, 77);
+    assert_int_equal(header.payload_len, 0);
+
+    close(fds[0]);
+    close(fds[1]);
+}
+
+static void
+test_provider_helper_status_output(void **state)
+{
+    (void)state;
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+
+    struct provider_helper_status_capture quiet_capture = { 0 };
+    const struct virtual_output quiet_vout = {
+        .arg = &quiet_capture,
+        .func = provider_helper_capture_status,
+    };
+    struct status_output *so = status_open(NULL, 0, -1, &quiet_vout, 0);
+    assert_non_null(so);
+    provider_helper_print_status(&supervisor, so, 2);
+    assert_true(status_close(so));
+    assert_string_equal(quiet_capture.data, "");
+
+    provider_helper_supervisor_set_state(&supervisor,
+                                         PROVIDER_HELPER_STATE_READY);
+    supervisor.negotiated_features = PROVIDER_HELPER_FEATURE_IKEV2_BASE;
+    supervisor.runtime_config.flags = PROVIDER_HELPER_CONFIG_APPLY_XFRM;
+    supervisor.restart_count = 2;
+#ifndef _WIN32
+    supervisor.pid = 1234;
+#endif
+    supervisor.runtime_stats.datagrams_rx = 11;
+    supervisor.runtime_stats.ike_sa_active = 3;
+    supervisor.runtime_stats.ike_create_child_xfrm_install_failed = 1;
+    supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok = 2;
+
+    struct provider_helper_status_capture capture = { 0 };
+    const struct virtual_output vout = {
+        .arg = &capture,
+        .func = provider_helper_capture_status,
+    };
+    so = status_open(NULL, 0, -1, &vout, 0);
+    assert_non_null(so);
+
+    provider_helper_print_status(&supervisor, so, 2);
+    assert_true(status_close(so));
+
+    assert_non_null(strstr(capture.data, "HEADER,PROVIDER_HELPER"));
+#ifndef _WIN32
+    assert_non_null(strstr(capture.data,
+                           "PROVIDER_HELPER,ready,1234,2,0x1,0x4,1"));
+#else
+    assert_non_null(strstr(capture.data,
+                           "PROVIDER_HELPER,ready,0,2,0x1,0x4,1"));
+#endif
+    assert_non_null(strstr(capture.data,
+                           "PROVIDER_HELPER_STAT,datagrams_rx,11"));
+    assert_non_null(strstr(capture.data,
+                           "PROVIDER_HELPER_STAT,ike_sa_active,3"));
+    assert_non_null(strstr(
+        capture.data,
+        "PROVIDER_HELPER_STAT,ike_create_child_xfrm_install_failed,1"));
+    assert_non_null(strstr(capture.data,
+                           "PROVIDER_HELPER_STAT,ike_child_sa_xfrm_delete_ok,2"));
 }
 
 static void
@@ -5273,6 +5407,8 @@ main(void)
         cmocka_unit_test(test_provider_helper_runtime_config_roundtrip),
         cmocka_unit_test(test_provider_helper_listener_fd_roundtrip),
         cmocka_unit_test(test_provider_helper_runtime_stats_roundtrip),
+        cmocka_unit_test(test_provider_helper_stats_request_message),
+        cmocka_unit_test(test_provider_helper_status_output),
         cmocka_unit_test(test_provider_helper_xfrm_lease_roundtrip),
         cmocka_unit_test(test_provider_helper_auth_request_roundtrip),
         cmocka_unit_test(test_provider_helper_auth_response_roundtrip),

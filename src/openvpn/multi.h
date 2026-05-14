@@ -213,6 +213,7 @@ struct multi_context
      * Timer object for stale route check
      */
     struct event_timeout stale_routes_check_et;
+    struct event_timeout provider_helper_stats_et;
 
 #ifdef ENABLE_ASYNC_PUSH
     /* mapping between inotify watch descriptors and multi_instances */
