@@ -1529,14 +1529,32 @@ ikev2_helper_now_milliseconds(void)
 }
 
 static bool
-ikev2_helper_rate_counter_allow(uint64_t *window_start_ms,
-                                uint32_t *count,
-                                uint64_t now_ms,
-                                uint32_t limit)
+ikev2_helper_rate_counter_can_allow(const uint64_t *window_start_ms,
+                                    uint32_t count,
+                                    uint64_t now_ms,
+                                    uint32_t limit)
 {
-    if (!window_start_ms || !count || limit == 0)
+    if (!window_start_ms || limit == 0)
     {
         return false;
+    }
+    if (!*window_start_ms || now_ms < *window_start_ms
+        || now_ms - *window_start_ms >= 1000)
+    {
+        return true;
+    }
+
+    return count < limit;
+}
+
+static void
+ikev2_helper_rate_counter_commit(uint64_t *window_start_ms,
+                                 uint32_t *count,
+                                 uint64_t now_ms)
+{
+    if (!window_start_ms || !count)
+    {
+        return;
     }
     if (!*window_start_ms || now_ms < *window_start_ms
         || now_ms - *window_start_ms >= 1000)
@@ -1544,20 +1562,16 @@ ikev2_helper_rate_counter_allow(uint64_t *window_start_ms,
         *window_start_ms = now_ms;
         *count = 0;
     }
-    if (*count >= limit)
-    {
-        return false;
-    }
 
     ++*count;
-    return true;
 }
 
 static struct ikev2_helper_sa_init_rate_bucket *
 ikev2_helper_find_sa_init_rate_bucket(
     struct ikev2_helper_sa_init_rate_state *rate_state,
     const struct sockaddr_storage *peer,
-    uint64_t now_ms)
+    uint64_t now_ms,
+    bool create)
 {
     struct ikev2_helper_sa_init_rate_bucket *reusable = NULL;
 
@@ -1575,7 +1589,7 @@ ikev2_helper_find_sa_init_rate_bucket(
         {
             return bucket;
         }
-        if (!reusable
+        if (create && !reusable
             && (!bucket->active || now_ms < bucket->window_start_ms
                 || now_ms - bucket->window_start_ms >= 1000))
         {
@@ -1585,6 +1599,10 @@ ikev2_helper_find_sa_init_rate_bucket(
 
     if (!reusable)
     {
+        if (!create)
+        {
+            return NULL;
+        }
         reusable = &rate_state->buckets[
             rate_state->next_bucket % SIZE(rate_state->buckets)];
         ++rate_state->next_bucket;
@@ -1609,8 +1627,19 @@ ikev2_helper_allow_sa_init_rate(
         return false;
     }
 
-    if (!ikev2_helper_rate_counter_allow(
-            &rate_state->global_window_start_ms, &rate_state->global_count,
+    struct ikev2_helper_sa_init_rate_bucket *bucket =
+        ikev2_helper_find_sa_init_rate_bucket(rate_state, peer, now_ms, false);
+    if (bucket
+        && !ikev2_helper_rate_counter_can_allow(
+            &bucket->window_start_ms, bucket->count, now_ms,
+            config->max_ike_sa_init_per_source_per_second))
+    {
+        ++counters->ike_sa_init_source_rate_dropped;
+        return false;
+    }
+
+    if (!ikev2_helper_rate_counter_can_allow(
+            &rate_state->global_window_start_ms, rate_state->global_count,
             now_ms,
             config->max_ike_sa_init_per_second))
     {
@@ -1618,17 +1647,24 @@ ikev2_helper_allow_sa_init_rate(
         return false;
     }
 
-    struct ikev2_helper_sa_init_rate_bucket *bucket =
-        ikev2_helper_find_sa_init_rate_bucket(rate_state, peer, now_ms);
+    if (!bucket)
+    {
+        bucket =
+            ikev2_helper_find_sa_init_rate_bucket(rate_state, peer, now_ms, true);
+    }
     if (!bucket
-        || !ikev2_helper_rate_counter_allow(
-            &bucket->window_start_ms, &bucket->count, now_ms,
+        || !ikev2_helper_rate_counter_can_allow(
+            &bucket->window_start_ms, bucket->count, now_ms,
             config->max_ike_sa_init_per_source_per_second))
     {
         ++counters->ike_sa_init_source_rate_dropped;
         return false;
     }
 
+    ikev2_helper_rate_counter_commit(&bucket->window_start_ms, &bucket->count,
+                                     now_ms);
+    ikev2_helper_rate_counter_commit(&rate_state->global_window_start_ms,
+                                     &rate_state->global_count, now_ms);
     return true;
 }
 

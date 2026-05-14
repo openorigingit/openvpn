@@ -5898,7 +5898,8 @@ test_provider_helper_spawn_ikev2_sa_init_rate_limit(void **state)
 
     int source_fd = test_create_udp_sender(0x7f000301u);
     int other_source_fd = test_create_udp_sender(0x7f000302u);
-    int global_drop_fd = test_create_udp_sender(0x7f000303u);
+    int global_accept_fd = test_create_udp_sender(0x7f000303u);
+    int global_drop_fd = test_create_udp_sender(0x7f000304u);
 
     test_send_ikev2_datagram_from(source_fd, port, 0x1010101010101010ull);
     assert_true(test_recv_ikev2_sa_init_response(
@@ -5912,12 +5913,18 @@ test_provider_helper_spawn_ikev2_sa_init_rate_limit(void **state)
     assert_true(test_recv_ikev2_sa_init_response(
                     other_source_fd, 0x3030303030303030ull) != 0);
 
-    test_send_ikev2_datagram_from(global_drop_fd, port,
+    test_send_ikev2_datagram_from(global_accept_fd, port,
                                   0x4040404040404040ull);
+    assert_true(test_recv_ikev2_sa_init_response(
+                    global_accept_fd, 0x4040404040404040ull) != 0);
+
+    test_send_ikev2_datagram_from(global_drop_fd, port,
+                                  0x5050505050505050ull);
     test_assert_no_udp_datagram(global_drop_fd);
 
     close(source_fd);
     close(other_source_fd);
+    close(global_accept_fd);
     close(global_drop_fd);
 
     uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
@@ -5932,11 +5939,11 @@ test_provider_helper_spawn_ikev2_sa_init_rate_limit(void **state)
     }
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
-    assert_int_equal(supervisor.runtime_stats.ike_sa_init_accepted, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_init_accepted, 3);
     assert_int_equal(supervisor.runtime_stats.ike_sa_init_source_rate_dropped,
                      1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_init_rate_dropped, 1);
-    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 3);
 
     close(listener_fd);
     provider_helper_supervisor_stop(&supervisor);
