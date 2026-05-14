@@ -125,6 +125,7 @@ openvpn_SOURCES = \
 	provider_policy.c provider_policy.h \
 	provider_session.c provider_session.h \
 	provider_xfrm.c provider_xfrm.h \
+	provider_xfrm_linux.c provider_xfrm_linux.h \
 	proto.c proto.h \
 	proxy.c proxy.h \
 	ps.c ps.h \
@@ -187,7 +188,9 @@ openvpn_ikev2_helper_SOURCES = \
 	provider_helper.h \
 	provider_helper_wire.c \
 	provider_xfrm.c \
-	provider_xfrm.h
+	provider_xfrm.h \
+	provider_xfrm_linux.c \
+	provider_xfrm_linux.h
 openvpn_ikev2_helper_LDADD = \
 	$(top_builddir)/src/compat/libcompat.la \
 	$(SOCKETS_LIBS) \

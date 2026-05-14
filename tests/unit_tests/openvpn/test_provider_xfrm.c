@@ -24,7 +24,18 @@
 #include <cmocka.h>
 
 #include "provider_xfrm.h"
+#include "provider_xfrm_linux.h"
 #include "test_common.h"
+
+#if defined(TARGET_LINUX)
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
+#include <linux/xfrm.h>
+
+#ifndef UDP_ENCAP_ESPINUDP
+#define UDP_ENCAP_ESPINUDP 2
+#endif
+#endif
 
 static const char *default_local_ts[] = {
     "10.88.0.1/32[tcp/443]",
@@ -373,6 +384,147 @@ test_provider_xfrm_rejects_invalid_child_sa_plan(void **state)
     assert_non_null(strstr(result.reason, "selector"));
 }
 
+#if defined(TARGET_LINUX)
+static const struct rtattr *
+test_provider_xfrm_linux_find_attr(
+    const struct provider_xfrm_linux_message *message,
+    size_t payload_len,
+    unsigned short type)
+{
+    const struct nlmsghdr *nlh = (const struct nlmsghdr *)message->data;
+    const size_t attr_offset = NLMSG_ALIGN(NLMSG_LENGTH(payload_len));
+    int attr_len = (int)(nlh->nlmsg_len - attr_offset);
+    const struct rtattr *rta =
+        (const struct rtattr *)(message->data + attr_offset);
+    for (; RTA_OK(rta, attr_len); rta = RTA_NEXT(rta, attr_len))
+    {
+        if (rta->rta_type == type)
+        {
+            return rta;
+        }
+    }
+    return NULL;
+}
+#endif
+
+static void
+test_provider_xfrm_linux_builds_child_sa_messages(void **state)
+{
+    (void)state;
+#if !defined(TARGET_LINUX)
+    skip();
+#else
+    struct provider_xfrm_child_sa_plan plan;
+    struct provider_xfrm_result result;
+    struct provider_xfrm_child_sa_spec spec = default_child_sa_spec();
+
+    assert_true(provider_xfrm_child_sa_plan_build(&plan, &spec, &result));
+    assert_true(result.ok);
+
+    struct provider_xfrm_linux_message_plan messages;
+    assert_true(provider_xfrm_linux_child_sa_messages_build(&messages, &plan,
+                                                            &result));
+    assert_true(result.ok);
+    assert_int_equal(messages.count, 5);
+
+    const struct nlmsghdr *in_sa_nlh =
+        (const struct nlmsghdr *)messages.messages[0].data;
+    assert_int_equal(in_sa_nlh->nlmsg_type, XFRM_MSG_NEWSA);
+    assert_true(in_sa_nlh->nlmsg_flags & NLM_F_REQUEST);
+    const struct xfrm_usersa_info *in_sa = NLMSG_DATA(in_sa_nlh);
+    assert_int_equal(in_sa->family, AF_INET);
+    assert_int_equal(in_sa->mode, XFRM_MODE_TUNNEL);
+    assert_int_equal(in_sa->id.proto, IPPROTO_ESP);
+    assert_int_equal(ntohl(in_sa->id.spi), spec.responder_inbound_spi);
+    assert_int_equal(ntohl(in_sa->id.daddr.a4), spec.local_outer_ipv4);
+    assert_int_equal(ntohl(in_sa->saddr.a4), spec.remote_outer_ipv4);
+    assert_int_equal(in_sa->reqid, spec.reqid);
+
+    const struct rtattr *aead_attr = test_provider_xfrm_linux_find_attr(
+        &messages.messages[0], sizeof(*in_sa), XFRMA_ALG_AEAD);
+    assert_non_null(aead_attr);
+    const struct xfrm_algo_aead *aead = RTA_DATA(aead_attr);
+    assert_string_equal(aead->alg_name, "rfc4106(gcm(aes))");
+    assert_int_equal(aead->alg_key_len, sizeof(default_i2r_key) * 8);
+    assert_int_equal(aead->alg_icv_len, 128);
+    assert_memory_equal(aead->alg_key, default_i2r_key,
+                        sizeof(default_i2r_key));
+
+    const struct rtattr *encap_attr = test_provider_xfrm_linux_find_attr(
+        &messages.messages[0], sizeof(*in_sa), XFRMA_ENCAP);
+    assert_non_null(encap_attr);
+    const struct xfrm_encap_tmpl *encap = RTA_DATA(encap_attr);
+    assert_int_equal(encap->encap_type, UDP_ENCAP_ESPINUDP);
+    assert_int_equal(ntohs(encap->encap_sport), spec.remote_outer_port);
+    assert_int_equal(ntohs(encap->encap_dport), spec.local_outer_port);
+
+    const struct rtattr *mark_attr = test_provider_xfrm_linux_find_attr(
+        &messages.messages[0], sizeof(*in_sa), XFRMA_MARK);
+    assert_non_null(mark_attr);
+    const struct xfrm_mark *mark = RTA_DATA(mark_attr);
+    assert_int_equal(mark->v, spec.mark_value);
+    assert_int_equal(mark->m, spec.mark_mask);
+
+    const struct nlmsghdr *out_sa_nlh =
+        (const struct nlmsghdr *)messages.messages[1].data;
+    assert_int_equal(out_sa_nlh->nlmsg_type, XFRM_MSG_NEWSA);
+    const struct xfrm_usersa_info *out_sa = NLMSG_DATA(out_sa_nlh);
+    assert_int_equal(ntohl(out_sa->id.spi), spec.initiator_inbound_spi);
+    assert_int_equal(ntohl(out_sa->id.daddr.a4), spec.remote_outer_ipv4);
+    assert_int_equal(ntohl(out_sa->saddr.a4), spec.local_outer_ipv4);
+
+    const struct nlmsghdr *in_pol_nlh =
+        (const struct nlmsghdr *)messages.messages[2].data;
+    const struct nlmsghdr *fwd_pol_nlh =
+        (const struct nlmsghdr *)messages.messages[3].data;
+    const struct nlmsghdr *out_pol_nlh =
+        (const struct nlmsghdr *)messages.messages[4].data;
+    assert_int_equal(in_pol_nlh->nlmsg_type, XFRM_MSG_NEWPOLICY);
+    assert_int_equal(fwd_pol_nlh->nlmsg_type, XFRM_MSG_NEWPOLICY);
+    assert_int_equal(out_pol_nlh->nlmsg_type, XFRM_MSG_NEWPOLICY);
+    const struct xfrm_userpolicy_info *in_pol = NLMSG_DATA(in_pol_nlh);
+    const struct xfrm_userpolicy_info *fwd_pol = NLMSG_DATA(fwd_pol_nlh);
+    const struct xfrm_userpolicy_info *out_pol = NLMSG_DATA(out_pol_nlh);
+    assert_int_equal(in_pol->dir, XFRM_POLICY_IN);
+    assert_int_equal(fwd_pol->dir, XFRM_POLICY_FWD);
+    assert_int_equal(out_pol->dir, XFRM_POLICY_OUT);
+
+    provider_xfrm_linux_message_plan_clear(&messages);
+    provider_xfrm_child_sa_plan_clear(&plan);
+#endif
+}
+
+static void
+test_provider_xfrm_linux_rejects_unrepresentable_selectors(void **state)
+{
+    (void)state;
+#if !defined(TARGET_LINUX)
+    skip();
+#else
+    struct provider_xfrm_child_sa_plan plan;
+    struct provider_xfrm_linux_message_plan messages;
+    struct provider_xfrm_result result;
+    struct provider_xfrm_child_sa_spec spec = default_child_sa_spec();
+
+    spec.local_ts.end_addr = spec.local_ts.start_addr + 2;
+    assert_true(provider_xfrm_child_sa_plan_build(&plan, &spec, &result));
+    assert_false(provider_xfrm_linux_child_sa_messages_build(&messages, &plan,
+                                                             &result));
+    assert_false(result.ok);
+    assert_non_null(strstr(result.reason, "CIDR-compatible"));
+    provider_xfrm_child_sa_plan_clear(&plan);
+
+    spec = default_child_sa_spec();
+    spec.remote_ts.end_port = spec.remote_ts.start_port + 10;
+    assert_true(provider_xfrm_child_sa_plan_build(&plan, &spec, &result));
+    assert_false(provider_xfrm_linux_child_sa_messages_build(&messages, &plan,
+                                                             &result));
+    assert_false(result.ok);
+    assert_non_null(strstr(result.reason, "port selectors"));
+    provider_xfrm_child_sa_plan_clear(&plan);
+#endif
+}
+
 int
 main(void)
 {
@@ -385,6 +537,8 @@ main(void)
         cmocka_unit_test(test_provider_xfrm_rejects_empty_spi_tuple),
         cmocka_unit_test(test_provider_xfrm_builds_child_sa_plan),
         cmocka_unit_test(test_provider_xfrm_rejects_invalid_child_sa_plan),
+        cmocka_unit_test(test_provider_xfrm_linux_builds_child_sa_messages),
+        cmocka_unit_test(test_provider_xfrm_linux_rejects_unrepresentable_selectors),
     };
 
     return cmocka_run_group_tests_name("provider_xfrm", tests, NULL, NULL);

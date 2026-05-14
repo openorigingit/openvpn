@@ -292,7 +292,8 @@ provider_xfrm_testdriver_LDFLAGS = @TEST_LDFLAGS@
 provider_xfrm_testdriver_SOURCES = test_provider_xfrm.c \
 	mock_msg.c mock_msg.h test_common.h \
 	mock_get_random.c \
-	$(top_srcdir)/src/openvpn/provider_xfrm.c
+	$(top_srcdir)/src/openvpn/provider_xfrm.c \
+	$(top_srcdir)/src/openvpn/provider_xfrm_linux.c
 
 provider_helper_testdriver_CFLAGS  = \
 	-I$(top_srcdir)/include -I$(top_srcdir)/src/compat -I$(top_srcdir)/src/openvpn \
