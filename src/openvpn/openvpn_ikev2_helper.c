@@ -6459,6 +6459,9 @@ ikev2_helper_loop(int fd)
             }
         }
 
+        ikev2_helper_expire_ike_sas(&sa_table, &counters, time(NULL),
+                                    config.half_open_timeout_seconds);
+
         if (!(pfds[0].revents & POLLIN))
         {
             continue;
