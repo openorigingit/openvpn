@@ -229,6 +229,15 @@ test_provider_helper_runtime_config_roundtrip(void **state)
     assert_false(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
     assert_non_null(strstr(reason, "cookie_threshold"));
     input.cookie_threshold = PROVIDER_HELPER_DEFAULT_COOKIE_THRESHOLD;
+    input.max_cert_chain_bytes = 0;
+    assert_false(provider_helper_runtime_config_valid(&input, reason,
+                                                      sizeof(reason)));
+    assert_non_null(strstr(reason, "max_cert_chain_bytes"));
+    input.max_cert_chain_bytes = PROVIDER_HELPER_IPC_MAX_MESSAGE + 1;
+    assert_false(provider_helper_runtime_config_valid(&input, reason,
+                                                      sizeof(reason)));
+    assert_non_null(strstr(reason, "max_cert_chain_bytes"));
+    input.max_cert_chain_bytes = PROVIDER_HELPER_DEFAULT_MAX_CERT_BYTES;
     input.half_open_timeout_seconds = 0;
     assert_false(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
     assert_non_null(strstr(reason, "half_open_timeout_seconds"));

@@ -113,7 +113,8 @@ provider_helper_runtime_config_valid(const struct provider_helper_runtime_config
                                       "max_packet_size outside supported bounds");
         return false;
     }
-    if (config->max_cert_chain_bytes > PROVIDER_HELPER_IPC_MAX_MESSAGE)
+    if (config->max_cert_chain_bytes == 0
+        || config->max_cert_chain_bytes > PROVIDER_HELPER_IPC_MAX_MESSAGE)
     {
         provider_helper_config_reason(reason, reason_size,
                                       "max_cert_chain_bytes outside supported bounds");
