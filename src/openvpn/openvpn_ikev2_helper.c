@@ -1444,6 +1444,18 @@ ikev2_helper_validate_ike_auth_inner_payload(
     }
 }
 
+static bool
+ikev2_helper_add_bounded_payload_bytes(size_t *total, size_t payload_len,
+                                       size_t limit)
+{
+    if (!total || payload_len > limit || *total > limit - payload_len)
+    {
+        return false;
+    }
+    *total += payload_len;
+    return true;
+}
+
 static void
 ikev2_helper_record_ike_auth_inner_payload(
     struct provider_helper_ikev2_payload_summary *summary,
@@ -1546,6 +1558,8 @@ ikev2_helper_parse_ike_auth_inner_payloads(
     size_t pos = 0;
     uint8_t payload_type = first_payload;
     uint32_t payload_count = 0;
+    size_t cert_bytes = 0;
+    size_t eap_bytes = 0;
     while (payload_type != PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
     {
         if (++payload_count > PROVIDER_HELPER_IKEV2_MAX_PAYLOADS)
@@ -1584,6 +1598,31 @@ ikev2_helper_parse_ike_auth_inner_payloads(
         if (payload_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
         {
             return payload_result;
+        }
+        if (payload_type == PROVIDER_HELPER_IKEV2_PAYLOAD_CERT
+            || payload_type == PROVIDER_HELPER_IKEV2_PAYLOAD_CERTREQ)
+        {
+            if (!ikev2_helper_add_bounded_payload_bytes(
+                    &cert_bytes, body_len, config->max_cert_chain_bytes))
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+            if (summary)
+            {
+                summary->cert_bytes = cert_bytes;
+            }
+        }
+        else if (payload_type == PROVIDER_HELPER_IKEV2_PAYLOAD_EAP)
+        {
+            if (!ikev2_helper_add_bounded_payload_bytes(
+                    &eap_bytes, body_len, config->max_cert_chain_bytes))
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+            if (summary)
+            {
+                summary->eap_bytes = eap_bytes;
+            }
         }
 
         ikev2_helper_record_ike_auth_inner_payload(summary, payload_type, pos,

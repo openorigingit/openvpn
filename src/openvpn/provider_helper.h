@@ -402,8 +402,10 @@ struct provider_helper_ikev2_payload_summary {
     size_t idi_len;
     size_t cert_offset;
     size_t cert_len;
+    size_t cert_bytes;
     size_t eap_offset;
     size_t eap_len;
+    size_t eap_bytes;
     size_t sk_offset;
     size_t sk_len;
     uint8_t sk_next_payload;
