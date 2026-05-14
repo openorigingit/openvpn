@@ -99,6 +99,7 @@
 #define IKEV2_HELPER_POLL_TIMEOUT_MS 1000
 #define IKEV2_HELPER_IKE_SA_INIT_MESSAGE_ID 0
 #define IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID 1
+#define IKEV2_HELPER_PROTECTED_RESPONSE_CACHE_BYTES 2048
 
 static volatile sig_atomic_t helper_stop;
 
@@ -114,6 +115,10 @@ struct ikev2_helper_ike_sa {
     uint32_t listener_id;
     uint32_t message_id;
     uint32_t retransmits;
+    uint32_t protected_retransmits;
+    uint32_t protected_response_message_id;
+    size_t protected_response_len;
+    uint8_t protected_response[IKEV2_HELPER_PROTECTED_RESPONSE_CACHE_BYTES];
     uint16_t initiator_ke_group;
     size_t initiator_ke_len;
     uint8_t initiator_ke[PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES];
@@ -3231,9 +3236,83 @@ ikev2_helper_send_encrypted_notify_response(
 }
 
 static bool
-ikev2_helper_send_encrypted_empty_response(
+ikev2_helper_cache_protected_response(struct ikev2_helper_ike_sa *sa,
+                                      uint32_t message_id,
+                                      const uint8_t *response,
+                                      size_t response_len)
+{
+    if (!sa || !response || !response_len
+        || response_len > sizeof(sa->protected_response))
+    {
+        return false;
+    }
+
+    if (sa->protected_response_len)
+    {
+        ikev2_helper_secure_zero(sa->protected_response,
+                                 sa->protected_response_len);
+    }
+    memcpy(sa->protected_response, response, response_len);
+    sa->protected_response_len = response_len;
+    sa->protected_response_message_id = message_id;
+    sa->protected_retransmits = 0;
+    return true;
+}
+
+static bool
+ikev2_helper_retransmit_cached_protected_response(
     const struct ikev2_helper_listener *listener,
-    const struct ikev2_helper_ike_sa *sa,
+    const struct ikev2_helper_ike_sa *sa)
+{
+    if (!listener || !sa || !sa->active || !sa->protected_response_len
+        || sa->protected_response_message_id != sa->message_id)
+    {
+        return false;
+    }
+
+    const ssize_t sent =
+        sendto(listener->fd, sa->protected_response, sa->protected_response_len,
+               0, (const struct sockaddr *)&sa->peer, sa->peer_len);
+    return sent == (ssize_t)sa->protected_response_len;
+}
+
+static bool
+ikev2_helper_send_cached_encrypted_notify_exchange_response(
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_ike_sa *sa,
+    uint8_t exchange_type,
+    uint32_t message_id,
+    uint16_t notify_type)
+{
+    uint8_t response[PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE
+                     + PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                     + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                     + IKEV2_HELPER_AES_GCM_IV_BYTES
+                     + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE + 1
+                     + IKEV2_HELPER_AES_GCM_TAG_BYTES];
+    size_t response_len = 0;
+    if (!listener || !sa || !sa->active
+        || !ikev2_helper_build_encrypted_notify_response(
+            response, sizeof(response), &response_len, listener, sa,
+            exchange_type, message_id, notify_type))
+    {
+        return false;
+    }
+
+    const ssize_t sent =
+        sendto(listener->fd, response, response_len, 0,
+               (const struct sockaddr *)&sa->peer, sa->peer_len);
+    const bool ret = sent == (ssize_t)response_len
+                     && ikev2_helper_cache_protected_response(
+                         sa, message_id, response, response_len);
+    ikev2_helper_secure_zero(response, sizeof(response));
+    return ret;
+}
+
+static bool
+ikev2_helper_send_cached_encrypted_empty_response(
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_ike_sa *sa,
     uint8_t exchange_type,
     uint32_t message_id)
 {
@@ -3252,8 +3331,11 @@ ikev2_helper_send_encrypted_empty_response(
     const ssize_t sent =
         sendto(listener->fd, response, response_len, 0,
                (const struct sockaddr *)&sa->peer, sa->peer_len);
+    const bool ret = sent == (ssize_t)response_len
+                     && ikev2_helper_cache_protected_response(
+                         sa, message_id, response, response_len);
     ikev2_helper_secure_zero(response, sizeof(response));
-    return sent == (ssize_t)response_len;
+    return ret;
 }
 
 static bool
@@ -4030,9 +4112,28 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
-                if (header.message_id <= sa->message_id)
+                if (header.message_id < sa->message_id)
                 {
                     ++counters->ike_exchange_replay_dropped;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+                if (header.message_id == sa->message_id)
+                {
+                    if (sa->protected_retransmits >= config->retransmit_limit)
+                    {
+                        ++counters->ike_exchange_replay_dropped;
+                    }
+                    else if (ikev2_helper_retransmit_cached_protected_response(
+                                 listener, sa))
+                    {
+                        ++sa->protected_retransmits;
+                        ++counters->ike_exchange_retransmit_tx;
+                    }
+                    else
+                    {
+                        ++counters->ike_exchange_retransmit_failed;
+                    }
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
@@ -4063,7 +4164,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     && plaintext_len == 0)
                 {
                     ++counters->ike_informational_empty_rx;
-                    if (ikev2_helper_send_encrypted_empty_response(
+                    if (ikev2_helper_send_cached_encrypted_empty_response(
                             listener, sa, header.exchange_type,
                             header.message_id))
                     {
@@ -4100,7 +4201,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             plaintext, plaintext_len, &inner_summary))
                     {
                         ++counters->ike_informational_delete_rx;
-                        if (ikev2_helper_send_encrypted_empty_response(
+                        if (ikev2_helper_send_cached_encrypted_empty_response(
                                 listener, sa, header.exchange_type,
                                 header.message_id))
                         {
@@ -4136,7 +4237,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     }
                     ++counters->ike_create_child_unsupported_rx;
                     ++counters->ike_exchange_unsupported;
-                    if (ikev2_helper_send_encrypted_notify_exchange_response(
+                    if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
                             listener, sa, header.exchange_type,
                             header.message_id,
                             PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
