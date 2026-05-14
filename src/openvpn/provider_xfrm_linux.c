@@ -179,10 +179,12 @@ provider_xfrm_linux_lifetime_default(struct xfrm_lifetime_cfg *lft)
 }
 
 static bool
-provider_xfrm_linux_message_start(struct provider_xfrm_linux_message *message,
-                                  uint16_t type,
-                                  const void *payload,
-                                  size_t payload_len)
+provider_xfrm_linux_message_start_flags(
+    struct provider_xfrm_linux_message *message,
+    uint16_t type,
+    uint16_t flags,
+    const void *payload,
+    size_t payload_len)
 {
     if (!message || !payload
         || NLMSG_SPACE(payload_len) > sizeof(message->data))
@@ -195,10 +197,21 @@ provider_xfrm_linux_message_start(struct provider_xfrm_linux_message *message,
     struct nlmsghdr *nlh = (struct nlmsghdr *)message->data;
     nlh->nlmsg_len = (uint32_t)nlmsg_len;
     nlh->nlmsg_type = type;
-    nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
+    nlh->nlmsg_flags = flags;
     memcpy(NLMSG_DATA(nlh), payload, payload_len);
     message->len = nlh->nlmsg_len;
     return true;
+}
+
+static bool
+provider_xfrm_linux_message_start(struct provider_xfrm_linux_message *message,
+                                  uint16_t type,
+                                  const void *payload,
+                                  size_t payload_len)
+{
+    return provider_xfrm_linux_message_start_flags(
+        message, type, NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL,
+        payload, payload_len);
 }
 
 static bool
@@ -337,6 +350,45 @@ provider_xfrm_linux_sa_message_build(
     return true;
 }
 
+static bool
+provider_xfrm_linux_sa_delete_message_build(
+    struct provider_xfrm_linux_message *message,
+    const struct provider_xfrm_child_sa_state *state,
+    enum provider_xfrm_direction direction,
+    struct provider_xfrm_result *result)
+{
+    if (!provider_xfrm_linux_state_valid(state, direction))
+    {
+        provider_xfrm_linux_set_error(result,
+                                      "invalid XFRM Linux SA delete state");
+        return false;
+    }
+
+    struct xfrm_usersa_id sa_id;
+    CLEAR(sa_id);
+    sa_id.daddr.a4 = htonl(state->dst_outer_ipv4);
+    sa_id.spi = htonl(state->spi);
+    sa_id.proto = IPPROTO_ESP;
+    sa_id.family = AF_INET;
+
+    if (!provider_xfrm_linux_message_start_flags(
+            message, XFRM_MSG_DELSA, NLM_F_REQUEST | NLM_F_ACK, &sa_id,
+            sizeof(sa_id)))
+    {
+        provider_xfrm_linux_set_error(result, "failed to build XFRM DELSA");
+        return false;
+    }
+    if (!provider_xfrm_linux_add_mark_and_if_id(
+            message, state->mark_value, state->mark_mask, state->if_id))
+    {
+        provider_xfrm_linux_set_error(result,
+                                      "failed to add XFRM DELSA attributes");
+        return false;
+    }
+
+    return true;
+}
+
 static void
 provider_xfrm_linux_tmpl_from_state(
     struct xfrm_user_tmpl *tmpl,
@@ -403,6 +455,48 @@ provider_xfrm_linux_policy_message_build(
     return true;
 }
 
+static bool
+provider_xfrm_linux_policy_delete_message_build(
+    struct provider_xfrm_linux_message *message,
+    const struct provider_xfrm_child_sa_state *state,
+    uint8_t dir,
+    struct provider_xfrm_result *result)
+{
+    if (!state)
+    {
+        provider_xfrm_linux_set_error(result,
+                                      "invalid XFRM Linux policy delete state");
+        return false;
+    }
+
+    struct xfrm_userpolicy_id policy_id;
+    CLEAR(policy_id);
+    if (!provider_xfrm_linux_selector_build(&policy_id.sel, &state->src_ts,
+                                            &state->dst_ts, result))
+    {
+        return false;
+    }
+    policy_id.dir = dir;
+
+    if (!provider_xfrm_linux_message_start_flags(
+            message, XFRM_MSG_DELPOLICY, NLM_F_REQUEST | NLM_F_ACK,
+            &policy_id, sizeof(policy_id)))
+    {
+        provider_xfrm_linux_set_error(result,
+                                      "failed to build XFRM DELPOLICY");
+        return false;
+    }
+    if (!provider_xfrm_linux_add_mark_and_if_id(
+            message, state->mark_value, state->mark_mask, state->if_id))
+    {
+        provider_xfrm_linux_set_error(
+            result, "failed to add XFRM DELPOLICY attributes");
+        return false;
+    }
+
+    return true;
+}
+
 void
 provider_xfrm_linux_message_plan_clear(
     struct provider_xfrm_linux_message_plan *messages)
@@ -444,6 +538,45 @@ provider_xfrm_linux_child_sa_messages_build(
         || !provider_xfrm_linux_policy_message_build(
             &messages->messages[messages->count++], &plan->outbound,
             XFRM_POLICY_OUT, result))
+    {
+        provider_xfrm_linux_message_plan_clear(messages);
+        return false;
+    }
+
+    return true;
+}
+
+bool
+provider_xfrm_linux_child_sa_delete_messages_build(
+    struct provider_xfrm_linux_message_plan *messages,
+    const struct provider_xfrm_child_sa_plan *plan,
+    struct provider_xfrm_result *result)
+{
+    provider_xfrm_result_init(result);
+    provider_xfrm_linux_message_plan_clear(messages);
+    if (!messages || !plan || !plan->lease_id || !plan->provider_session_id
+        || !plan->policy_revision)
+    {
+        provider_xfrm_linux_set_error(
+            result, "missing XFRM Linux delete message plan input");
+        return false;
+    }
+
+    if (!provider_xfrm_linux_policy_delete_message_build(
+            &messages->messages[messages->count++], &plan->inbound,
+            XFRM_POLICY_IN, result)
+        || !provider_xfrm_linux_policy_delete_message_build(
+            &messages->messages[messages->count++], &plan->inbound,
+            XFRM_POLICY_FWD, result)
+        || !provider_xfrm_linux_policy_delete_message_build(
+            &messages->messages[messages->count++], &plan->outbound,
+            XFRM_POLICY_OUT, result)
+        || !provider_xfrm_linux_sa_delete_message_build(
+            &messages->messages[messages->count++], &plan->inbound,
+            PROVIDER_XFRM_DIRECTION_IN, result)
+        || !provider_xfrm_linux_sa_delete_message_build(
+            &messages->messages[messages->count++], &plan->outbound,
+            PROVIDER_XFRM_DIRECTION_OUT, result))
     {
         provider_xfrm_linux_message_plan_clear(messages);
         return false;
@@ -681,6 +814,20 @@ provider_xfrm_linux_child_sa_messages_build(
     (void)plan;
     provider_xfrm_result_init(result);
     provider_xfrm_linux_message_plan_clear(messages);
+    provider_xfrm_linux_set_error(result,
+                                  "Linux XFRM backend is unavailable");
+    return false;
+}
+
+bool
+provider_xfrm_linux_child_sa_delete_messages_build(
+    struct provider_xfrm_linux_message_plan *messages,
+    const struct provider_xfrm_child_sa_plan *plan,
+    struct provider_xfrm_result *result)
+{
+    (void)messages;
+    (void)plan;
+    provider_xfrm_result_init(result);
     provider_xfrm_linux_set_error(result,
                                   "Linux XFRM backend is unavailable");
     return false;

@@ -528,6 +528,58 @@ test_provider_xfrm_linux_rejects_unrepresentable_selectors(void **state)
 }
 
 static void
+test_provider_xfrm_linux_builds_child_sa_delete_messages(void **state)
+{
+    (void)state;
+#if !defined(TARGET_LINUX)
+    skip();
+#else
+    struct provider_xfrm_child_sa_plan plan;
+    struct provider_xfrm_linux_message_plan messages;
+    struct provider_xfrm_result result;
+    struct provider_xfrm_child_sa_spec spec = default_child_sa_spec();
+
+    assert_true(provider_xfrm_child_sa_plan_build(&plan, &spec, &result));
+    assert_true(provider_xfrm_linux_child_sa_delete_messages_build(
+                    &messages, &plan, &result));
+    assert_true(result.ok);
+    assert_int_equal(messages.count, 5);
+
+    const struct nlmsghdr *in_pol_nlh =
+        (const struct nlmsghdr *)messages.messages[0].data;
+    const struct nlmsghdr *fwd_pol_nlh =
+        (const struct nlmsghdr *)messages.messages[1].data;
+    const struct nlmsghdr *out_pol_nlh =
+        (const struct nlmsghdr *)messages.messages[2].data;
+    assert_int_equal(in_pol_nlh->nlmsg_type, XFRM_MSG_DELPOLICY);
+    assert_int_equal(fwd_pol_nlh->nlmsg_type, XFRM_MSG_DELPOLICY);
+    assert_int_equal(out_pol_nlh->nlmsg_type, XFRM_MSG_DELPOLICY);
+    const struct xfrm_userpolicy_id *in_pol = NLMSG_DATA(in_pol_nlh);
+    const struct xfrm_userpolicy_id *fwd_pol = NLMSG_DATA(fwd_pol_nlh);
+    const struct xfrm_userpolicy_id *out_pol = NLMSG_DATA(out_pol_nlh);
+    assert_int_equal(in_pol->dir, XFRM_POLICY_IN);
+    assert_int_equal(fwd_pol->dir, XFRM_POLICY_FWD);
+    assert_int_equal(out_pol->dir, XFRM_POLICY_OUT);
+
+    const struct nlmsghdr *in_sa_nlh =
+        (const struct nlmsghdr *)messages.messages[3].data;
+    const struct nlmsghdr *out_sa_nlh =
+        (const struct nlmsghdr *)messages.messages[4].data;
+    assert_int_equal(in_sa_nlh->nlmsg_type, XFRM_MSG_DELSA);
+    assert_int_equal(out_sa_nlh->nlmsg_type, XFRM_MSG_DELSA);
+    const struct xfrm_usersa_id *in_sa = NLMSG_DATA(in_sa_nlh);
+    const struct xfrm_usersa_id *out_sa = NLMSG_DATA(out_sa_nlh);
+    assert_int_equal(ntohl(in_sa->spi), spec.responder_inbound_spi);
+    assert_int_equal(ntohl(in_sa->daddr.a4), spec.local_outer_ipv4);
+    assert_int_equal(ntohl(out_sa->spi), spec.initiator_inbound_spi);
+    assert_int_equal(ntohl(out_sa->daddr.a4), spec.remote_outer_ipv4);
+
+    provider_xfrm_linux_message_plan_clear(&messages);
+    provider_xfrm_child_sa_plan_clear(&plan);
+#endif
+}
+
+static void
 test_provider_xfrm_linux_rejects_empty_apply(void **state)
 {
     (void)state;
@@ -563,6 +615,9 @@ test_provider_xfrm_linux_apply_in_child_netns(void)
         provider_xfrm_child_sa_plan_build(&plan, &spec, &result)
         && provider_xfrm_linux_child_sa_messages_build(&messages, &plan,
                                                        &result)
+        && provider_xfrm_linux_message_plan_apply(&messages, &result)
+        && provider_xfrm_linux_child_sa_delete_messages_build(&messages, &plan,
+                                                              &result)
         && provider_xfrm_linux_message_plan_apply(&messages, &result);
     if (!ret)
     {
@@ -618,6 +673,7 @@ main(void)
         cmocka_unit_test(test_provider_xfrm_rejects_invalid_child_sa_plan),
         cmocka_unit_test(test_provider_xfrm_linux_builds_child_sa_messages),
         cmocka_unit_test(test_provider_xfrm_linux_rejects_unrepresentable_selectors),
+        cmocka_unit_test(test_provider_xfrm_linux_builds_child_sa_delete_messages),
         cmocka_unit_test(test_provider_xfrm_linux_rejects_empty_apply),
         cmocka_unit_test(test_provider_xfrm_linux_applies_in_private_netns),
     };
