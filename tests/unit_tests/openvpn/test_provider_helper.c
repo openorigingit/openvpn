@@ -5348,6 +5348,10 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
 #else
     struct provider_helper_supervisor supervisor;
     provider_helper_supervisor_init(&supervisor);
+    supervisor.runtime_config.cookie_threshold = 1;
+    supervisor.runtime_config.max_half_open_sas = 1;
+    supervisor.runtime_config.max_half_open_sas_per_source = 1;
+    supervisor.runtime_config.half_open_timeout_seconds = 1;
     struct test_provider_helper_auth_cb_state cb_state;
     CLEAR(cb_state);
     cb_state.allow = true;
@@ -5564,9 +5568,36 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_expired, 0);
 
+    int post_auth_fd = test_create_udp_sender(0x7f00000eu);
+    const uint64_t post_auth_initiator_spi = 0x1234567890abcdefull;
+    test_send_ikev2_datagram_from(post_auth_fd, port, post_auth_initiator_spi);
+    usleep(10000);
+    struct test_ikev2_sa_init_response_material post_auth_material;
+    assert_true(test_recv_ikev2_sa_init_response_material(
+                    post_auth_fd, post_auth_initiator_spi,
+                    &post_auth_material) != 0);
+    close(post_auth_fd);
+
+    sleep(2);
+    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 101);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
+    assert_true(supervisor.runtime_stats.ike_sa_expired >= 1);
+
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     assert_true(provider_helper_supervisor_send_xfrm_lease_delete(
-                    &supervisor, &xfrm_lease, 101));
+                    &supervisor, &xfrm_lease, 102));
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -5579,7 +5610,7 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           supervisor.next_tx_sequence++, 102);
+                           supervisor.next_tx_sequence++, 103);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)

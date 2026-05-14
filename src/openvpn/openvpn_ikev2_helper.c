@@ -1456,7 +1456,34 @@ ikev2_helper_peer_equal(const struct sockaddr_storage *a, socklen_t a_len,
 }
 
 static uint32_t
-ikev2_helper_count_ike_sas_for_source(
+ikev2_helper_ike_sa_half_open(const struct ikev2_helper_ike_sa *sa)
+{
+    return sa && sa->active && !sa->auth_authorized;
+}
+
+static uint32_t
+ikev2_helper_count_half_open_ike_sas(
+    const struct ikev2_helper_ike_sa_table *table)
+{
+    if (!table)
+    {
+        return 0;
+    }
+
+    uint32_t count = 0;
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        if (ikev2_helper_ike_sa_half_open(&table->entries[i]))
+        {
+            ++count;
+        }
+    }
+
+    return count;
+}
+
+static uint32_t
+ikev2_helper_count_half_open_ike_sas_for_source(
     const struct ikev2_helper_ike_sa_table *table,
     const struct sockaddr_storage *peer)
 {
@@ -1469,7 +1496,8 @@ ikev2_helper_count_ike_sas_for_source(
     for (size_t i = 0; i < SIZE(table->entries); ++i)
     {
         const struct ikev2_helper_ike_sa *sa = &table->entries[i];
-        if (sa->active && ikev2_helper_peer_address_equal(&sa->peer, peer))
+        if (ikev2_helper_ike_sa_half_open(sa)
+            && ikev2_helper_peer_address_equal(&sa->peer, peer))
         {
             ++count;
         }
@@ -5266,16 +5294,19 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 return;
             }
 
-            if (sa_table->active >= max_half_open_sas)
+            const uint32_t half_open_sas =
+                ikev2_helper_count_half_open_ike_sas(sa_table);
+            if (half_open_sas >= max_half_open_sas)
             {
                 ++counters->ike_sa_init_half_open_dropped;
             }
-            else if (ikev2_helper_count_ike_sas_for_source(sa_table, &peer)
+            else if (ikev2_helper_count_half_open_ike_sas_for_source(sa_table,
+                                                                      &peer)
                      >= config->max_half_open_sas_per_source)
             {
                 ++counters->ike_sa_init_per_source_dropped;
             }
-            else if (sa_table->active >= config->cookie_threshold
+            else if (half_open_sas >= config->cookie_threshold
                      && !summary.saw_cookie_notify)
             {
                 ++counters->ike_sa_init_cookie_required;
