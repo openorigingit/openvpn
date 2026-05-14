@@ -112,6 +112,7 @@ struct ikev2_helper_listener {
 
 struct ikev2_helper_child_sa_scaffold {
     bool ready;
+    bool xfrm_applied;
     uint32_t initiator_spi;
     uint32_t responder_spi;
     uint32_t message_id;
@@ -3456,6 +3457,40 @@ ikev2_helper_child_responder_spi_exists(
 }
 
 static bool
+ikev2_helper_delete_child_sa_xfrm(
+    struct ikev2_helper_child_sa_scaffold *child,
+    struct provider_helper_runtime_stats *counters)
+{
+    if (!child || !child->ready || !child->xfrm_applied)
+    {
+        return true;
+    }
+
+    struct provider_xfrm_linux_message_plan messages;
+    struct provider_xfrm_result result;
+    const bool ret =
+        provider_xfrm_linux_child_sa_delete_messages_build(
+            &messages, &child->xfrm_plan, &result)
+        && provider_xfrm_linux_message_plan_apply(&messages, &result);
+    provider_xfrm_linux_message_plan_clear(&messages);
+    if (ret)
+    {
+        child->xfrm_applied = false;
+        if (counters)
+        {
+            ++counters->ike_child_sa_xfrm_delete_ok;
+        }
+        return true;
+    }
+
+    if (counters)
+    {
+        ++counters->ike_child_sa_xfrm_delete_failed;
+    }
+    return false;
+}
+
+static bool
 ikev2_helper_generate_child_responder_spi(
     const struct ikev2_helper_ike_sa_table *table,
     uint32_t *responder_spi)
@@ -3689,7 +3724,8 @@ ikev2_helper_add_ike_sa(struct ikev2_helper_ike_sa_table *table,
 
 static void
 ikev2_helper_clear_ike_sa(struct ikev2_helper_ike_sa_table *table,
-                          struct ikev2_helper_ike_sa *sa)
+                          struct ikev2_helper_ike_sa *sa,
+                          struct provider_helper_runtime_stats *counters)
 {
     if (!table || !sa || !sa->active)
     {
@@ -3697,6 +3733,7 @@ ikev2_helper_clear_ike_sa(struct ikev2_helper_ike_sa_table *table,
     }
 
     const bool decrement_active = table->active > 0;
+    (void)ikev2_helper_delete_child_sa_xfrm(&sa->child_sa, counters);
     ikev2_helper_secure_zero(sa, sizeof(*sa));
     if (decrement_active)
     {
@@ -3985,6 +4022,7 @@ ikev2_helper_scaffold_child_sa(
     }
 
     ikev2_helper_secure_zero(&sa->child_sa, sizeof(sa->child_sa));
+    child.xfrm_applied = apply_xfrm;
     sa->child_sa = child;
     return true;
 }
@@ -4003,7 +4041,8 @@ ikev2_helper_ike_sa_uses_xfrm_lease(
 static uint32_t
 ikev2_helper_clear_ike_sas_for_xfrm_lease(
     struct ikev2_helper_ike_sa_table *table,
-    const struct provider_helper_xfrm_lease *lease)
+    const struct provider_helper_xfrm_lease *lease,
+    struct provider_helper_runtime_stats *counters)
 {
     if (!table || !lease)
     {
@@ -4016,7 +4055,7 @@ ikev2_helper_clear_ike_sas_for_xfrm_lease(
         struct ikev2_helper_ike_sa *sa = &table->entries[i];
         if (ikev2_helper_ike_sa_uses_xfrm_lease(sa, lease))
         {
-            ikev2_helper_clear_ike_sa(table, sa);
+            ikev2_helper_clear_ike_sa(table, sa, counters);
             ++cleared;
         }
     }
@@ -4457,7 +4496,7 @@ ikev2_helper_apply_auth_response(
             {
                 ++counters->ike_auth_deny_response_failed;
             }
-            ikev2_helper_clear_ike_sa(table, sa);
+            ikev2_helper_clear_ike_sa(table, sa, counters);
             ++counters->ike_auth_denied;
         }
         else
@@ -4482,7 +4521,7 @@ ikev2_helper_apply_auth_response(
                 {
                     ++counters->ike_auth_allow_temp_failure_failed;
                 }
-                ikev2_helper_clear_ike_sa(table, sa);
+                ikev2_helper_clear_ike_sa(table, sa, counters);
                 counters->ike_sa_active = table->active;
                 return true;
             }
@@ -4498,7 +4537,7 @@ ikev2_helper_apply_auth_response(
             else
             {
                 ++counters->ike_auth_allow_temp_failure_failed;
-                ikev2_helper_clear_ike_sa(table, sa);
+                ikev2_helper_clear_ike_sa(table, sa, counters);
             }
             ++counters->ike_auth_allow_unsupported;
         }
@@ -4567,10 +4606,15 @@ ikev2_helper_queue_auth_request(
 }
 
 static void
-ikev2_helper_clear_ike_sa_table(struct ikev2_helper_ike_sa_table *table)
+ikev2_helper_clear_ike_sa_table(struct ikev2_helper_ike_sa_table *table,
+                                struct provider_helper_runtime_stats *counters)
 {
     if (table)
     {
+        for (size_t i = 0; i < SIZE(table->entries); ++i)
+        {
+            ikev2_helper_clear_ike_sa(table, &table->entries[i], counters);
+        }
         ikev2_helper_secure_zero(table, sizeof(*table));
     }
 }
@@ -4595,7 +4639,7 @@ ikev2_helper_expire_ike_sas(struct ikev2_helper_ike_sa_table *table,
             continue;
         }
 
-        ikev2_helper_clear_ike_sa(table, sa);
+        ikev2_helper_clear_ike_sa(table, sa, counters);
         ++counters->ike_sa_expired;
     }
     counters->ike_sa_active = table->active;
@@ -5545,7 +5589,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         }
                         sa->message_id = header.message_id;
                         ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
-                        ikev2_helper_clear_ike_sa(sa_table, sa);
+                        ikev2_helper_clear_ike_sa(sa_table, sa, counters);
                         counters->ike_sa_active = sa_table->active;
                         return;
                     }
@@ -5666,7 +5710,8 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             {
                                 ++counters->ike_create_child_response_failed;
                                 child_response_failed = true;
-                                ikev2_helper_clear_ike_sa(sa_table, sa);
+                                ikev2_helper_clear_ike_sa(sa_table, sa,
+                                                          counters);
                             }
                         }
                         else
@@ -5963,7 +6008,8 @@ ikev2_helper_loop(int fd)
                     ++counters.xfrm_lease_replaced;
                     counters.ike_sa_xfrm_lease_revoked +=
                         ikev2_helper_clear_ike_sas_for_xfrm_lease(&sa_table,
-                                                                  &lease);
+                                                                  &lease,
+                                                                  &counters);
                 }
                 else
                 {
@@ -5996,7 +6042,8 @@ ikev2_helper_loop(int fd)
                 {
                     counters.ike_sa_xfrm_lease_revoked +=
                         ikev2_helper_clear_ike_sas_for_xfrm_lease(&sa_table,
-                                                                  &lease);
+                                                                  &lease,
+                                                                  &counters);
                 }
                 counters.xfrm_leases_active = xfrm_lease_count;
                 counters.ike_sa_active = sa_table.active;
@@ -6091,7 +6138,7 @@ done:
         close(listeners[i].fd);
         listeners[i].fd = -1;
     }
-    ikev2_helper_clear_ike_sa_table(&sa_table);
+    ikev2_helper_clear_ike_sa_table(&sa_table, &counters);
     ikev2_helper_cookie_context_free(&cookie_ctx);
 
     return ret;

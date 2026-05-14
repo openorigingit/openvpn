@@ -422,6 +422,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_create_child_xfrm_install_failed = 91,
         .ike_create_child_response_tx = 92,
         .ike_create_child_response_failed = 93,
+        .ike_child_sa_xfrm_delete_ok = 94,
+        .ike_child_sa_xfrm_delete_failed = 95,
     };
     struct provider_helper_runtime_stats output;
     uint8_t payload[PROVIDER_HELPER_RUNTIME_STATS_SIZE];
@@ -600,6 +602,10 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_create_child_response_tx);
     assert_int_equal(output.ike_create_child_response_failed,
                      input.ike_create_child_response_failed);
+    assert_int_equal(output.ike_child_sa_xfrm_delete_ok,
+                     input.ike_child_sa_xfrm_delete_ok);
+    assert_int_equal(output.ike_child_sa_xfrm_delete_failed,
+                     input.ike_child_sa_xfrm_delete_failed);
 }
 
 static void
