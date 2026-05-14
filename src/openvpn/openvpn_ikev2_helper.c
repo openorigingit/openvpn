@@ -5724,8 +5724,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 counters->ike_sa_active = sa_table->active;
                 return;
             }
-            sa->message_id = header.message_id;
-            sa->updated = time(NULL);
+            const time_t auth_now = time(NULL);
 
             uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
             size_t plaintext_len = 0;
@@ -5797,6 +5796,8 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                                                 next_auth_request_id, listener,
                                                 sa))
             {
+                sa->message_id = header.message_id;
+                sa->updated = auth_now;
                 ++counters->ike_auth_request_tx;
             }
             else
