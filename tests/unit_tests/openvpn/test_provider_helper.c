@@ -245,6 +245,8 @@ test_provider_helper_runtime_config_roundtrip(void **state)
                      input.half_open_timeout_seconds);
     assert_int_equal(output.max_half_open_sas_per_source,
                      input.max_half_open_sas_per_source);
+    assert_int_equal(output.max_half_open_sas_per_prefix,
+                     input.max_half_open_sas_per_prefix);
 
     input.flags |= PROVIDER_HELPER_CONFIG_APPLY_XFRM;
     assert_true(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
@@ -307,6 +309,19 @@ test_provider_helper_runtime_config_roundtrip(void **state)
     input.max_half_open_sas_per_source = input.max_half_open_sas + 1;
     assert_false(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
     assert_non_null(strstr(reason, "max_half_open_sas_per_source"));
+    input.max_half_open_sas_per_source =
+        PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_PER_SOURCE;
+    input.max_half_open_sas_per_prefix = 0;
+    assert_false(provider_helper_runtime_config_valid(&input, reason,
+                                                      sizeof(reason)));
+    assert_non_null(strstr(reason, "max_half_open_sas_per_prefix"));
+    input.max_half_open_sas_per_prefix =
+        PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_PER_PREFIX;
+    input.max_half_open_sas_per_prefix =
+        PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_SAS + 1;
+    assert_false(provider_helper_runtime_config_valid(&input, reason,
+                                                      sizeof(reason)));
+    assert_non_null(strstr(reason, "max_half_open_sas_per_prefix"));
 }
 
 static void
@@ -389,6 +404,7 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_sa_init_keymat_ready = 25,
         .ike_sa_init_half_open_dropped = 3,
         .ike_sa_init_per_source_dropped = 9,
+        .ike_sa_init_per_prefix_dropped = 10,
         .ike_sa_init_duplicate = 2,
         .ike_sa_init_retransmit_dropped = 7,
         .ike_sa_table_full_dropped = 1,
@@ -511,6 +527,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_sa_init_half_open_dropped);
     assert_int_equal(output.ike_sa_init_per_source_dropped,
                      input.ike_sa_init_per_source_dropped);
+    assert_int_equal(output.ike_sa_init_per_prefix_dropped,
+                     input.ike_sa_init_per_prefix_dropped);
     assert_int_equal(output.ike_sa_init_duplicate, input.ike_sa_init_duplicate);
     assert_int_equal(output.ike_sa_init_retransmit_dropped,
                      input.ike_sa_init_retransmit_dropped);
@@ -2812,6 +2830,17 @@ test_recv_ikev2_natt_sa_init_response(int fd, uint64_t initiator_spi)
 {
     return test_recv_ikev2_sa_init_response_material_impl(
         fd, initiator_spi, NULL, true);
+}
+
+static void
+test_assert_no_udp_datagram(int fd)
+{
+    struct pollfd pfd = {
+        .fd = fd,
+        .events = POLLIN,
+    };
+
+    assert_int_equal(poll(&pfd, 1, 150), 0);
 }
 
 #if defined(ENABLE_CRYPTO_OPENSSL)
@@ -5335,6 +5364,102 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 }
 
 static void
+test_provider_helper_spawn_ikev2_prefix_limit(void **state)
+{
+    (void)state;
+
+    if (!ikev2_helper_path)
+    {
+        skip();
+    }
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.runtime_config.cookie_threshold = 4;
+    supervisor.runtime_config.max_half_open_sas = 4;
+    supervisor.runtime_config.max_half_open_sas_per_source = 4;
+    supervisor.runtime_config.max_half_open_sas_per_prefix = 2;
+    supervisor.runtime_config.half_open_timeout_seconds = 3;
+
+    char *const argv[] = { (char *)ikev2_helper_path, NULL };
+    assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
+                                                 argv));
+    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 2);
+
+    uint16_t port = 0;
+    int listener_fd = test_create_udp_listener(&port);
+    const struct provider_helper_listener_fd listener = {
+        .listener_id = 1,
+        .family = AF_INET,
+        .socket_type = SOCK_DGRAM,
+        .protocol = IPPROTO_UDP,
+        .local_port = port,
+        .flags = PROVIDER_HELPER_LISTENER_FD_IKE,
+    };
+    assert_true(provider_helper_supervisor_send_listener_fd(&supervisor,
+                                                            listener_fd,
+                                                            &listener, 88));
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 3; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 3);
+
+    int first_fd = test_create_udp_sender(0x7f000101u);
+    int second_fd = test_create_udp_sender(0x7f000102u);
+    int dropped_fd = test_create_udp_sender(0x7f000103u);
+    int other_prefix_fd = test_create_udp_sender(0x7f000201u);
+
+    test_send_ikev2_datagram_from(first_fd, port, 0x0101010101010101ull);
+    assert_true(test_recv_ikev2_sa_init_response(
+                    first_fd, 0x0101010101010101ull) != 0);
+    test_send_ikev2_datagram_from(second_fd, port, 0x0202020202020202ull);
+    assert_true(test_recv_ikev2_sa_init_response(
+                    second_fd, 0x0202020202020202ull) != 0);
+    test_send_ikev2_datagram_from(dropped_fd, port, 0x0303030303030303ull);
+    test_assert_no_udp_datagram(dropped_fd);
+    test_send_ikev2_datagram_from(other_prefix_fd, port, 0x0404040404040404ull);
+    assert_true(test_recv_ikev2_sa_init_response(
+                    other_prefix_fd, 0x0404040404040404ull) != 0);
+
+    close(first_fd);
+    close(second_fd);
+    close(dropped_fd);
+    close(other_prefix_fd);
+
+    uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 92);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_init_accepted, 3);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_init_per_prefix_dropped,
+                     1);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 3);
+
+    close(listener_fd);
+    provider_helper_supervisor_stop(&supervisor);
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
+    assert_int_equal(supervisor.ipc_fd, -1);
+}
+
+static void
 test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
 {
     (void)state;
@@ -6162,6 +6287,7 @@ main(void)
         cmocka_unit_test(
             test_provider_helper_spawn_ikev2_rejects_inner_aggregate_limits),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_scaffold),
+        cmocka_unit_test(test_provider_helper_spawn_ikev2_prefix_limit),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_auth_allow_unsupported),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_apply_xfrm_child_sa),
     };

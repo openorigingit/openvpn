@@ -174,6 +174,8 @@ provider_helper_print_status_counters(
           stats->ike_auth_allow_missing_xfrm_lease },
         { "ike_auth_allow_unsupported", stats->ike_auth_allow_unsupported },
         { "ike_exchange_unsupported", stats->ike_exchange_unsupported },
+        { "ike_sa_init_per_prefix_dropped",
+          stats->ike_sa_init_per_prefix_dropped },
         { "ike_informational_empty_rx", stats->ike_informational_empty_rx },
         { "ike_informational_delete_rx", stats->ike_informational_delete_rx },
         { "ike_mobike_update_rx", stats->ike_mobike_update_rx },

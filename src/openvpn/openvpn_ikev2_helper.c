@@ -1429,6 +1429,38 @@ ikev2_helper_peer_address_equal(const struct sockaddr_storage *a,
 }
 
 static bool
+ikev2_helper_peer_prefix_equal(const struct sockaddr_storage *a,
+                               const struct sockaddr_storage *b)
+{
+    if (!a || !b || a->ss_family != b->ss_family)
+    {
+        return false;
+    }
+
+    switch (a->ss_family)
+    {
+        case AF_INET:
+        {
+            const uint32_t a_addr =
+                ntohl(((const struct sockaddr_in *)a)->sin_addr.s_addr);
+            const uint32_t b_addr =
+                ntohl(((const struct sockaddr_in *)b)->sin_addr.s_addr);
+            return (a_addr & 0xffffff00u) == (b_addr & 0xffffff00u);
+        }
+
+        case AF_INET6:
+        {
+            const struct sockaddr_in6 *a6 = (const struct sockaddr_in6 *)a;
+            const struct sockaddr_in6 *b6 = (const struct sockaddr_in6 *)b;
+            return memcmp(&a6->sin6_addr, &b6->sin6_addr, 8) == 0;
+        }
+
+        default:
+            return false;
+    }
+}
+
+static bool
 ikev2_helper_peer_equal(const struct sockaddr_storage *a, socklen_t a_len,
                         const struct sockaddr_storage *b, socklen_t b_len)
 {
@@ -1474,6 +1506,30 @@ ikev2_helper_count_half_open_ike_sas(
     for (size_t i = 0; i < SIZE(table->entries); ++i)
     {
         if (ikev2_helper_ike_sa_half_open(&table->entries[i]))
+        {
+            ++count;
+        }
+    }
+
+    return count;
+}
+
+static uint32_t
+ikev2_helper_count_half_open_ike_sas_for_prefix(
+    const struct ikev2_helper_ike_sa_table *table,
+    const struct sockaddr_storage *peer)
+{
+    if (!table || !peer)
+    {
+        return 0;
+    }
+
+    uint32_t count = 0;
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        const struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        if (ikev2_helper_ike_sa_half_open(sa)
+            && ikev2_helper_peer_prefix_equal(&sa->peer, peer))
         {
             ++count;
         }
@@ -5305,6 +5361,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                      >= config->max_half_open_sas_per_source)
             {
                 ++counters->ike_sa_init_per_source_dropped;
+            }
+            else if (ikev2_helper_count_half_open_ike_sas_for_prefix(sa_table,
+                                                                      &peer)
+                     >= config->max_half_open_sas_per_prefix)
+            {
+                ++counters->ike_sa_init_per_prefix_dropped;
             }
             else if (half_open_sas >= config->cookie_threshold
                      && !summary.saw_cookie_notify)
