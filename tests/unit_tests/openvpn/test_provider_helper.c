@@ -785,6 +785,12 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
      + TEST_IKEV2_DH_TRANSFORM_LEN)
 #define TEST_IKEV2_SA_PAYLOAD_LEN \
     (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + TEST_IKEV2_SA_PROPOSAL_LEN)
+#define TEST_IKEV2_CHILD_SA_PROPOSAL_LEN \
+    (PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE + 4 \
+     + TEST_IKEV2_ENCR_TRANSFORM_LEN)
+#define TEST_IKEV2_CHILD_SA_PAYLOAD_LEN \
+    (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE \
+     + TEST_IKEV2_CHILD_SA_PROPOSAL_LEN)
 #define TEST_IKEV2_PRF_SHA256_BYTES 32
 #define TEST_IKEV2_AES_GCM_SALT_BYTES 4
 #define TEST_IKEV2_AES_GCM_IV_BYTES 8
@@ -1846,7 +1852,7 @@ test_send_ikev2_encrypted_create_child_from(
     uint32_t message_id)
 {
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
-    uint8_t plaintext[PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 8
+    uint8_t plaintext[TEST_IKEV2_CHILD_SA_PAYLOAD_LEN
                       + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
                       + PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
                       + 2 * (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4)
@@ -1856,12 +1862,26 @@ test_send_ikev2_encrypted_create_child_from(
 
     plaintext_len = test_add_ikev2_payload(
         plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE,
-        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 8, 0);
+        TEST_IKEV2_CHILD_SA_PAYLOAD_LEN, 0);
     const size_t sa_body = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
-    test_write_be16(plaintext + sa_body + 2, 8);
+    test_write_be16(plaintext + sa_body + 2,
+                    TEST_IKEV2_CHILD_SA_PROPOSAL_LEN);
     plaintext[sa_body + 4] = 1;
-    plaintext[sa_body + 5] = 3; /* ESP protocol id. */
+    plaintext[sa_body + 5] = PROVIDER_HELPER_IKEV2_PROTOCOL_ESP;
     plaintext[sa_body + 6] = 4;
+    plaintext[sa_body + 7] = 1;
+    test_write_be32(plaintext + sa_body + 8, 0x01020304);
+
+    const size_t transform = sa_body
+                             + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                             + 4;
+    test_write_be16(plaintext + transform + 2, TEST_IKEV2_ENCR_TRANSFORM_LEN);
+    plaintext[transform + 4] = PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR;
+    test_write_be16(plaintext + transform + 6,
+                    PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16);
+    test_write_be16(plaintext + transform + 8,
+                    0x8000u | PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH);
+    test_write_be16(plaintext + transform + 10, 256);
 
     const size_t nonce_offset = plaintext_len
                                 + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;

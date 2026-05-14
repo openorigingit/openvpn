@@ -188,6 +188,14 @@ ikev2_helper_write_be16(uint8_t **pos, uint16_t value)
     *pos += sizeof(net_value);
 }
 
+static uint16_t
+ikev2_helper_read_be16(const uint8_t *pos)
+{
+    uint16_t value;
+    memcpy(&value, pos, sizeof(value));
+    return ntohs(value);
+}
+
 static void
 ikev2_helper_write_be32(uint8_t **pos, uint32_t value)
 {
@@ -1726,6 +1734,204 @@ ikev2_helper_create_child_inner_payload_supported(uint8_t payload_type)
 }
 
 static enum provider_helper_ikev2_parse_result
+ikev2_helper_validate_child_transform_attrs(const uint8_t *body,
+                                            size_t start,
+                                            size_t end)
+{
+    size_t pos = start;
+    uint32_t attr_count = 0;
+    while (pos < end)
+    {
+        if (++attr_count > PROVIDER_HELPER_IKEV2_MAX_TRANSFORM_ATTRS)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_PAYLOAD_LIMIT;
+        }
+        if (end - pos < 4)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const uint16_t raw_type = ikev2_helper_read_be16(body + pos);
+        const bool tv_format = (raw_type & 0x8000u) != 0;
+        const uint16_t attr_len = ikev2_helper_read_be16(body + pos + 2);
+        pos += 4;
+        if (!tv_format)
+        {
+            if (attr_len > end - pos)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+            pos += attr_len;
+        }
+    }
+
+    return pos == end ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                      : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+}
+
+static bool
+ikev2_helper_child_transform_type_supported(uint8_t transform_type)
+{
+    switch (transform_type)
+    {
+        case PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR:
+        case PROVIDER_HELPER_IKEV2_TRANSFORM_INTEG:
+        case PROVIDER_HELPER_IKEV2_TRANSFORM_DH:
+        case PROVIDER_HELPER_IKEV2_TRANSFORM_ESN:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+static enum provider_helper_ikev2_parse_result
+ikev2_helper_validate_child_sa_transforms(const uint8_t *body,
+                                          size_t start,
+                                          size_t end,
+                                          uint8_t transform_count)
+{
+    if (!transform_count)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    bool saw_last = false;
+    bool saw_encr = false;
+    size_t pos = start;
+    uint32_t parsed = 0;
+    while (pos < end)
+    {
+        if (++parsed > PROVIDER_HELPER_IKEV2_MAX_TRANSFORMS)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_PAYLOAD_LIMIT;
+        }
+        if (end - pos < PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const uint8_t next_transform = body[pos];
+        const uint16_t transform_len = ikev2_helper_read_be16(body + pos + 2);
+        const uint8_t transform_type = body[pos + 4];
+        const uint16_t transform_id = ikev2_helper_read_be16(body + pos + 6);
+        if (next_transform != PROVIDER_HELPER_IKEV2_PAYLOAD_NONE
+            && next_transform != PROVIDER_HELPER_IKEV2_TRANSFORM_MORE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+        if (transform_len < PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
+            || transform_len > end - pos || !transform_id
+            || !ikev2_helper_child_transform_type_supported(transform_type))
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const enum provider_helper_ikev2_parse_result attr_result =
+            ikev2_helper_validate_child_transform_attrs(
+                body, pos + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE,
+                pos + transform_len);
+        if (attr_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+        {
+            return attr_result;
+        }
+        if (transform_type == PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR)
+        {
+            saw_encr = true;
+        }
+
+        pos += transform_len;
+        if (next_transform == PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
+        {
+            saw_last = true;
+            if (pos != end)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+        }
+    }
+
+    return pos == end && saw_last && parsed == transform_count && saw_encr
+           ? PROVIDER_HELPER_IKEV2_PARSE_OK
+           : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+}
+
+static enum provider_helper_ikev2_parse_result
+ikev2_helper_validate_child_sa_payload(const uint8_t *body, size_t body_len)
+{
+    if (!body || body_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE + 4
+                          + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    bool saw_last = false;
+    uint8_t previous_proposal_number = 0;
+    size_t pos = 0;
+    uint32_t proposal_count = 0;
+    while (pos < body_len)
+    {
+        if (++proposal_count > PROVIDER_HELPER_IKEV2_MAX_PROPOSALS)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_PAYLOAD_LIMIT;
+        }
+        if (body_len - pos < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const uint8_t next_proposal = body[pos];
+        const uint16_t proposal_len = ikev2_helper_read_be16(body + pos + 2);
+        const uint8_t proposal_number = body[pos + 4];
+        const uint8_t protocol_id = body[pos + 5];
+        const uint8_t spi_size = body[pos + 6];
+        const uint8_t transform_count = body[pos + 7];
+        if (next_proposal != PROVIDER_HELPER_IKEV2_PAYLOAD_NONE
+            && next_proposal != PROVIDER_HELPER_IKEV2_PROPOSAL_MORE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+        if (proposal_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                           + spi_size
+                           + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
+            || proposal_len > body_len - pos || !proposal_number
+            || (proposal_count == 1 && proposal_number != 1)
+            || proposal_number < previous_proposal_number
+            || protocol_id != PROVIDER_HELPER_IKEV2_PROTOCOL_ESP
+            || spi_size != 4 || !transform_count)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const size_t transform_start =
+            pos + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE + spi_size;
+        const size_t transform_end = pos + proposal_len;
+        const enum provider_helper_ikev2_parse_result transform_result =
+            ikev2_helper_validate_child_sa_transforms(
+                body, transform_start, transform_end, transform_count);
+        if (transform_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+        {
+            return transform_result;
+        }
+
+        pos = transform_end;
+        previous_proposal_number = proposal_number;
+        if (next_proposal == PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
+        {
+            saw_last = true;
+            if (pos != body_len)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+        }
+    }
+
+    return pos == body_len && saw_last && proposal_count
+           ? PROVIDER_HELPER_IKEV2_PARSE_OK
+           : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+}
+
+static enum provider_helper_ikev2_parse_result
 ikev2_helper_validate_create_child_inner_payload(uint8_t payload_type,
                                                  const uint8_t *body,
                                                  size_t body_len)
@@ -1738,9 +1944,7 @@ ikev2_helper_validate_create_child_inner_payload(uint8_t payload_type,
     switch (payload_type)
     {
         case PROVIDER_HELPER_IKEV2_PAYLOAD_SA:
-            return body_len >= PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
-                   ? PROVIDER_HELPER_IKEV2_PARSE_OK
-                   : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            return ikev2_helper_validate_child_sa_payload(body, body_len);
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_KE:
             return body_len >= PROVIDER_HELPER_IKEV2_KE_MIN_BYTES
