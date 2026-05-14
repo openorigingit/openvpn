@@ -188,6 +188,9 @@ struct ikev2_helper_ike_sa {
     struct provider_helper_ikev2_sa_selection selection;
     struct sockaddr_storage peer;
     socklen_t peer_len;
+    bool local_endpoint_ready;
+    struct sockaddr_storage local_endpoint;
+    socklen_t local_endpoint_len;
 };
 
 struct ikev2_helper_ike_sa_table {
@@ -1469,6 +1472,137 @@ ikev2_helper_count_ike_sas_for_source(
     }
 
     return count;
+}
+
+static bool
+ikev2_helper_enable_listener_pktinfo(
+    const struct provider_helper_listener_fd *listener,
+    int fd)
+{
+    if (!listener || fd < 0)
+    {
+        return false;
+    }
+
+    const int one = 1;
+    if (listener->family == AF_INET)
+    {
+#if defined(IP_PKTINFO)
+        return setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &one, sizeof(one)) == 0;
+#else
+        return true;
+#endif
+    }
+
+    if (listener->family == AF_INET6)
+    {
+#if defined(IPV6_RECVPKTINFO)
+        return setsockopt(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &one,
+                          sizeof(one)) == 0;
+#else
+        return true;
+#endif
+    }
+
+    return false;
+}
+
+static void
+ikev2_helper_set_endpoint_port(struct sockaddr_storage *endpoint,
+                               uint16_t port)
+{
+    if (!endpoint)
+    {
+        return;
+    }
+
+    switch (endpoint->ss_family)
+    {
+        case AF_INET:
+            ((struct sockaddr_in *)endpoint)->sin_port = htons(port);
+            break;
+
+        case AF_INET6:
+            ((struct sockaddr_in6 *)endpoint)->sin6_port = htons(port);
+            break;
+    }
+}
+
+static bool
+ikev2_helper_socket_local_endpoint(int fd,
+                                   const struct ikev2_helper_listener *listener,
+                                   struct sockaddr_storage *local,
+                                   socklen_t *local_len)
+{
+    if (fd < 0 || !listener || !local || !local_len)
+    {
+        return false;
+    }
+
+    socklen_t len = sizeof(*local);
+    CLEAR(*local);
+    if (getsockname(fd, (struct sockaddr *)local, &len) != 0)
+    {
+        return false;
+    }
+    ikev2_helper_set_endpoint_port(local,
+                                   (uint16_t)listener->descriptor.local_port);
+    *local_len = len;
+    return true;
+}
+
+static bool
+ikev2_helper_msg_local_endpoint(const struct msghdr *msg,
+                                const struct ikev2_helper_listener *listener,
+                                struct sockaddr_storage *local,
+                                socklen_t *local_len)
+{
+    if (!msg || !listener || !local || !local_len)
+    {
+        return false;
+    }
+
+    for (const struct cmsghdr *cmsg = CMSG_FIRSTHDR(msg); cmsg;
+         cmsg = CMSG_NXTHDR((struct msghdr *)msg, (struct cmsghdr *)cmsg))
+    {
+#if defined(IP_PKTINFO)
+        if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_PKTINFO
+            && cmsg->cmsg_len >= CMSG_LEN(sizeof(struct in_pktinfo)))
+        {
+            const struct in_pktinfo *pktinfo =
+                (const struct in_pktinfo *)CMSG_DATA(cmsg);
+            struct sockaddr_in in;
+            CLEAR(in);
+            in.sin_family = AF_INET;
+            in.sin_port = htons((uint16_t)listener->descriptor.local_port);
+            in.sin_addr = pktinfo->ipi_addr;
+            CLEAR(*local);
+            memcpy(local, &in, sizeof(in));
+            *local_len = sizeof(in);
+            return true;
+        }
+#endif
+
+#if defined(IPV6_PKTINFO)
+        if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_PKTINFO
+            && cmsg->cmsg_len >= CMSG_LEN(sizeof(struct in6_pktinfo)))
+        {
+            const struct in6_pktinfo *pktinfo =
+                (const struct in6_pktinfo *)CMSG_DATA(cmsg);
+            struct sockaddr_in6 in6;
+            CLEAR(in6);
+            in6.sin6_family = AF_INET6;
+            in6.sin6_port = htons((uint16_t)listener->descriptor.local_port);
+            in6.sin6_addr = pktinfo->ipi6_addr;
+            CLEAR(*local);
+            memcpy(local, &in6, sizeof(in6));
+            *local_len = sizeof(in6);
+            return true;
+        }
+#endif
+    }
+
+    return false;
 }
 
 static bool
@@ -3453,6 +3587,9 @@ ikev2_helper_add_ike_sa(struct ikev2_helper_ike_sa_table *table,
                         const struct provider_helper_ikev2_header *header,
                         const struct sockaddr_storage *peer,
                         socklen_t peer_len,
+                        const struct sockaddr_storage *local_endpoint,
+                        socklen_t local_endpoint_len,
+                        bool local_endpoint_ready,
                         const uint8_t *packet,
                         size_t packet_len,
                         const struct provider_helper_ikev2_payload_summary *summary,
@@ -3490,6 +3627,12 @@ ikev2_helper_add_ike_sa(struct ikev2_helper_ike_sa_table *table,
             sa->selection = *selection;
             sa->peer = *peer;
             sa->peer_len = peer_len;
+            sa->local_endpoint_ready = local_endpoint_ready;
+            if (local_endpoint_ready && local_endpoint)
+            {
+                sa->local_endpoint = *local_endpoint;
+                sa->local_endpoint_len = local_endpoint_len;
+            }
             if (!ikev2_helper_store_ike_sa_init_material(sa, packet, packet_len,
                                                          summary))
             {
@@ -4633,9 +4776,27 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE + 1];
     struct sockaddr_storage peer;
     socklen_t peer_len = sizeof(peer);
+    struct sockaddr_storage local_endpoint;
+    socklen_t local_endpoint_len = 0;
+    bool local_endpoint_ready = false;
 
-    const ssize_t n = recvfrom(listener->fd, packet, sizeof(packet), 0,
-                               (struct sockaddr *)&peer, &peer_len);
+    uint8_t control[128];
+    struct iovec iov = {
+        .iov_base = packet,
+        .iov_len = sizeof(packet),
+    };
+    struct msghdr msg;
+    CLEAR(msg);
+    CLEAR(peer);
+    CLEAR(local_endpoint);
+    msg.msg_name = &peer;
+    msg.msg_namelen = peer_len;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof(control);
+
+    const ssize_t n = recvmsg(listener->fd, &msg, 0);
     if (n < 0)
     {
         if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
@@ -4644,6 +4805,13 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
         }
         return;
     }
+    peer_len = msg.msg_namelen;
+    local_endpoint_ready =
+        ikev2_helper_msg_local_endpoint(&msg, listener, &local_endpoint,
+                                        &local_endpoint_len)
+        || ikev2_helper_socket_local_endpoint(listener->fd, listener,
+                                              &local_endpoint,
+                                              &local_endpoint_len);
 
     ++counters->datagrams_rx;
     if ((uint64_t)n > config->max_packet_size || (size_t)n > sizeof(packet))
@@ -4803,7 +4971,9 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 struct ikev2_helper_ike_sa *sa = NULL;
                 const enum ikev2_helper_add_sa_result add_result =
                     ikev2_helper_add_ike_sa(sa_table, listener, &header, &peer,
-                                            peer_len, packet, (size_t)n,
+                                            peer_len, &local_endpoint,
+                                            local_endpoint_len,
+                                            local_endpoint_ready, packet, (size_t)n,
                                             &summary, &selection, &sa);
                 if (add_result == IKEV2_HELPER_ADD_SA_TABLE_FULL)
                 {
@@ -5494,6 +5664,8 @@ ikev2_helper_loop(int fd)
                 if (!configured || listener_count >= SIZE(listeners)
                     || !ikev2_helper_read_listener_fd(fd, &header, &listener,
                                                       &listener_fd, &config)
+                    || !ikev2_helper_enable_listener_pktinfo(&listener,
+                                                             listener_fd)
                     || !ikev2_helper_send_header(fd, PROVIDER_HELPER_MSG_LISTENER_FD_ACK,
                                                  tx_sequence++, header.sequence))
                 {
