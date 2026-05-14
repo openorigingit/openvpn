@@ -2438,6 +2438,89 @@ ikev2_helper_find_xfrm_lease(const struct provider_helper_xfrm_lease *leases,
 }
 
 static bool
+ikev2_helper_xfrm_lease_same_identity(
+    const struct provider_helper_xfrm_lease *a,
+    const struct provider_helper_xfrm_lease *b)
+{
+    return a && b && a->lease_id == b->lease_id
+           && a->provider_session_id == b->provider_session_id
+           && a->policy_revision == b->policy_revision;
+}
+
+static bool
+ikev2_helper_xfrm_lease_equal(const struct provider_helper_xfrm_lease *a,
+                              const struct provider_helper_xfrm_lease *b)
+{
+    return ikev2_helper_xfrm_lease_same_identity(a, b)
+           && a->mark_value == b->mark_value
+           && a->mark_mask == b->mark_mask
+           && a->if_id == b->if_id
+           && a->reqid == b->reqid
+           && a->address_family == b->address_family
+           && a->flags == b->flags;
+}
+
+static bool
+ikev2_helper_store_xfrm_lease(
+    struct provider_helper_xfrm_lease *leases,
+    size_t *lease_count,
+    size_t lease_capacity,
+    const struct provider_helper_xfrm_lease *lease)
+{
+    if (!leases || !lease_count || !lease)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < *lease_count; ++i)
+    {
+        if (ikev2_helper_xfrm_lease_same_identity(&leases[i], lease))
+        {
+            leases[i] = *lease;
+            return true;
+        }
+    }
+
+    if (*lease_count >= lease_capacity)
+    {
+        return false;
+    }
+
+    leases[(*lease_count)++] = *lease;
+    return true;
+}
+
+static bool
+ikev2_helper_delete_xfrm_lease(
+    struct provider_helper_xfrm_lease *leases,
+    size_t *lease_count,
+    const struct provider_helper_xfrm_lease *lease)
+{
+    if (!leases || !lease_count || !lease)
+    {
+        return false;
+    }
+
+    size_t out = 0;
+    for (size_t i = 0; i < *lease_count; ++i)
+    {
+        if (ikev2_helper_xfrm_lease_equal(&leases[i], lease))
+        {
+            CLEAR(leases[i]);
+            continue;
+        }
+        if (out != i)
+        {
+            leases[out] = leases[i];
+            CLEAR(leases[i]);
+        }
+        ++out;
+    }
+    *lease_count = out;
+    return true;
+}
+
+static bool
 ikev2_helper_build_encrypted_notify_response(
     uint8_t *response,
     size_t response_size,
@@ -3311,8 +3394,11 @@ ikev2_helper_loop(int fd)
             case PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL:
             {
                 struct provider_helper_xfrm_lease lease;
-                if (!configured || xfrm_lease_count >= SIZE(xfrm_leases)
+                if (!configured
                     || !ikev2_helper_read_xfrm_lease(fd, &header, &lease)
+                    || !ikev2_helper_store_xfrm_lease(
+                        xfrm_leases, &xfrm_lease_count, SIZE(xfrm_leases),
+                        &lease)
                     || !ikev2_helper_send_header(
                         fd, PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL_ACK,
                         tx_sequence++, header.sequence))
@@ -3320,7 +3406,23 @@ ikev2_helper_loop(int fd)
                     ret = 6;
                     goto done;
                 }
-                xfrm_leases[xfrm_lease_count++] = lease;
+                break;
+            }
+
+            case PROVIDER_HELPER_MSG_XFRM_LEASE_DELETE:
+            {
+                struct provider_helper_xfrm_lease lease;
+                if (!configured
+                    || !ikev2_helper_read_xfrm_lease(fd, &header, &lease)
+                    || !ikev2_helper_delete_xfrm_lease(
+                        xfrm_leases, &xfrm_lease_count, &lease)
+                    || !ikev2_helper_send_header(
+                        fd, PROVIDER_HELPER_MSG_XFRM_LEASE_DELETE_ACK,
+                        tx_sequence++, header.sequence))
+                {
+                    ret = 6;
+                    goto done;
+                }
                 break;
             }
 

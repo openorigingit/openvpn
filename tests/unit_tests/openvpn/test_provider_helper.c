@@ -2959,6 +2959,17 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 5);
 
+    assert_true(provider_helper_supervisor_send_xfrm_lease_delete(
+                    &supervisor, &xfrm_lease, 100));
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 6; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 6);
+
     int response_fd = test_create_udp_sender(0x7f000004u);
     test_send_ikev2_datagram_from(response_fd, port, 0xfeedfacecafebeefull);
     usleep(10000);
@@ -3310,6 +3321,27 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 4);
 
+    const struct provider_helper_xfrm_lease xfrm_lease = {
+        .lease_id = 202,
+        .provider_session_id = 101,
+        .policy_revision = 303,
+        .mark_value = 0x4200,
+        .mark_mask = 0xffff,
+        .if_id = 12,
+        .reqid = 1100,
+        .address_family = AF_INET,
+        .flags = PROVIDER_HELPER_XFRM_LEASE_IPV4,
+    };
+    assert_true(provider_helper_supervisor_send_xfrm_lease(&supervisor, &xfrm_lease,
+                                                           99));
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 5; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 5);
+
     int response_fd = test_create_udp_sender(0x7f000009u);
     const uint64_t initiator_spi = 0x9876543210abcdefull;
     test_send_ikev2_datagram_from(response_fd, port, initiator_spi);
@@ -3354,7 +3386,8 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     assert_true(supervisor.runtime_stats.ike_auth_allow_temp_failure_tx >= 1);
     assert_int_equal(
         supervisor.runtime_stats.ike_auth_allow_temp_failure_failed, 0);
-    assert_true(supervisor.runtime_stats.ike_auth_allow_missing_xfrm_lease >= 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_allow_missing_xfrm_lease,
+                     0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
 
     close(response_fd);

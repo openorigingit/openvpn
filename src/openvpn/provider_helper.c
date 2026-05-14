@@ -378,10 +378,11 @@ provider_helper_supervisor_send_listener_fd(
     return written;
 }
 
-bool
-provider_helper_supervisor_send_xfrm_lease(
+static bool
+provider_helper_supervisor_send_xfrm_lease_msg(
     struct provider_helper_supervisor *supervisor,
     const struct provider_helper_xfrm_lease *lease,
+    uint32_t msg_type,
     uint64_t correlation_id)
 {
     if (!supervisor || supervisor->ipc_fd < 0
@@ -397,7 +398,7 @@ provider_helper_supervisor_send_xfrm_lease(
         .magic = PROVIDER_HELPER_IPC_MAGIC,
         .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
         .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
-        .type = PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL,
+        .type = msg_type,
         .sequence = supervisor->next_tx_sequence++,
         .correlation_id = correlation_id,
         .payload_len = PROVIDER_HELPER_XFRM_LEASE_SIZE,
@@ -415,6 +416,28 @@ provider_helper_supervisor_send_xfrm_lease(
         provider_helper_close_ipc(supervisor);
     }
     return written;
+}
+
+bool
+provider_helper_supervisor_send_xfrm_lease(
+    struct provider_helper_supervisor *supervisor,
+    const struct provider_helper_xfrm_lease *lease,
+    uint64_t correlation_id)
+{
+    return provider_helper_supervisor_send_xfrm_lease_msg(
+        supervisor, lease, PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL,
+        correlation_id);
+}
+
+bool
+provider_helper_supervisor_send_xfrm_lease_delete(
+    struct provider_helper_supervisor *supervisor,
+    const struct provider_helper_xfrm_lease *lease,
+    uint64_t correlation_id)
+{
+    return provider_helper_supervisor_send_xfrm_lease_msg(
+        supervisor, lease, PROVIDER_HELPER_MSG_XFRM_LEASE_DELETE,
+        correlation_id);
 }
 
 bool
@@ -717,6 +740,7 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
 
         case PROVIDER_HELPER_MSG_LISTENER_FD_ACK:
         case PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL_ACK:
+        case PROVIDER_HELPER_MSG_XFRM_LEASE_DELETE_ACK:
             if (supervisor->state != PROVIDER_HELPER_STATE_READY)
             {
                 provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);

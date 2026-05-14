@@ -133,6 +133,8 @@ enum provider_helper_msg_type {
     PROVIDER_HELPER_MSG_STATS,
     PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL,
     PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL_ACK,
+    PROVIDER_HELPER_MSG_XFRM_LEASE_DELETE,
+    PROVIDER_HELPER_MSG_XFRM_LEASE_DELETE_ACK,
     PROVIDER_HELPER_MSG_AUTH_REQUEST,
     PROVIDER_HELPER_MSG_AUTH_RESPONSE,
 };
@@ -639,6 +641,10 @@ bool provider_helper_supervisor_send_listener_fd(
     const struct provider_helper_listener_fd *listener,
     uint64_t correlation_id);
 bool provider_helper_supervisor_send_xfrm_lease(
+    struct provider_helper_supervisor *supervisor,
+    const struct provider_helper_xfrm_lease *lease,
+    uint64_t correlation_id);
+bool provider_helper_supervisor_send_xfrm_lease_delete(
     struct provider_helper_supervisor *supervisor,
     const struct provider_helper_xfrm_lease *lease,
     uint64_t correlation_id);
