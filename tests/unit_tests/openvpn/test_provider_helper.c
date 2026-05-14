@@ -5919,6 +5919,67 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
 
+    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    assert_true(provider_helper_supervisor_send_xfrm_lease(&supervisor, &xfrm_lease,
+                                                           109));
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+
+    const uint64_t delete_initiator_spi = 0x7766554433221100ull;
+    test_send_ikev2_datagram_from(response_fd, port, delete_initiator_spi);
+    usleep(10000);
+    assert_true(test_recv_ikev2_sa_init_response_material(
+                    response_fd, delete_initiator_spi, &sa_init_material) != 0);
+    test_send_ikev2_encrypted_ike_auth_datagram_from(
+        response_fd, natt_port, delete_initiator_spi, &sa_init_material, true,
+        false, cert_der, cert_der_len);
+    for (int i = 0; i < 100 && cb_state.calls < 2; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    test_recv_ikev2_encrypted_notify_response(
+        response_fd, delete_initiator_spi, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
+
+    test_send_ikev2_encrypted_create_child_from(
+        response_fd, natt_port, delete_initiator_spi, &sa_init_material, true, 2);
+    usleep(10000);
+    (void)test_recv_ikev2_encrypted_child_sa_response(
+        response_fd, delete_initiator_spi, &sa_init_material, 2, &xfrm_lease,
+        true);
+    test_send_ikev2_encrypted_ike_delete_from(
+        response_fd, natt_port, delete_initiator_spi, &sa_init_material, true, 3);
+    usleep(10000);
+    test_recv_ikev2_encrypted_empty_exchange_response(
+        response_fd, delete_initiator_spi, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 3, true);
+
+    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 110);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.runtime_stats.ike_informational_delete_rx, 2);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_informational_delete_response_tx, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 3);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
+
     close(response_fd);
     close(migrated_fd);
     close(listener_fd);

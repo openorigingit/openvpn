@@ -5672,7 +5672,19 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     if (ikev2_helper_is_ike_sa_delete_request(
                             plaintext, plaintext_len, &inner_summary))
                     {
+                        const bool decrement_active = sa_table->active > 0;
                         ++counters->ike_informational_delete_rx;
+                        if (!ikev2_helper_delete_child_sa_xfrm(&sa->child_sa,
+                                                               counters))
+                        {
+                            ++counters
+                                  ->ike_informational_delete_response_failed;
+                            ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                            counters->ike_sa_active = sa_table->active;
+                            counters->ike_child_sa_scaffold_active =
+                                ikev2_helper_count_child_sa_scaffolds(sa_table);
+                            return;
+                        }
                         if (ikev2_helper_send_cached_encrypted_empty_response(
                                 listener, sa, header.exchange_type,
                                 header.message_id))
@@ -5686,8 +5698,14 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         }
                         sa->message_id = header.message_id;
                         ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
-                        ikev2_helper_clear_ike_sa(sa_table, sa, counters);
+                        ikev2_helper_secure_zero(sa, sizeof(*sa));
+                        if (decrement_active)
+                        {
+                            --sa_table->active;
+                        }
                         counters->ike_sa_active = sa_table->active;
+                        counters->ike_child_sa_scaffold_active =
+                            ikev2_helper_count_child_sa_scaffolds(sa_table);
                         return;
                     }
                     if (ikev2_helper_is_child_sa_delete_request(
