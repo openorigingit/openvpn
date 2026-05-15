@@ -27,6 +27,28 @@
 
 struct status_output;
 
+struct provider_session_xfrm_lease {
+    uint64_t lease_id;
+    uint64_t provider_session_id;
+    uint64_t policy_revision;
+    uint32_t mark_value;
+    uint32_t mark_mask;
+    uint32_t if_id;
+    uint32_t reqid;
+    uint32_t address_family;
+    uint32_t flags;
+    uint32_t local_ts_start_ipv4;
+    uint32_t local_ts_end_ipv4;
+    uint32_t local_ts_start_port;
+    uint32_t local_ts_end_port;
+    uint32_t remote_ts_start_ipv4;
+    uint32_t remote_ts_end_ipv4;
+    uint32_t remote_ts_start_port;
+    uint32_t remote_ts_end_port;
+    uint32_t ip_protocol_id;
+    uint32_t reserved;
+};
+
 enum provider_session_state {
     PROVIDER_SESSION_STATE_UNDEF = 0,
     PROVIDER_SESSION_STATE_NEW,
@@ -52,6 +74,8 @@ struct provider_session {
 
     uint64_t xfrm_lease_id;
     uint64_t policy_revision;
+    bool has_xfrm_lease;
+    struct provider_session_xfrm_lease xfrm_lease;
 
     counter_type bytes_received;
     counter_type bytes_sent;
@@ -103,6 +127,10 @@ struct provider_session *provider_session_create(struct provider_session_table *
                                                  const struct provider_session_create *create);
 bool provider_session_update(struct provider_session *session,
                              const struct provider_session_update *update);
+bool provider_session_set_xfrm_lease(struct provider_session *session,
+                                     const struct provider_session_xfrm_lease *lease);
+bool provider_session_get_xfrm_lease(const struct provider_session *session,
+                                     struct provider_session_xfrm_lease *lease);
 struct provider_session *provider_session_lookup_by_cid(struct provider_session_table *table,
                                                         unsigned long cid);
 bool provider_session_kill_by_cid(struct provider_session_table *table,

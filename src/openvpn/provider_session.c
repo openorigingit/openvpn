@@ -246,6 +246,50 @@ provider_session_update(struct provider_session *session,
     return true;
 }
 
+bool
+provider_session_set_xfrm_lease(struct provider_session *session,
+                                const struct provider_session_xfrm_lease *lease)
+{
+    if (!session || !lease || session->halt)
+    {
+        return false;
+    }
+
+    if (!lease->lease_id || !lease->provider_session_id || !lease->policy_revision
+        || !lease->mark_mask || !lease->reqid || !lease->address_family
+        || !lease->flags || lease->provider_session_id != session->id
+        || lease->reserved)
+    {
+        return false;
+    }
+
+    if ((session->xfrm_lease_id && session->xfrm_lease_id != lease->lease_id)
+        || (session->policy_revision
+            && session->policy_revision != lease->policy_revision))
+    {
+        return false;
+    }
+
+    session->xfrm_lease = *lease;
+    session->has_xfrm_lease = true;
+    session->xfrm_lease_id = lease->lease_id;
+    session->policy_revision = lease->policy_revision;
+    return true;
+}
+
+bool
+provider_session_get_xfrm_lease(const struct provider_session *session,
+                                struct provider_session_xfrm_lease *lease)
+{
+    if (!session || !lease || !session->has_xfrm_lease)
+    {
+        return false;
+    }
+
+    *lease = session->xfrm_lease;
+    return true;
+}
+
 struct provider_session *
 provider_session_lookup_by_cid(struct provider_session_table *table, unsigned long cid)
 {

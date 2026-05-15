@@ -68,6 +68,31 @@ default_session_create(void)
     };
 }
 
+static struct provider_session_xfrm_lease
+default_xfrm_lease(uint64_t provider_session_id)
+{
+    return (struct provider_session_xfrm_lease) {
+        .lease_id = 42,
+        .provider_session_id = provider_session_id,
+        .policy_revision = 7,
+        .mark_value = 0x1000002u,
+        .mark_mask = 0xffffffffu,
+        .if_id = 9,
+        .reqid = 10,
+        .address_family = AF_INET,
+        .flags = 1,
+        .local_ts_start_ipv4 = 0x0a580001u,
+        .local_ts_end_ipv4 = 0x0a580001u,
+        .local_ts_start_port = 443,
+        .local_ts_end_port = 443,
+        .remote_ts_start_ipv4 = 0x0a580002u,
+        .remote_ts_end_ipv4 = 0x0a580002u,
+        .remote_ts_start_port = 0,
+        .remote_ts_end_port = 65535,
+        .ip_protocol_id = 6,
+    };
+}
+
 static void
 test_provider_session_create_lookup_update(void **state)
 {
@@ -111,6 +136,77 @@ test_provider_session_create_lookup_update(void **state)
     assert_int_equal(session->bytes_sent, 22);
     assert_int_equal(session->packets_received, 3);
     assert_int_equal(session->packets_sent, 4);
+
+    provider_session_table_free(&table);
+}
+
+static void
+test_provider_session_xfrm_lease_storage(void **state)
+{
+    (void)state;
+
+    struct provider_session_table table;
+    provider_session_table_init(&table);
+
+    struct provider_session_create create = default_session_create();
+    struct provider_session *session = provider_session_create(&table, &create);
+    assert_non_null(session);
+
+    struct provider_session_xfrm_lease output;
+    assert_false(provider_session_get_xfrm_lease(session, &output));
+
+    struct provider_session_xfrm_lease input = default_xfrm_lease(session->id);
+    assert_true(provider_session_set_xfrm_lease(session, &input));
+    assert_true(provider_session_get_xfrm_lease(session, &output));
+    assert_memory_equal(&output, &input, sizeof(output));
+    assert_int_equal(session->xfrm_lease_id, input.lease_id);
+    assert_int_equal(session->policy_revision, input.policy_revision);
+
+    input.mark_value = 0x1000003u;
+    assert_true(provider_session_get_xfrm_lease(session, &output));
+    assert_int_equal(output.mark_value, 0x1000002u);
+
+    assert_true(provider_session_kill_by_cid(&table, session->management_cid,
+                                             "test cleanup"));
+    assert_true(provider_session_get_xfrm_lease(session, &output));
+    assert_int_equal(output.lease_id, 42);
+
+    provider_session_table_free(&table);
+}
+
+static void
+test_provider_session_xfrm_lease_validation(void **state)
+{
+    (void)state;
+
+    struct provider_session_table table;
+    provider_session_table_init(&table);
+
+    struct provider_session_create create = default_session_create();
+    struct provider_session *session = provider_session_create(&table, &create);
+    assert_non_null(session);
+
+    struct provider_session_xfrm_lease lease = default_xfrm_lease(session->id);
+    lease.provider_session_id = session->id + 1;
+    assert_false(provider_session_set_xfrm_lease(session, &lease));
+
+    lease = default_xfrm_lease(session->id);
+    lease.lease_id = 43;
+    assert_false(provider_session_set_xfrm_lease(session, &lease));
+
+    lease = default_xfrm_lease(session->id);
+    lease.policy_revision = 8;
+    assert_false(provider_session_set_xfrm_lease(session, &lease));
+
+    lease = default_xfrm_lease(session->id);
+    lease.mark_mask = 0;
+    assert_false(provider_session_set_xfrm_lease(session, &lease));
+
+    lease = default_xfrm_lease(session->id);
+    lease.reserved = 1;
+    assert_false(provider_session_set_xfrm_lease(session, &lease));
+
+    assert_false(session->has_xfrm_lease);
 
     provider_session_table_free(&table);
 }
@@ -237,6 +333,8 @@ main(void)
 {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_provider_session_create_lookup_update),
+        cmocka_unit_test(test_provider_session_xfrm_lease_storage),
+        cmocka_unit_test(test_provider_session_xfrm_lease_validation),
         cmocka_unit_test(test_provider_session_rejects_duplicate_cid_and_kill),
         cmocka_unit_test(test_provider_session_delete_by_cid),
         cmocka_unit_test(test_provider_session_status_output),
