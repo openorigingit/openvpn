@@ -6763,6 +6763,10 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     CLEAR(cb_state);
     provider_helper_supervisor_set_auth_callback(
         &supervisor, test_provider_helper_auth_cb, &cb_state);
+    struct test_provider_helper_server_sign_cb_state sign_state;
+    CLEAR(sign_state);
+    provider_helper_supervisor_set_server_sign_callback(
+        &supervisor, test_provider_helper_server_sign_cb, &sign_state);
     supervisor.runtime_config.cookie_threshold = 3;
     supervisor.runtime_config.max_half_open_sas = 4;
     supervisor.runtime_config.max_half_open_sas_per_source = 2;
@@ -7425,6 +7429,10 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     cb_state.allow = true;
     provider_helper_supervisor_set_auth_callback(
         &supervisor, test_provider_helper_auth_cb, &cb_state);
+    struct test_provider_helper_server_sign_cb_state sign_state;
+    CLEAR(sign_state);
+    provider_helper_supervisor_set_server_sign_callback(
+        &supervisor, test_provider_helper_server_sign_cb, &sign_state);
     struct test_provider_helper_session_close_cb_state close_state;
     CLEAR(close_state);
     provider_helper_supervisor_set_session_close_callback(
@@ -7740,6 +7748,10 @@ test_provider_helper_spawn_ikev2_auth_allow_fails_closed(void **state)
     cb_state.allow = true;
     provider_helper_supervisor_set_auth_callback(
         &supervisor, test_provider_helper_auth_cb, &cb_state);
+    struct test_provider_helper_server_sign_cb_state sign_state;
+    CLEAR(sign_state);
+    provider_helper_supervisor_set_server_sign_callback(
+        &supervisor, test_provider_helper_server_sign_cb, &sign_state);
     struct test_provider_helper_session_close_cb_state close_state;
     CLEAR(close_state);
     provider_helper_supervisor_set_session_close_callback(
@@ -7918,6 +7930,10 @@ test_provider_helper_spawn_ikev2_auth_request_ipc_loss_fails_closed(
     cb_state.allow = true;
     provider_helper_supervisor_set_auth_callback(
         &supervisor, test_provider_helper_auth_cb, &cb_state);
+    struct test_provider_helper_server_sign_cb_state sign_state;
+    CLEAR(sign_state);
+    provider_helper_supervisor_set_server_sign_callback(
+        &supervisor, test_provider_helper_server_sign_cb, &sign_state);
 
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
@@ -8037,6 +8053,10 @@ test_provider_helper_spawn_ikev2_lease_deadline_fails_closed(void **state)
     cb_state.allow = true;
     provider_helper_supervisor_set_auth_callback(
         &supervisor, test_provider_helper_auth_cb, &cb_state);
+    struct test_provider_helper_server_sign_cb_state sign_state;
+    CLEAR(sign_state);
+    provider_helper_supervisor_set_server_sign_callback(
+        &supervisor, test_provider_helper_server_sign_cb, &sign_state);
     struct test_provider_helper_session_close_cb_state close_state;
     CLEAR(close_state);
     provider_helper_supervisor_set_session_close_callback(
@@ -8216,6 +8236,10 @@ test_provider_helper_spawn_ikev2_rekey_fails_closed(void **state)
     cb_state.allow = true;
     provider_helper_supervisor_set_auth_callback(
         &supervisor, test_provider_helper_auth_cb, &cb_state);
+    struct test_provider_helper_server_sign_cb_state sign_state;
+    CLEAR(sign_state);
+    provider_helper_supervisor_set_server_sign_callback(
+        &supervisor, test_provider_helper_server_sign_cb, &sign_state);
     struct test_provider_helper_session_close_cb_state close_state;
     CLEAR(close_state);
     provider_helper_supervisor_set_session_close_callback(
@@ -8422,6 +8446,10 @@ test_provider_helper_spawn_ikev2_xfrm_install_fails_closed(void **state)
     cb_state.allow = true;
     provider_helper_supervisor_set_auth_callback(
         &supervisor, test_provider_helper_auth_cb, &cb_state);
+    struct test_provider_helper_server_sign_cb_state sign_state;
+    CLEAR(sign_state);
+    provider_helper_supervisor_set_server_sign_callback(
+        &supervisor, test_provider_helper_server_sign_cb, &sign_state);
     struct test_provider_helper_session_close_cb_state close_state;
     CLEAR(close_state);
     provider_helper_supervisor_set_session_close_callback(
