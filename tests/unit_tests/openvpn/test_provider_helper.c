@@ -4394,16 +4394,9 @@ test_provider_helper_spawn_rejects_invalid_runtime_config(void **state)
     supervisor.runtime_config.max_half_open_sas = 0;
 
     char *const argv[] = { (char *)noop_helper_path, NULL };
-    assert_true(provider_helper_supervisor_spawn(&supervisor, noop_helper_path, argv));
-    assert_true(supervisor.pid > 0);
-
-    for (int i = 0; i < 100 && (supervisor.pid > 0 || supervisor.ipc_fd >= 0); ++i)
-    {
-        provider_helper_process_event(&supervisor);
-        usleep(10000);
-    }
-
-    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_FAILED);
+    assert_false(provider_helper_supervisor_spawn(&supervisor, noop_helper_path,
+                                                  argv));
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_DISABLED);
     assert_int_equal(supervisor.pid, 0);
     assert_int_equal(supervisor.ipc_fd, -1);
     provider_helper_supervisor_free(&supervisor);

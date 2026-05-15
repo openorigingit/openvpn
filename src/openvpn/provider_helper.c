@@ -726,6 +726,13 @@ provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
         return false;
     }
 #endif
+    char reason[128];
+    if (!provider_helper_runtime_config_valid(&supervisor->runtime_config, reason,
+                                              sizeof(reason)))
+    {
+        msg(M_WARN, "provider-helper: invalid runtime config: %s", reason);
+        return false;
+    }
 
     int fds[2] = { -1, -1 };
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0)
