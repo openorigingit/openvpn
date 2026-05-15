@@ -195,6 +195,7 @@ struct multi_context
         provider_helper_listeners[MULTI_IKEV2_HELPER_LISTENER_COUNT];
     size_t provider_helper_listener_count;
     bool provider_helper_listener_fds_sent;
+    bool provider_helper_server_auth_config_sent;
     struct provider_session_table provider_sessions;
 
 #ifdef ENABLE_MANAGEMENT

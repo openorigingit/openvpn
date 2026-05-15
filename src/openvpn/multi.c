@@ -53,6 +53,12 @@
 
 #include "crypto_backend.h"
 #include "ssl_util.h"
+#ifdef ENABLE_CRYPTO_OPENSSL
+#include "openssl_compat.h"
+#include <openssl/evp.h>
+#include <openssl/rsa.h>
+#include <openssl/x509.h>
+#endif
 #include "dco.h"
 #include "reflect_filter.h"
 
@@ -64,6 +70,7 @@
 #define MULTI_IKEV2_HELPER_PROVIDER_NAME "ikev2"
 #define MULTI_IKEV2_HELPER_XFRM_ID_BASE 0x0f000000u
 #define MULTI_IKEV2_HELPER_XFRM_ID_MAX  0x00ffffffu
+#define MULTI_IKEV2_HELPER_SERVER_AUTH_CONFIG_REVISION 1u
 
 /*#define MULTI_DEBUG_EVENT_LOOP*/
 
@@ -298,6 +305,7 @@ multi_ikev2_helper_listener_fds_close(struct multi_context *m)
 #endif
     m->provider_helper_listener_count = 0;
     m->provider_helper_listener_fds_sent = false;
+    m->provider_helper_server_auth_config_sent = false;
     CLEAR(m->provider_helper_listeners);
 }
 
@@ -398,6 +406,370 @@ multi_open_ikev2_helper_listeners(struct multi_context *m, bool fatal)
 }
 
 static bool
+multi_ikev2_helper_server_sign_failure(
+    const struct provider_helper_server_sign_request *request,
+    struct provider_helper_server_sign_response *response)
+{
+    if (!request || !response)
+    {
+        return false;
+    }
+
+    CLEAR(*response);
+    response->request_id = request->request_id;
+    response->config_revision = request->config_revision;
+    response->status = PROVIDER_HELPER_SERVER_SIGN_FAILED;
+    response->sigalg = request->sigalg;
+    return provider_helper_server_sign_response_valid(response, NULL, 0);
+}
+
+#ifdef ENABLE_CRYPTO_OPENSSL
+static SSL_CTX *
+multi_ikev2_helper_server_ssl_ctx(const struct multi_context *m)
+{
+    if (!m || !m->top.c1.ks.ssl_ctx)
+    {
+        return NULL;
+    }
+    return m->top.c1.ks.ssl_ctx->ctx;
+}
+
+static bool
+multi_ikev2_helper_pkey_is_rsa(EVP_PKEY *pkey)
+{
+    if (!pkey)
+    {
+        return false;
+    }
+
+    const int key_id = EVP_PKEY_id(pkey);
+    if (key_id == EVP_PKEY_RSA)
+    {
+        return true;
+    }
+#ifdef EVP_PKEY_RSA_PSS
+    if (key_id == EVP_PKEY_RSA_PSS)
+    {
+        return true;
+    }
+#endif
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L && !defined(LIBRESSL_VERSION_NUMBER)
+    return EVP_PKEY_is_a(pkey, "RSA") || EVP_PKEY_is_a(pkey, "RSA-PSS");
+#else
+    return false;
+#endif
+}
+
+static bool
+multi_ikev2_helper_pkey_is_ec_p256(EVP_PKEY *pkey)
+{
+#ifdef OPENSSL_NO_EC
+    (void)pkey;
+    return false;
+#else
+    if (!pkey)
+    {
+        return false;
+    }
+
+    const int key_id = EVP_PKEY_id(pkey);
+    if (key_id != EVP_PKEY_EC)
+    {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L && !defined(LIBRESSL_VERSION_NUMBER)
+        if (!EVP_PKEY_is_a(pkey, "EC"))
+        {
+            return false;
+        }
+#else
+        return false;
+#endif
+    }
+
+    char group_name[64];
+    size_t group_name_len = 0;
+    if (!EVP_PKEY_get_group_name(pkey, group_name, sizeof(group_name),
+                                 &group_name_len))
+    {
+        return false;
+    }
+    return streq(group_name, "prime256v1")
+           || streq(group_name, "secp256r1")
+           || streq(group_name, "P-256");
+#endif
+}
+
+static uint32_t
+multi_ikev2_helper_server_sigalgs(EVP_PKEY *pkey)
+{
+    if (multi_ikev2_helper_pkey_is_ec_p256(pkey))
+    {
+        return PROVIDER_HELPER_SERVER_AUTH_SIGALG_ECDSA_P256_SHA256;
+    }
+    if (multi_ikev2_helper_pkey_is_rsa(pkey))
+    {
+        return PROVIDER_HELPER_SERVER_AUTH_SIGALG_RSA_PSS_SHA256;
+    }
+    return 0;
+}
+
+static bool
+multi_ikev2_helper_pkey_supports_sigalg(EVP_PKEY *pkey, uint32_t sigalg)
+{
+    switch (sigalg)
+    {
+        case PROVIDER_HELPER_SERVER_AUTH_SIGALG_RSA_PSS_SHA256:
+            return multi_ikev2_helper_pkey_is_rsa(pkey);
+
+        case PROVIDER_HELPER_SERVER_AUTH_SIGALG_ECDSA_P256_SHA256:
+            return multi_ikev2_helper_pkey_is_ec_p256(pkey);
+
+        default:
+            return false;
+    }
+}
+
+static bool
+multi_ikev2_helper_copy_server_certificate(
+    SSL_CTX *ssl_ctx,
+    struct provider_helper_server_auth_config *config)
+{
+    if (!ssl_ctx || !config)
+    {
+        return false;
+    }
+
+    X509 *cert = SSL_CTX_get0_certificate(ssl_ctx);
+    if (!cert)
+    {
+        msg(M_WARN, "IKEv2 helper server auth config has no server certificate");
+        return false;
+    }
+
+    const int cert_der_len = i2d_X509(cert, NULL);
+    if (cert_der_len <= 0
+        || (size_t)cert_der_len > sizeof(config->cert_chain))
+    {
+        msg(M_WARN, "IKEv2 helper server certificate is outside IPC bounds");
+        return false;
+    }
+
+    unsigned char *pos = config->cert_chain;
+    if (i2d_X509(cert, &pos) != cert_der_len)
+    {
+        msg(M_WARN, "IKEv2 helper server certificate DER encoding failed");
+        return false;
+    }
+
+    config->cert_chain_len = (uint32_t)cert_der_len;
+    return true;
+}
+
+static bool
+multi_ikev2_helper_build_server_auth_config(
+    const struct multi_context *m,
+    struct provider_helper_server_auth_config *config)
+{
+    if (!m || !config)
+    {
+        return false;
+    }
+
+    CLEAR(*config);
+    SSL_CTX *ssl_ctx = multi_ikev2_helper_server_ssl_ctx(m);
+    EVP_PKEY *pkey = ssl_ctx ? SSL_CTX_get0_privatekey(ssl_ctx) : NULL;
+    const char *server_id = m->top.options.ikev2_helper_server_id;
+    const size_t server_id_len = server_id ? strlen(server_id) : 0;
+
+    if (!server_id_len || server_id_len >= sizeof(config->server_id))
+    {
+        msg(M_WARN, "IKEv2 helper server identity is missing or too long");
+        return false;
+    }
+    if (!pkey)
+    {
+        msg(M_WARN, "IKEv2 helper server auth config has no private key");
+        return false;
+    }
+
+    config->config_revision = MULTI_IKEV2_HELPER_SERVER_AUTH_CONFIG_REVISION;
+    config->ikev2_id_type = PROVIDER_HELPER_IKEV2_ID_FQDN;
+    config->server_id_len = (uint32_t)server_id_len;
+    memcpy(config->server_id, server_id, server_id_len);
+    config->allowed_sigalgs = multi_ikev2_helper_server_sigalgs(pkey);
+    if (!config->allowed_sigalgs)
+    {
+        msg(M_WARN, "IKEv2 helper server key cannot produce a supported signature");
+        return false;
+    }
+    if (!multi_ikev2_helper_copy_server_certificate(ssl_ctx, config))
+    {
+        return false;
+    }
+
+    char reason[128];
+    if (!provider_helper_server_auth_config_valid(config, reason, sizeof(reason)))
+    {
+        msg(M_WARN, "IKEv2 helper server auth config invalid: %s", reason);
+        return false;
+    }
+    return true;
+}
+
+static bool
+multi_ikev2_helper_configure_rsa_pss(EVP_PKEY_CTX *pctx)
+{
+    if (!pctx)
+    {
+        return false;
+    }
+
+    const int saltlen =
+#ifdef RSA_PSS_SALTLEN_DIGEST
+        RSA_PSS_SALTLEN_DIGEST;
+#else
+        -1;
+#endif
+
+    return EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING) > 0
+           && EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, saltlen) > 0
+           && EVP_PKEY_CTX_set_rsa_mgf1_md(pctx, EVP_sha256()) > 0;
+}
+
+static bool
+multi_ikev2_helper_sign_server_auth(
+    EVP_PKEY *pkey,
+    const struct provider_helper_server_sign_request *request,
+    struct provider_helper_server_sign_response *response)
+{
+    if (!pkey || !request || !response
+        || !multi_ikev2_helper_pkey_supports_sigalg(pkey, request->sigalg))
+    {
+        return false;
+    }
+
+    EVP_MD_CTX *md_ctx = EVP_MD_CTX_new();
+    if (!md_ctx)
+    {
+        return false;
+    }
+
+    EVP_PKEY_CTX *pkey_ctx = NULL;
+    bool ok = EVP_DigestSignInit(md_ctx, &pkey_ctx, EVP_sha256(), NULL, pkey)
+              == 1;
+    if (ok
+        && request->sigalg
+               == PROVIDER_HELPER_SERVER_AUTH_SIGALG_RSA_PSS_SHA256)
+    {
+        ok = multi_ikev2_helper_configure_rsa_pss(pkey_ctx);
+    }
+
+    size_t signature_len = 0;
+    if (ok)
+    {
+        ok = EVP_DigestSign(md_ctx, NULL, &signature_len,
+                            request->transcript, request->transcript_len)
+             == 1;
+    }
+    if (ok && signature_len > sizeof(response->signature))
+    {
+        ok = false;
+    }
+    if (ok)
+    {
+        ok = EVP_DigestSign(md_ctx, response->signature, &signature_len,
+                            request->transcript, request->transcript_len)
+             == 1;
+    }
+    EVP_MD_CTX_free(md_ctx);
+
+    if (!ok)
+    {
+        secure_memzero(response->signature, sizeof(response->signature));
+        response->signature_len = 0;
+        return false;
+    }
+
+    response->signature_len = (uint32_t)signature_len;
+    return true;
+}
+#endif /* ENABLE_CRYPTO_OPENSSL */
+
+static bool
+multi_ikev2_helper_server_sign_request(
+    void *arg,
+    const struct provider_helper_server_sign_request *request,
+    struct provider_helper_server_sign_response *response)
+{
+    struct multi_context *m = arg;
+
+    if (!m || !request || !response)
+    {
+        return false;
+    }
+
+    if (!provider_helper_server_sign_request_valid(request, NULL, 0)
+        || request->config_revision
+               != MULTI_IKEV2_HELPER_SERVER_AUTH_CONFIG_REVISION)
+    {
+        return multi_ikev2_helper_server_sign_failure(request, response);
+    }
+
+    CLEAR(*response);
+    response->request_id = request->request_id;
+    response->config_revision = request->config_revision;
+    response->status = PROVIDER_HELPER_SERVER_SIGN_OK;
+    response->sigalg = request->sigalg;
+
+#ifdef ENABLE_CRYPTO_OPENSSL
+    SSL_CTX *ssl_ctx = multi_ikev2_helper_server_ssl_ctx(m);
+    EVP_PKEY *pkey = ssl_ctx ? SSL_CTX_get0_privatekey(ssl_ctx) : NULL;
+    if (multi_ikev2_helper_sign_server_auth(pkey, request, response)
+        && provider_helper_server_sign_response_valid(response, NULL, 0))
+    {
+        return true;
+    }
+
+    secure_memzero(response, sizeof(*response));
+#endif
+    return multi_ikev2_helper_server_sign_failure(request, response);
+}
+
+static bool
+multi_send_ikev2_helper_server_auth_config(struct multi_context *m)
+{
+    if (!m || m->provider_helper_server_auth_config_sent
+        || m->provider_helper.state != PROVIDER_HELPER_STATE_READY)
+    {
+        return true;
+    }
+
+#ifndef ENABLE_CRYPTO_OPENSSL
+    msg(M_WARN, "IKEv2 helper server auth requires the OpenSSL TLS backend");
+    return false;
+#else
+    struct provider_helper_server_auth_config config;
+    if (!multi_ikev2_helper_build_server_auth_config(m, &config))
+    {
+        secure_memzero(&config, sizeof(config));
+        return false;
+    }
+
+    const bool sent = provider_helper_supervisor_send_server_auth_config(
+        &m->provider_helper, &config, config.config_revision);
+    secure_memzero(&config, sizeof(config));
+    if (!sent)
+    {
+        msg(M_WARN, "IKEv2 helper server auth config handoff failed");
+        return false;
+    }
+
+    m->provider_helper_server_auth_config_sent = true;
+    msg(M_INFO, "IKEv2 helper server auth config handed off");
+    return true;
+#endif
+}
+
+static bool
 multi_send_ikev2_helper_listener_fds(struct multi_context *m)
 {
 #ifdef _WIN32
@@ -412,6 +784,10 @@ multi_send_ikev2_helper_listener_fds(struct multi_context *m)
     if (m->provider_helper_listener_count != MULTI_IKEV2_HELPER_LISTENER_COUNT)
     {
         msg(M_WARN, "IKEv2 helper listener fds are not initialized");
+        return false;
+    }
+    if (!multi_send_ikev2_helper_server_auth_config(m))
+    {
         return false;
     }
 
@@ -1008,6 +1384,8 @@ multi_spawn_ikev2_helper(struct context *t, bool fatal)
         &m->provider_helper, multi_ikev2_helper_session_close, m);
     provider_helper_supervisor_set_session_update_callback(
         &m->provider_helper, multi_ikev2_helper_session_update, m);
+    provider_helper_supervisor_set_server_sign_callback(
+        &m->provider_helper, multi_ikev2_helper_server_sign_request, m);
     if (t->options.ikev2_helper_apply_xfrm)
     {
         m->provider_helper.runtime_config.flags |= PROVIDER_HELPER_CONFIG_APPLY_XFRM;
@@ -1025,6 +1403,7 @@ multi_spawn_ikev2_helper(struct context *t, bool fatal)
         return false;
     }
     m->provider_helper_listener_fds_sent = false;
+    m->provider_helper_server_auth_config_sent = false;
     msg(M_INFO, "IKEv2 helper starting: %s", helper_path);
     return true;
 #endif

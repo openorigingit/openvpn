@@ -476,6 +476,7 @@ struct options
     unsigned int server_flags;
 
     const char *ikev2_helper_path;
+    const char *ikev2_helper_server_id;
     bool ikev2_helper_apply_xfrm;
     struct provider_policy_fingerprint_list ikev2_helper_allowed_fingerprints;
 
