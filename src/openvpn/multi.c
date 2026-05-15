@@ -475,6 +475,33 @@ multi_ikev2_helper_copy_auth_field(char *dst, size_t dst_size,
     return true;
 }
 
+#ifdef ENABLE_MANAGEMENT
+static void
+multi_ikev2_helper_copy_xfrm_lease(struct provider_helper_xfrm_lease *dst,
+                                   const struct provider_session_xfrm_lease *src)
+{
+    CLEAR(*dst);
+    dst->lease_id = src->lease_id;
+    dst->provider_session_id = src->provider_session_id;
+    dst->policy_revision = src->policy_revision;
+    dst->mark_value = src->mark_value;
+    dst->mark_mask = src->mark_mask;
+    dst->if_id = src->if_id;
+    dst->reqid = src->reqid;
+    dst->address_family = src->address_family;
+    dst->flags = src->flags;
+    dst->local_ts_start_ipv4 = src->local_ts_start_ipv4;
+    dst->local_ts_end_ipv4 = src->local_ts_end_ipv4;
+    dst->local_ts_start_port = src->local_ts_start_port;
+    dst->local_ts_end_port = src->local_ts_end_port;
+    dst->remote_ts_start_ipv4 = src->remote_ts_start_ipv4;
+    dst->remote_ts_end_ipv4 = src->remote_ts_end_ipv4;
+    dst->remote_ts_start_port = src->remote_ts_start_port;
+    dst->remote_ts_end_port = src->remote_ts_end_port;
+    dst->ip_protocol_id = src->ip_protocol_id;
+}
+#endif
+
 static bool
 multi_ikev2_helper_auth_request(void *arg,
                                 const struct provider_helper_auth_request *request,
@@ -4346,6 +4373,28 @@ management_kill_by_cid(void *arg, const unsigned long cid, const char *kill_msg)
     }
     else
     {
+        struct provider_session *session =
+            provider_session_lookup_by_cid(&m->provider_sessions, cid);
+        if (!session)
+        {
+            return false;
+        }
+
+        struct provider_session_xfrm_lease session_lease;
+        if (provider_session_get_xfrm_lease(session, &session_lease))
+        {
+            struct provider_helper_xfrm_lease helper_lease;
+            multi_ikev2_helper_copy_xfrm_lease(&helper_lease, &session_lease);
+            if (!provider_helper_supervisor_send_xfrm_lease_delete(
+                    &m->provider_helper, &helper_lease, session_lease.lease_id))
+            {
+                msg(D_MULTI_ERRORS,
+                    "MANAGEMENT: provider session CID %lu XFRM lease delete failed",
+                    cid);
+                return false;
+            }
+        }
+
         return provider_session_kill_by_cid(&m->provider_sessions, cid, kill_msg);
     }
 }
