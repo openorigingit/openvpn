@@ -321,6 +321,7 @@ provider_helper_print_status_counters(
         { "datagrams_malformed", stats->datagrams_malformed },
         { "datagrams_oversize", stats->datagrams_oversize },
         { "xfrm_leases_active", stats->xfrm_leases_active },
+        { "xfrm_leases_stale", stats->xfrm_leases_stale },
         { "xfrm_lease_installed", stats->xfrm_lease_installed },
         { "xfrm_lease_deleted", stats->xfrm_lease_deleted },
         { "ike_sa_active", stats->ike_sa_active },

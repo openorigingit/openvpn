@@ -441,6 +441,7 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .datagrams_malformed = 2,
         .datagrams_oversize = 1,
         .xfrm_leases_active = 51,
+        .xfrm_leases_stale = 98,
         .xfrm_lease_installed = 52,
         .xfrm_lease_replaced = 53,
         .xfrm_lease_deleted = 54,
@@ -548,6 +549,7 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
     assert_int_equal(output.datagrams_malformed, input.datagrams_malformed);
     assert_int_equal(output.datagrams_oversize, input.datagrams_oversize);
     assert_int_equal(output.xfrm_leases_active, input.xfrm_leases_active);
+    assert_int_equal(output.xfrm_leases_stale, input.xfrm_leases_stale);
     assert_int_equal(output.xfrm_lease_installed, input.xfrm_lease_installed);
     assert_int_equal(output.xfrm_lease_replaced, input.xfrm_lease_replaced);
     assert_int_equal(output.xfrm_lease_deleted, input.xfrm_lease_deleted);
@@ -897,6 +899,7 @@ test_provider_helper_status_output(void **state)
     supervisor.pid = 1234;
 #endif
     supervisor.runtime_stats.datagrams_rx = 11;
+    supervisor.runtime_stats.xfrm_leases_stale = 5;
     supervisor.runtime_stats.ike_sa_active = 3;
     supervisor.runtime_stats.ike_create_child_xfrm_install_failed = 1;
     supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok = 2;
@@ -923,6 +926,8 @@ test_provider_helper_status_output(void **state)
     assert_non_null(strstr(capture.data, ",0x1,0x4,1"));
     assert_non_null(strstr(capture.data,
                            "PROVIDER_HELPER_STAT,datagrams_rx,11"));
+    assert_non_null(strstr(capture.data,
+                           "PROVIDER_HELPER_STAT,xfrm_leases_stale,5"));
     assert_non_null(strstr(capture.data,
                            "PROVIDER_HELPER_STAT,ike_sa_active,3"));
     assert_non_null(strstr(
@@ -7531,6 +7536,7 @@ test_provider_helper_spawn_ikev2_lease_deadline_fails_closed(void **state)
     assert_memory_equal(close_state.session_close.reason,
                         "XFRM lease rekey deadline expired",
                         strlen("XFRM lease rekey deadline expired"));
+    assert_int_equal(supervisor.runtime_stats.xfrm_leases_stale, 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
     assert_true(supervisor.runtime_stats.ike_sa_expired >= 1);

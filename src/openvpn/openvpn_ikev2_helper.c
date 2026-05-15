@@ -4291,6 +4291,23 @@ ikev2_helper_xfrm_lease_expiry_reason(
     return NULL;
 }
 
+static uint64_t
+ikev2_helper_count_stale_xfrm_leases(
+    const struct provider_helper_xfrm_lease *leases,
+    size_t lease_count,
+    time_t now)
+{
+    uint64_t stale = 0;
+    for (size_t i = 0; leases && i < lease_count; ++i)
+    {
+        if (ikev2_helper_xfrm_lease_expiry_reason(&leases[i], now))
+        {
+            ++stale;
+        }
+    }
+    return stale;
+}
+
 static const struct provider_helper_xfrm_lease *
 ikev2_helper_find_xfrm_lease(const struct provider_helper_xfrm_lease *leases,
                              size_t lease_count,
@@ -7081,6 +7098,9 @@ ikev2_helper_loop(int fd)
                 counters.ike_sa_active = sa_table.active;
                 counters.ike_child_sa_scaffold_active =
                     ikev2_helper_count_child_sa_scaffolds(&sa_table);
+                counters.xfrm_leases_stale =
+                    ikev2_helper_count_stale_xfrm_leases(
+                        xfrm_leases, xfrm_lease_count, time(NULL));
                 if (!ikev2_helper_send_stats(fd, tx_sequence++, header.sequence,
                                              &counters))
                 {
