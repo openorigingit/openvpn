@@ -106,6 +106,8 @@
 #define IKEV2_HELPER_TLS_RECORD_HEADER_SIZE 5
 #define IKEV2_HELPER_TLS_CONTENT_TYPE_HANDSHAKE 22
 #define IKEV2_HELPER_TLS_RECORD_VERSION_MAJOR 3
+#define IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE 4
+#define IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CLIENT_HELLO 1
 #define IKEV2_HELPER_RATE_BUCKETS 64
 #define IKEV2_HELPER_POLL_TIMEOUT_MS 1000
 #define IKEV2_HELPER_IKE_SA_INIT_MESSAGE_ID 0
@@ -2663,11 +2665,23 @@ ikev2_helper_eap_tls_record_header_valid(const struct ikev2_helper_ike_sa *sa)
 
     const uint8_t *record = sa->eap_tls_rx;
     const uint16_t record_len = ((uint16_t)record[3] << 8) | record[4];
-    return record[0] == IKEV2_HELPER_TLS_CONTENT_TYPE_HANDSHAKE
-           && record[1] == IKEV2_HELPER_TLS_RECORD_VERSION_MAJOR
-           && record[2] != 0 && record_len != 0
-           && record_len <= sa->eap_tls_message_len
-                            - IKEV2_HELPER_TLS_RECORD_HEADER_SIZE;
+    if (record[0] != IKEV2_HELPER_TLS_CONTENT_TYPE_HANDSHAKE
+        || record[1] != IKEV2_HELPER_TLS_RECORD_VERSION_MAJOR
+        || record[2] == 0
+        || record_len < IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE
+        || record_len > sa->eap_tls_message_len
+                        - IKEV2_HELPER_TLS_RECORD_HEADER_SIZE)
+    {
+        return false;
+    }
+
+    const uint8_t *handshake =
+        record + IKEV2_HELPER_TLS_RECORD_HEADER_SIZE;
+    const uint32_t handshake_len = ((uint32_t)handshake[1] << 16)
+                                   | ((uint32_t)handshake[2] << 8)
+                                   | handshake[3];
+    return handshake[0] == IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CLIENT_HELLO
+           && handshake_len != 0;
 }
 
 static bool
