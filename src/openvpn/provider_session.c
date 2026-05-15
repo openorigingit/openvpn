@@ -299,6 +299,27 @@ provider_session_lookup_by_cid(struct provider_session_table *table, unsigned lo
     return session && !session->halt ? session : NULL;
 }
 
+struct provider_session *
+provider_session_lookup_by_id(struct provider_session_table *table, uint64_t id)
+{
+    if (!table || !id)
+    {
+        return NULL;
+    }
+
+    for (struct provider_session *session = table->head;
+         session;
+         session = session->next)
+    {
+        if (session->id == id && !session->halt)
+        {
+            return session;
+        }
+    }
+
+    return NULL;
+}
+
 bool
 provider_session_kill_by_cid(struct provider_session_table *table,
                              unsigned long cid,

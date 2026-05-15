@@ -579,6 +579,50 @@ multi_ikev2_helper_close_provider_sessions(struct multi_context *m,
 }
 
 static bool
+multi_ikev2_helper_session_close(
+    void *arg,
+    const struct provider_helper_session_close *session_close)
+{
+    struct multi_context *m = arg;
+    if (!m || !session_close)
+    {
+        return false;
+    }
+
+    struct provider_session *session =
+        provider_session_lookup_by_id(&m->provider_sessions,
+                                      session_close->provider_session_id);
+    if (!session)
+    {
+        return true;
+    }
+
+    if (session->xfrm_lease_id != session_close->xfrm_lease_id
+        || session->policy_revision != session_close->policy_revision)
+    {
+        msg(D_MULTI_ERRORS,
+            "IKEv2 helper: refused mismatched provider session close for session %" PRIu64,
+            session_close->provider_session_id);
+        return false;
+    }
+
+    char reason[PROVIDER_HELPER_SESSION_CLOSE_REASON_SIZE];
+    CLEAR(reason);
+    memcpy(reason, session_close->reason, session_close->reason_len);
+
+    multi_ikev2_helper_release_session_address(m, session, true);
+    if (!provider_session_kill_by_cid(&m->provider_sessions,
+                                      session->management_cid, reason))
+    {
+        return false;
+    }
+
+    msg(M_INFO, "IKEv2 helper: closed provider session %" PRIu64 ": %s",
+        session_close->provider_session_id, reason);
+    return true;
+}
+
+static bool
 multi_ikev2_helper_xfrm_id(uint64_t id, uint32_t *out)
 {
     if (!id || id > MULTI_IKEV2_HELPER_XFRM_ID_MAX || !out)
@@ -873,6 +917,8 @@ multi_spawn_ikev2_helper(struct context *t, bool fatal)
 
     provider_helper_supervisor_set_auth_callback(
         &m->provider_helper, multi_ikev2_helper_auth_request, m);
+    provider_helper_supervisor_set_session_close_callback(
+        &m->provider_helper, multi_ikev2_helper_session_close, m);
     if (t->options.ikev2_helper_apply_xfrm)
     {
         m->provider_helper.runtime_config.flags |= PROVIDER_HELPER_CONFIG_APPLY_XFRM;

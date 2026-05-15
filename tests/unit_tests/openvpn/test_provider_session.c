@@ -121,6 +121,8 @@ test_provider_session_create_lookup_update(void **state)
     assert_int_equal(session->created, 1000);
     assert_int_equal(provider_session_table_count(&table), 1);
     assert_ptr_equal(provider_session_lookup_by_cid(&table, 1), session);
+    assert_ptr_equal(provider_session_lookup_by_id(&table, session->id),
+                     session);
 
     const struct provider_session_update update = {
         .state = PROVIDER_SESSION_STATE_ACTIVE,
@@ -240,6 +242,7 @@ test_provider_session_rejects_duplicate_cid_and_kill(void **state)
     assert_true(session->halt);
     assert_string_equal(session->disconnect_reason, "test kill");
     assert_null(provider_session_lookup_by_cid(&table, 100));
+    assert_null(provider_session_lookup_by_id(&table, session->id));
     assert_int_equal(provider_session_table_count(&table), 0);
     assert_false(provider_session_kill_by_cid(&table, 100, "again"));
 

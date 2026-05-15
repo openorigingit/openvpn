@@ -137,6 +137,8 @@ bool provider_session_get_xfrm_lease(const struct provider_session *session,
                                      struct provider_session_xfrm_lease *lease);
 struct provider_session *provider_session_lookup_by_cid(struct provider_session_table *table,
                                                         unsigned long cid);
+struct provider_session *provider_session_lookup_by_id(struct provider_session_table *table,
+                                                       uint64_t id);
 bool provider_session_kill_by_cid(struct provider_session_table *table,
                                   unsigned long cid,
                                   const char *reason);

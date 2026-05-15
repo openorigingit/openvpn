@@ -598,6 +598,57 @@ provider_helper_auth_response_valid(
     return true;
 }
 
+bool
+provider_helper_session_close_valid(
+    const struct provider_helper_session_close *session_close,
+    char *reason,
+    size_t reason_size)
+{
+    if (!session_close)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "missing session close");
+        return false;
+    }
+    if (!session_close->provider_session_id || !session_close->xfrm_lease_id
+        || !session_close->policy_revision)
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "session close identity fields must be nonzero");
+        return false;
+    }
+    if (session_close->flags || session_close->reserved1
+        || session_close->reserved2)
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "session close reserved fields must be zero");
+        return false;
+    }
+    if (!session_close->reason_len
+        || session_close->reason_len >= sizeof(session_close->reason))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "invalid session close reason length");
+        return false;
+    }
+    for (uint32_t i = 0; i < session_close->reason_len; ++i)
+    {
+        if (!provider_helper_auth_reason_byte_allowed(
+                (uint8_t)session_close->reason[i]))
+        {
+            provider_helper_config_reason(
+                reason, reason_size,
+                "session close reason contains invalid characters");
+            return false;
+        }
+    }
+
+    provider_helper_config_reason(reason, reason_size, "ok");
+    return true;
+}
+
 static void
 provider_helper_wire_write_u16(uint8_t **pos, uint16_t value)
 {
@@ -1329,6 +1380,60 @@ provider_helper_ipc_decode_auth_response(
 
     return (size_t)(pos - src) == PROVIDER_HELPER_AUTH_RESPONSE_SIZE
            && provider_helper_auth_response_valid(response, NULL, 0);
+}
+
+bool
+provider_helper_ipc_encode_session_close(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_session_close *session_close)
+{
+    if (!dst || dst_len < PROVIDER_HELPER_SESSION_CLOSE_SIZE
+        || !provider_helper_session_close_valid(session_close, NULL, 0))
+    {
+        return false;
+    }
+
+    uint8_t *pos = dst;
+    provider_helper_wire_write_u64(&pos, session_close->provider_session_id);
+    provider_helper_wire_write_u64(&pos, session_close->xfrm_lease_id);
+    provider_helper_wire_write_u64(&pos, session_close->policy_revision);
+    provider_helper_wire_write_u32(&pos, session_close->reason_len);
+    provider_helper_wire_write_u32(&pos, session_close->flags);
+    provider_helper_wire_write_u32(&pos, session_close->reserved1);
+    provider_helper_wire_write_u32(&pos, session_close->reserved2);
+    memcpy(pos, session_close->reason, sizeof(session_close->reason));
+    pos += sizeof(session_close->reason);
+
+    return (size_t)(pos - dst) == PROVIDER_HELPER_SESSION_CLOSE_SIZE;
+}
+
+bool
+provider_helper_ipc_decode_session_close(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_session_close *session_close)
+{
+    if (!src || src_len != PROVIDER_HELPER_SESSION_CLOSE_SIZE
+        || !session_close)
+    {
+        return false;
+    }
+
+    const uint8_t *pos = src;
+    CLEAR(*session_close);
+    session_close->provider_session_id = provider_helper_wire_read_u64(&pos);
+    session_close->xfrm_lease_id = provider_helper_wire_read_u64(&pos);
+    session_close->policy_revision = provider_helper_wire_read_u64(&pos);
+    session_close->reason_len = provider_helper_wire_read_u32(&pos);
+    session_close->flags = provider_helper_wire_read_u32(&pos);
+    session_close->reserved1 = provider_helper_wire_read_u32(&pos);
+    session_close->reserved2 = provider_helper_wire_read_u32(&pos);
+    memcpy(session_close->reason, pos, sizeof(session_close->reason));
+    pos += sizeof(session_close->reason);
+
+    return (size_t)(pos - src) == PROVIDER_HELPER_SESSION_CLOSE_SIZE
+           && provider_helper_session_close_valid(session_close, NULL, 0);
 }
 
 const char *

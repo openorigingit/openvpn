@@ -1214,6 +1214,56 @@ ikev2_helper_send_auth_request(
 }
 
 static bool
+ikev2_helper_send_session_close(int fd, uint64_t *tx_sequence,
+                                const struct ikev2_helper_ike_sa *sa,
+                                const char *reason)
+{
+    if (fd < 0 || !tx_sequence || !*tx_sequence || !sa || !sa->active
+        || !sa->auth_authorized || !sa->provider_session_id
+        || !sa->xfrm_lease_id || !sa->policy_revision || !reason)
+    {
+        return false;
+    }
+
+    struct provider_helper_session_close session_close;
+    CLEAR(session_close);
+    session_close.provider_session_id = sa->provider_session_id;
+    session_close.xfrm_lease_id = sa->xfrm_lease_id;
+    session_close.policy_revision = sa->policy_revision;
+    const size_t reason_len = strlen(reason);
+    if (!reason_len || reason_len >= sizeof(session_close.reason))
+    {
+        return false;
+    }
+    memcpy(session_close.reason, reason, reason_len);
+    session_close.reason_len = (uint32_t)reason_len;
+
+    uint8_t frame[PROVIDER_HELPER_IPC_HEADER_SIZE
+                  + PROVIDER_HELPER_SESSION_CLOSE_SIZE];
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_SESSION_CLOSE,
+        .sequence = *tx_sequence,
+        .payload_len = PROVIDER_HELPER_SESSION_CLOSE_SIZE,
+    };
+
+    if (!provider_helper_ipc_encode_header(
+            frame, PROVIDER_HELPER_IPC_HEADER_SIZE, &header)
+        || !provider_helper_ipc_encode_session_close(
+            frame + PROVIDER_HELPER_IPC_HEADER_SIZE,
+            PROVIDER_HELPER_SESSION_CLOSE_SIZE, &session_close)
+        || !ikev2_helper_write_all(fd, frame, sizeof(frame)))
+    {
+        return false;
+    }
+
+    ++*tx_sequence;
+    return true;
+}
+
+static bool
 ikev2_helper_read_all(int fd, uint8_t *data, size_t len)
 {
     while (len > 0 && !helper_stop)
@@ -6145,6 +6195,9 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                                 header.message_id))
                         {
                             ++counters->ike_informational_delete_response_tx;
+                            (void)ikev2_helper_send_session_close(
+                                ipc_fd, tx_sequence, sa,
+                                "IKE SA deleted by peer");
                         }
                         else
                         {

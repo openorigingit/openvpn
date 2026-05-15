@@ -45,6 +45,8 @@
 #define PROVIDER_HELPER_AUTH_REQUEST_SIZE     824
 #define PROVIDER_HELPER_AUTH_REASON_SIZE    128
 #define PROVIDER_HELPER_AUTH_RESPONSE_SIZE  176
+#define PROVIDER_HELPER_SESSION_CLOSE_REASON_SIZE 128
+#define PROVIDER_HELPER_SESSION_CLOSE_SIZE  168
 #define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
 #define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE 4
 #define PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE 4
@@ -157,6 +159,7 @@ enum provider_helper_msg_type {
     PROVIDER_HELPER_MSG_XFRM_LEASE_DELETE_ACK,
     PROVIDER_HELPER_MSG_AUTH_REQUEST,
     PROVIDER_HELPER_MSG_AUTH_RESPONSE,
+    PROVIDER_HELPER_MSG_SESSION_CLOSE,
 };
 
 enum provider_helper_ipc_result {
@@ -284,6 +287,17 @@ struct provider_helper_auth_response {
     char reason[PROVIDER_HELPER_AUTH_REASON_SIZE];
 };
 
+struct provider_helper_session_close {
+    uint64_t provider_session_id;
+    uint64_t xfrm_lease_id;
+    uint64_t policy_revision;
+    uint32_t reason_len;
+    uint32_t flags;
+    uint32_t reserved1;
+    uint32_t reserved2;
+    char reason[PROVIDER_HELPER_SESSION_CLOSE_REASON_SIZE];
+};
+
 struct provider_helper_feature_set {
     uint64_t mandatory_features;
     uint64_t optional_features;
@@ -293,6 +307,10 @@ typedef bool (*provider_helper_auth_request_cb)(
     void *arg,
     const struct provider_helper_auth_request *request,
     struct provider_helper_auth_response *response);
+
+typedef bool (*provider_helper_session_close_cb)(
+    void *arg,
+    const struct provider_helper_session_close *session_close);
 
 struct provider_helper_runtime_config {
     uint32_t flags;
@@ -574,6 +592,8 @@ struct provider_helper_supervisor {
     size_t payload_received;
     provider_helper_auth_request_cb auth_request_cb;
     void *auth_request_arg;
+    provider_helper_session_close_cb session_close_cb;
+    void *session_close_arg;
 };
 
 struct status_output;
@@ -590,6 +610,10 @@ void provider_helper_supervisor_set_state(struct provider_helper_supervisor *sup
 void provider_helper_supervisor_set_auth_callback(
     struct provider_helper_supervisor *supervisor,
     provider_helper_auth_request_cb cb,
+    void *arg);
+void provider_helper_supervisor_set_session_close_callback(
+    struct provider_helper_supervisor *supervisor,
+    provider_helper_session_close_cb cb,
     void *arg);
 void provider_helper_runtime_config_default(struct provider_helper_runtime_config *config);
 bool provider_helper_runtime_config_valid(const struct provider_helper_runtime_config *config,
@@ -616,6 +640,10 @@ bool provider_helper_auth_request_valid(const struct provider_helper_auth_reques
                                         size_t reason_size);
 bool provider_helper_auth_response_valid(
     const struct provider_helper_auth_response *response,
+    char *reason,
+    size_t reason_size);
+bool provider_helper_session_close_valid(
+    const struct provider_helper_session_close *session_close,
     char *reason,
     size_t reason_size);
 
@@ -658,6 +686,9 @@ bool provider_helper_ipc_write_auth_request(
 bool provider_helper_ipc_write_auth_response(
     struct buffer *buf,
     const struct provider_helper_auth_response *response);
+bool provider_helper_ipc_write_session_close(
+    struct buffer *buf,
+    const struct provider_helper_session_close *session_close);
 bool provider_helper_ipc_encode_runtime_config(uint8_t *dst, size_t dst_len,
                                                const struct provider_helper_runtime_config *config);
 bool provider_helper_ipc_decode_runtime_config(const uint8_t *src, size_t src_len,
@@ -690,6 +721,14 @@ bool provider_helper_ipc_decode_auth_response(
     const uint8_t *src,
     size_t src_len,
     struct provider_helper_auth_response *response);
+bool provider_helper_ipc_encode_session_close(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_session_close *session_close);
+bool provider_helper_ipc_decode_session_close(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_session_close *session_close);
 enum provider_helper_ikev2_parse_result
 provider_helper_ikev2_parse_header(const uint8_t *packet,
                                    size_t packet_len,

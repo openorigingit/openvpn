@@ -182,6 +182,22 @@ provider_helper_ipc_write_auth_response(
            && buf_write(buf, payload, sizeof(payload));
 }
 
+bool
+provider_helper_ipc_write_session_close(
+    struct buffer *buf,
+    const struct provider_helper_session_close *session_close)
+{
+    if (!buf || !session_close)
+    {
+        return false;
+    }
+
+    uint8_t payload[PROVIDER_HELPER_SESSION_CLOSE_SIZE];
+    return provider_helper_ipc_encode_session_close(
+               payload, sizeof(payload), session_close)
+           && buf_write(buf, payload, sizeof(payload));
+}
+
 enum provider_helper_ipc_result
 provider_helper_ipc_read_header(struct buffer *buf,
                                 struct provider_helper_msg_header *header,

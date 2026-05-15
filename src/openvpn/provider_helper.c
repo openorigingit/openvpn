@@ -455,6 +455,19 @@ provider_helper_supervisor_set_auth_callback(
 }
 
 void
+provider_helper_supervisor_set_session_close_callback(
+    struct provider_helper_supervisor *supervisor,
+    provider_helper_session_close_cb cb,
+    void *arg)
+{
+    if (supervisor)
+    {
+        supervisor->session_close_cb = cb;
+        supervisor->session_close_arg = arg;
+    }
+}
+
+void
 provider_helper_supervisor_free(struct provider_helper_supervisor *supervisor)
 {
     if (!supervisor)
@@ -1199,6 +1212,23 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
                     supervisor, &request, &response)
                 || !provider_helper_supervisor_send_auth_response(
                     supervisor, &response, header.sequence))
+            {
+                provider_helper_supervisor_fail_ipc(supervisor,
+                                                    PROVIDER_HELPER_STATE_FAILED);
+            }
+            return;
+        }
+
+        if (header.type == PROVIDER_HELPER_MSG_SESSION_CLOSE
+            && payload_len == PROVIDER_HELPER_SESSION_CLOSE_SIZE
+            && supervisor->state == PROVIDER_HELPER_STATE_READY)
+        {
+            struct provider_helper_session_close session_close;
+            if (!provider_helper_ipc_decode_session_close(
+                    supervisor->payload_buf, payload_len, &session_close)
+                || (supervisor->session_close_cb
+                    && !supervisor->session_close_cb(
+                        supervisor->session_close_arg, &session_close)))
             {
                 provider_helper_supervisor_fail_ipc(supervisor,
                                                     PROVIDER_HELPER_STATE_FAILED);

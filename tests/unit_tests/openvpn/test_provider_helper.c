@@ -1191,6 +1191,55 @@ test_provider_helper_auth_response_roundtrip(void **state)
 }
 
 static void
+test_provider_helper_session_close_roundtrip(void **state)
+{
+    (void)state;
+
+    struct provider_helper_session_close input = {
+        .provider_session_id = 7,
+        .xfrm_lease_id = 17,
+        .policy_revision = 3,
+    };
+    const char reason_text[] = "IKE SA deleted by peer";
+    snprintf(input.reason, sizeof(input.reason), "%s", reason_text);
+    assert_true(strlen(input.reason) <= UINT32_MAX);
+    input.reason_len = (uint32_t)strlen(input.reason);
+
+    struct provider_helper_session_close output;
+    char reason[128];
+    uint8_t payload[PROVIDER_HELPER_SESSION_CLOSE_SIZE];
+
+    assert_true(provider_helper_session_close_valid(&input, reason,
+                                                    sizeof(reason)));
+    assert_true(provider_helper_ipc_encode_session_close(payload,
+                                                         sizeof(payload),
+                                                         &input));
+    assert_true(provider_helper_ipc_decode_session_close(payload,
+                                                         sizeof(payload),
+                                                         &output));
+    assert_int_equal(output.provider_session_id, input.provider_session_id);
+    assert_int_equal(output.xfrm_lease_id, input.xfrm_lease_id);
+    assert_int_equal(output.policy_revision, input.policy_revision);
+    assert_int_equal(output.reason_len, input.reason_len);
+    assert_memory_equal(output.reason, input.reason, input.reason_len);
+
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_SESSION_CLOSE_SIZE);
+    assert_true(provider_helper_ipc_write_session_close(&buf, &input));
+    assert_int_equal(BLEN(&buf), PROVIDER_HELPER_SESSION_CLOSE_SIZE);
+    free_buf(&buf);
+
+    input.provider_session_id = 0;
+    assert_false(provider_helper_session_close_valid(&input, reason,
+                                                     sizeof(reason)));
+    assert_non_null(strstr(reason, "nonzero"));
+    input.provider_session_id = 7;
+    input.reason[3] = '\n';
+    assert_false(provider_helper_session_close_valid(&input, reason,
+                                                     sizeof(reason)));
+    assert_non_null(strstr(reason, "reason"));
+}
+
+static void
 test_write_be16(uint8_t *dst, uint16_t value)
 {
     dst[0] = (uint8_t)(value >> 8);
@@ -5734,6 +5783,29 @@ write_helper_auth_request_fd(int fd, uint64_t sequence, uint64_t correlation_id,
     free_buf(&buf);
 }
 
+static void
+write_helper_session_close_fd(
+    int fd,
+    uint64_t sequence,
+    const struct provider_helper_session_close *session_close)
+{
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE
+                                  + PROVIDER_HELPER_SESSION_CLOSE_SIZE);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_SESSION_CLOSE,
+        .sequence = sequence,
+        .payload_len = PROVIDER_HELPER_SESSION_CLOSE_SIZE,
+    };
+
+    assert_true(provider_helper_ipc_write_header(&buf, &header));
+    assert_true(provider_helper_ipc_write_session_close(&buf, session_close));
+    assert_int_equal(write(fd, BPTR(&buf), (size_t)BLEN(&buf)), BLEN(&buf));
+    free_buf(&buf);
+}
+
 struct test_provider_helper_auth_cb_state {
     unsigned int calls;
     bool allow;
@@ -5767,6 +5839,25 @@ test_provider_helper_auth_cb(void *arg,
     snprintf(response->reason, sizeof(response->reason), "%s",
              state->allow ? "unit test allow" : "unit test deny");
     response->reason_len = (uint32_t)strlen(response->reason);
+    return true;
+}
+
+struct test_provider_helper_session_close_cb_state {
+    unsigned int calls;
+    struct provider_helper_session_close session_close;
+};
+
+static bool
+test_provider_helper_session_close_cb(
+    void *arg,
+    const struct provider_helper_session_close *session_close)
+{
+    struct test_provider_helper_session_close_cb_state *state = arg;
+    assert_non_null(state);
+    assert_non_null(session_close);
+
+    ++state->calls;
+    state->session_close = *session_close;
     return true;
 }
 
@@ -5840,6 +5931,51 @@ test_provider_helper_auth_request_callback(void **state)
     assert_int_equal(response.decision, PROVIDER_HELPER_AUTH_DENY);
     assert_memory_equal(response.reason, "unit test deny",
                         strlen("unit test deny"));
+
+    close(fds[1]);
+    provider_helper_supervisor_free(&supervisor);
+}
+
+static void
+test_provider_helper_session_close_callback(void **state)
+{
+    (void)state;
+
+    int fds[2] = { -1, -1 };
+    assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.ipc_fd = fds[0];
+    provider_helper_supervisor_set_state(&supervisor,
+                                         PROVIDER_HELPER_STATE_READY);
+
+    struct test_provider_helper_session_close_cb_state cb_state;
+    CLEAR(cb_state);
+    provider_helper_supervisor_set_session_close_callback(
+        &supervisor, test_provider_helper_session_close_cb, &cb_state);
+
+    struct provider_helper_session_close session_close = {
+        .provider_session_id = 101,
+        .xfrm_lease_id = 202,
+        .policy_revision = 303,
+    };
+    snprintf(session_close.reason, sizeof(session_close.reason), "%s",
+             "IKE SA deleted by peer");
+    session_close.reason_len = (uint32_t)strlen(session_close.reason);
+
+    write_helper_session_close_fd(fds[1], 1, &session_close);
+    provider_helper_process_event(&supervisor);
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 1);
+    assert_int_equal(cb_state.calls, 1);
+    assert_int_equal(cb_state.session_close.provider_session_id, 101);
+    assert_int_equal(cb_state.session_close.xfrm_lease_id, 202);
+    assert_int_equal(cb_state.session_close.policy_revision, 303);
+    assert_memory_equal(cb_state.session_close.reason,
+                        "IKE SA deleted by peer",
+                        strlen("IKE SA deleted by peer"));
 
     close(fds[1]);
     provider_helper_supervisor_free(&supervisor);
@@ -7204,7 +7340,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
         response_fd, delete_initiator_spi, &sa_init_material,
         PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 3, true);
 
-    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    target_rx_sequence = supervisor.last_rx_sequence + 2;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
                            supervisor.next_tx_sequence++, 112);
     for (int i = 0;
@@ -7310,6 +7446,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_xfrm_lease_roundtrip),
         cmocka_unit_test(test_provider_helper_auth_request_roundtrip),
         cmocka_unit_test(test_provider_helper_auth_response_roundtrip),
+        cmocka_unit_test(test_provider_helper_session_close_roundtrip),
         cmocka_unit_test(test_provider_helper_ikev2_parser),
         cmocka_unit_test(test_provider_helper_ikev2_payload_parser),
         cmocka_unit_test(test_provider_helper_ikev2_cookie_response),
@@ -7319,6 +7456,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_ikev2_cookie_builder),
         cmocka_unit_test(test_provider_helper_processes_partial_header),
         cmocka_unit_test(test_provider_helper_auth_request_callback),
+        cmocka_unit_test(test_provider_helper_session_close_callback),
         cmocka_unit_test(test_provider_helper_start_timeout_fails_closed),
         cmocka_unit_test(test_provider_helper_preflight_timeout_fails_closed),
         cmocka_unit_test(test_provider_helper_spawn_noop),
