@@ -103,6 +103,9 @@
     (IKEV2_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED \
      | IKEV2_HELPER_EAP_TLS_FLAG_MORE_FRAGMENTS)
 #define IKEV2_HELPER_EAP_TLS_START_REQUEST_ID 1
+#define IKEV2_HELPER_TLS_RECORD_HEADER_SIZE 5
+#define IKEV2_HELPER_TLS_CONTENT_TYPE_HANDSHAKE 22
+#define IKEV2_HELPER_TLS_RECORD_VERSION_MAJOR 3
 #define IKEV2_HELPER_RATE_BUCKETS 64
 #define IKEV2_HELPER_POLL_TIMEOUT_MS 1000
 #define IKEV2_HELPER_IKE_SA_INIT_MESSAGE_ID 0
@@ -208,6 +211,8 @@ struct ikev2_helper_ike_sa {
     uint32_t eap_tls_message_len;
     uint32_t eap_tls_received;
     bool eap_tls_message_complete;
+    uint8_t *eap_tls_rx;
+    size_t eap_tls_rx_capacity;
     uint64_t pending_server_sign_request_id;
     uint64_t server_sign_config_revision;
     uint32_t server_sign_sigalg;
@@ -2626,6 +2631,45 @@ ikev2_helper_parse_ike_auth_inner_payloads(
                                 : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
 }
 
+static void
+ikev2_helper_clear_eap_tls_buffer(struct ikev2_helper_ike_sa *sa)
+{
+    if (!sa)
+    {
+        return;
+    }
+    if (sa->eap_tls_rx)
+    {
+        ikev2_helper_secure_zero(sa->eap_tls_rx, sa->eap_tls_rx_capacity);
+        free(sa->eap_tls_rx);
+    }
+    sa->eap_tls_rx = NULL;
+    sa->eap_tls_rx_capacity = 0;
+    sa->eap_tls_message_len_ready = false;
+    sa->eap_tls_message_len = 0;
+    sa->eap_tls_received = 0;
+    sa->eap_tls_message_complete = false;
+}
+
+static bool
+ikev2_helper_eap_tls_record_header_valid(const struct ikev2_helper_ike_sa *sa)
+{
+    if (!sa || !sa->eap_tls_rx || !sa->eap_tls_message_complete
+        || sa->eap_tls_message_len < IKEV2_HELPER_TLS_RECORD_HEADER_SIZE
+        || sa->eap_tls_received != sa->eap_tls_message_len)
+    {
+        return false;
+    }
+
+    const uint8_t *record = sa->eap_tls_rx;
+    const uint16_t record_len = ((uint16_t)record[3] << 8) | record[4];
+    return record[0] == IKEV2_HELPER_TLS_CONTENT_TYPE_HANDSHAKE
+           && record[1] == IKEV2_HELPER_TLS_RECORD_VERSION_MAJOR
+           && record[2] != 0 && record_len != 0
+           && record_len <= sa->eap_tls_message_len
+                            - IKEV2_HELPER_TLS_RECORD_HEADER_SIZE;
+}
+
 static bool
 ikev2_helper_process_followup_eap_tls_response(
     struct ikev2_helper_ike_sa *sa,
@@ -2715,11 +2759,42 @@ ikev2_helper_process_followup_eap_tls_response(
     {
         return false;
     }
+    if (fragment.fragment_len
+        && !ikev2_helper_body_inside(summary->eap_len,
+                                     fragment.fragment_offset,
+                                     fragment.fragment_len))
+    {
+        return false;
+    }
+    if (fragment.fragment_len && !sa->eap_tls_rx)
+    {
+        sa->eap_tls_rx = calloc(1, message_len);
+        if (!sa->eap_tls_rx)
+        {
+            return false;
+        }
+        sa->eap_tls_rx_capacity = message_len;
+    }
+    if (sa->eap_tls_rx && sa->eap_tls_rx_capacity != message_len)
+    {
+        return false;
+    }
+    if (fragment.fragment_len)
+    {
+        memcpy(sa->eap_tls_rx + received, eap + fragment.fragment_offset,
+               fragment.fragment_len);
+    }
 
     sa->eap_tls_message_len_ready = len_ready;
     sa->eap_tls_message_len = message_len;
     sa->eap_tls_received = new_received;
     sa->eap_tls_message_complete = !fragment.more_fragments;
+    if (sa->eap_tls_message_complete
+        && !ikev2_helper_eap_tls_record_header_valid(sa))
+    {
+        ikev2_helper_clear_eap_tls_buffer(sa);
+        return false;
+    }
     *more_fragments = fragment.more_fragments;
     return true;
 }
@@ -4465,6 +4540,7 @@ ikev2_helper_zero_ike_sa(struct ikev2_helper_ike_sa_table *table,
     }
 
     const bool decrement_active = table->active > 0;
+    ikev2_helper_clear_eap_tls_buffer(sa);
     ikev2_helper_secure_zero(sa, sizeof(*sa));
     if (decrement_active)
     {
@@ -7465,6 +7541,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         }
                         sa->message_id = header.message_id;
                         ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                        ikev2_helper_clear_eap_tls_buffer(sa);
                         ikev2_helper_secure_zero(sa, sizeof(*sa));
                         if (decrement_active)
                         {
