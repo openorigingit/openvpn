@@ -113,6 +113,7 @@
 #endif
 
 static volatile sig_atomic_t helper_stop;
+static volatile sig_atomic_t helper_fatal;
 
 struct ikev2_helper_listener {
     int fd;
@@ -241,6 +242,12 @@ ikev2_helper_signal_handler(int signum)
 {
     (void)signum;
     helper_stop = 1;
+}
+
+static void
+ikev2_helper_note_fatal_ipc_failure(void)
+{
+    helper_fatal = 1;
 }
 
 static void
@@ -6365,9 +6372,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             }
                             sa->peer = old_peer;
                             sa->peer_len = old_peer_len;
-                            (void)ikev2_helper_send_session_close(
-                                ipc_fd, tx_sequence, sa,
-                                "MOBIKE migration unsupported");
+                            if (!ikev2_helper_send_session_close(
+                                    ipc_fd, tx_sequence, sa,
+                                    "MOBIKE migration unsupported"))
+                            {
+                                ikev2_helper_note_fatal_ipc_failure();
+                            }
                             (void)ikev2_helper_clear_ike_sa(sa_table, sa,
                                                             counters);
                             ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
@@ -6440,9 +6450,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             ++counters
                                   ->ike_informational_delete_response_failed;
                         }
-                        (void)ikev2_helper_send_session_close(
-                            ipc_fd, tx_sequence, sa,
-                            "IKE SA deleted by peer");
+                        if (!ikev2_helper_send_session_close(
+                                ipc_fd, tx_sequence, sa,
+                                "IKE SA deleted by peer"))
+                        {
+                            ikev2_helper_note_fatal_ipc_failure();
+                        }
                         sa->message_id = header.message_id;
                         ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                         ikev2_helper_secure_zero(sa, sizeof(*sa));
@@ -6482,10 +6495,13 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                                 ++counters
                                       ->ike_informational_delete_response_failed;
                             }
-                            (void)ikev2_helper_send_session_update(
-                                ipc_fd, tx_sequence, sa,
-                                PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE,
-                                "ike-authorized", "deleted");
+                            if (!ikev2_helper_send_session_update(
+                                    ipc_fd, tx_sequence, sa,
+                                    PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE,
+                                    "ike-authorized", "deleted"))
+                            {
+                                ikev2_helper_note_fatal_ipc_failure();
+                            }
                             ikev2_helper_secure_zero(&sa->child_sa,
                                                      sizeof(sa->child_sa));
                         }
@@ -6612,10 +6628,13 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             {
                                 ++counters->ike_create_child_response_tx;
                                 child_response_sent = true;
-                                (void)ikev2_helper_send_session_update(
-                                    ipc_fd, tx_sequence, sa,
-                                    PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE,
-                                    "ike-authorized", "installed");
+                                if (!ikev2_helper_send_session_update(
+                                        ipc_fd, tx_sequence, sa,
+                                        PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE,
+                                        "ike-authorized", "installed"))
+                                {
+                                    ikev2_helper_note_fatal_ipc_failure();
+                                }
                             }
                             else
                             {
@@ -6664,9 +6683,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         if (rekey_request)
                         {
                             ++counters->ike_create_child_temp_failure_tx;
-                            (void)ikev2_helper_send_session_close(
-                                ipc_fd, tx_sequence, sa,
-                                "IKEv2 rekey unsupported");
+                            if (!ikev2_helper_send_session_close(
+                                    ipc_fd, tx_sequence, sa,
+                                    "IKEv2 rekey unsupported"))
+                            {
+                                ikev2_helper_note_fatal_ipc_failure();
+                            }
                             sa_closed_fail_closed =
                                 ikev2_helper_clear_ike_sa(sa_table, sa,
                                                           counters);
@@ -6697,9 +6719,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         else if (install_failed)
                         {
                             ++counters->ike_create_child_temp_failure_tx;
-                            (void)ikev2_helper_send_session_close(
-                                ipc_fd, tx_sequence, sa,
-                                "XFRM CHILD_SA install failed");
+                            if (!ikev2_helper_send_session_close(
+                                    ipc_fd, tx_sequence, sa,
+                                    "XFRM CHILD_SA install failed"))
+                            {
+                                ikev2_helper_note_fatal_ipc_failure();
+                            }
                             sa_closed_fail_closed =
                                 ikev2_helper_clear_ike_sa(sa_table, sa,
                                                           counters);
@@ -6724,9 +6749,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         if (rekey_request)
                         {
                             ++counters->ike_create_child_temp_failure_failed;
-                            (void)ikev2_helper_send_session_close(
-                                ipc_fd, tx_sequence, sa,
-                                "IKEv2 rekey unsupported");
+                            if (!ikev2_helper_send_session_close(
+                                    ipc_fd, tx_sequence, sa,
+                                    "IKEv2 rekey unsupported"))
+                            {
+                                ikev2_helper_note_fatal_ipc_failure();
+                            }
                             sa_closed_fail_closed =
                                 ikev2_helper_clear_ike_sa(sa_table, sa,
                                                           counters);
@@ -6740,9 +6768,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         else if (install_failed)
                         {
                             ++counters->ike_create_child_temp_failure_failed;
-                            (void)ikev2_helper_send_session_close(
-                                ipc_fd, tx_sequence, sa,
-                                "XFRM CHILD_SA install failed");
+                            if (!ikev2_helper_send_session_close(
+                                    ipc_fd, tx_sequence, sa,
+                                    "XFRM CHILD_SA install failed"))
+                            {
+                                ikev2_helper_note_fatal_ipc_failure();
+                            }
                             sa_closed_fail_closed =
                                 ikev2_helper_clear_ike_sa(sa_table, sa,
                                                           counters);
@@ -6900,6 +6931,11 @@ ikev2_helper_loop(int fd)
                                                  &counters, &cookie_ctx, fd,
                                                  &tx_sequence,
                                                  &next_auth_request_id);
+                    if (helper_fatal)
+                    {
+                        ret = 7;
+                        goto done;
+                    }
                 }
             }
         }
