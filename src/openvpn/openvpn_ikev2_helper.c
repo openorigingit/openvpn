@@ -119,6 +119,9 @@
 #define IKEV2_HELPER_TLS_SIGALG_RSA_PSS_RSAE_SHA256 0x0804
 #define IKEV2_HELPER_TLS_GROUP_SECP256R1 23
 #define IKEV2_HELPER_TLS_GROUP_X25519 29
+#define IKEV2_HELPER_TLS_GROUP_SECP256R1_KEY_SHARE_BYTES 65
+#define IKEV2_HELPER_TLS_GROUP_X25519_KEY_SHARE_BYTES 32
+#define IKEV2_HELPER_TLS_KEY_SHARE_MAX_BYTES 128
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_RANDOM_BYTES 32
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_SESSION_ID 32
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_EXTENSIONS 64
@@ -152,6 +155,18 @@ static volatile sig_atomic_t helper_fatal;
 struct ikev2_helper_listener {
     int fd;
     struct provider_helper_listener_fd descriptor;
+};
+
+struct ikev2_helper_tls_client_hello {
+    bool ready;
+    uint16_t legacy_version;
+    uint16_t tls_version;
+    uint16_t cipher_suite;
+    uint16_t signature_algorithm;
+    uint16_t named_group;
+    uint16_t key_share_group;
+    size_t key_share_len;
+    uint8_t key_share[IKEV2_HELPER_TLS_KEY_SHARE_MAX_BYTES];
 };
 
 struct ikev2_helper_child_sa_scaffold {
@@ -234,6 +249,7 @@ struct ikev2_helper_ike_sa {
     uint32_t eap_tls_message_len;
     uint32_t eap_tls_received;
     bool eap_tls_message_complete;
+    struct ikev2_helper_tls_client_hello eap_tls_client_hello;
     uint8_t *eap_tls_rx;
     size_t eap_tls_rx_capacity;
     uint8_t *eap_tls_tx;
@@ -2679,6 +2695,7 @@ ikev2_helper_clear_eap_tls_buffer(struct ikev2_helper_ike_sa *sa)
     sa->eap_tls_message_len = 0;
     sa->eap_tls_received = 0;
     sa->eap_tls_message_complete = false;
+    CLEAR(sa->eap_tls_client_hello);
 }
 
 static void
@@ -2732,6 +2749,24 @@ ikev2_helper_tls_group_supported(uint16_t group)
 }
 
 static bool
+ikev2_helper_tls_key_share_len_supported(uint16_t group, size_t key_len)
+{
+    switch (group)
+    {
+        case IKEV2_HELPER_TLS_GROUP_SECP256R1:
+            return key_len
+                   == IKEV2_HELPER_TLS_GROUP_SECP256R1_KEY_SHARE_BYTES;
+
+        case IKEV2_HELPER_TLS_GROUP_X25519:
+            return key_len
+                   == IKEV2_HELPER_TLS_GROUP_X25519_KEY_SHARE_BYTES;
+
+        default:
+            return false;
+    }
+}
+
+static bool
 ikev2_helper_tls_signature_supported(uint16_t sigalg)
 {
     switch (sigalg)
@@ -2748,7 +2783,8 @@ ikev2_helper_tls_signature_supported(uint16_t sigalg)
 
 static bool
 ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
-                                         size_t body_len)
+                                         size_t body_len,
+                                         struct ikev2_helper_tls_client_hello *metadata)
 {
     if (!body
         || body_len < 2 + IKEV2_HELPER_TLS_CLIENT_HELLO_RANDOM_BYTES + 1
@@ -2757,12 +2793,17 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
         return false;
     }
 
+    struct ikev2_helper_tls_client_hello parsed;
+    CLEAR(parsed);
+
     size_t pos = 0;
     const uint16_t legacy_version = ikev2_helper_read_be16(body + pos);
     if (legacy_version != IKEV2_HELPER_TLS_VERSION_1_2)
     {
         return false;
     }
+    parsed.legacy_version = legacy_version;
+    parsed.tls_version = legacy_version;
     pos += 2 + IKEV2_HELPER_TLS_CLIENT_HELLO_RANDOM_BYTES;
 
     const uint8_t session_id_len = body[pos++];
@@ -2787,10 +2828,16 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
     bool saw_supported_cipher = false;
     for (size_t i = 0; i < cipher_suites_len; i += 2)
     {
+        const uint16_t cipher_suite =
+            ikev2_helper_read_be16(body + pos + i);
         saw_supported_cipher =
             saw_supported_cipher
-            || ikev2_helper_tls_cipher_supported(
-                ikev2_helper_read_be16(body + pos + i));
+            || ikev2_helper_tls_cipher_supported(cipher_suite);
+        if (!parsed.cipher_suite
+            && ikev2_helper_tls_cipher_supported(cipher_suite))
+        {
+            parsed.cipher_suite = cipher_suite;
+        }
     }
     if (!saw_supported_cipher)
     {
@@ -2878,6 +2925,15 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
                     supported_version_offered
                     || version == IKEV2_HELPER_TLS_VERSION_1_2
                     || version == IKEV2_HELPER_TLS_VERSION_1_3;
+                if (version == IKEV2_HELPER_TLS_VERSION_1_3)
+                {
+                    parsed.tls_version = version;
+                }
+                else if (version == IKEV2_HELPER_TLS_VERSION_1_2
+                         && !parsed.tls_version)
+                {
+                    parsed.tls_version = version;
+                }
             }
         }
         else if (ext_type == IKEV2_HELPER_TLS_EXTENSION_SUPPORTED_GROUPS)
@@ -2896,10 +2952,16 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
             }
             for (size_t i = 0; i < groups_len; i += 2)
             {
+                const uint16_t group =
+                    ikev2_helper_read_be16(body + pos + 2 + i);
                 supported_group_offered =
                     supported_group_offered
-                    || ikev2_helper_tls_group_supported(
-                        ikev2_helper_read_be16(body + pos + 2 + i));
+                    || ikev2_helper_tls_group_supported(group);
+                if (!parsed.named_group
+                    && ikev2_helper_tls_group_supported(group))
+                {
+                    parsed.named_group = group;
+                }
             }
         }
         else if (ext_type == IKEV2_HELPER_TLS_EXTENSION_SIGNATURE_ALGORITHMS)
@@ -2918,10 +2980,16 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
             }
             for (size_t i = 0; i < sigalgs_len; i += 2)
             {
+                const uint16_t sigalg =
+                    ikev2_helper_read_be16(body + pos + 2 + i);
                 supported_signature_offered =
                     supported_signature_offered
-                    || ikev2_helper_tls_signature_supported(
-                        ikev2_helper_read_be16(body + pos + 2 + i));
+                    || ikev2_helper_tls_signature_supported(sigalg);
+                if (!parsed.signature_algorithm
+                    && ikev2_helper_tls_signature_supported(sigalg))
+                {
+                    parsed.signature_algorithm = sigalg;
+                }
             }
         }
         else if (ext_type == IKEV2_HELPER_TLS_EXTENSION_KEY_SHARE)
@@ -2950,29 +3018,54 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
                 const uint16_t key_len =
                     ikev2_helper_read_be16(body + share_pos);
                 share_pos += 2;
-                if (!key_len || key_len > share_end - share_pos)
+                if (!key_len || key_len > share_end - share_pos
+                    || key_len > IKEV2_HELPER_TLS_KEY_SHARE_MAX_BYTES)
                 {
                     return false;
                 }
+                const bool supported_share =
+                    ikev2_helper_tls_group_supported(group)
+                    && ikev2_helper_tls_key_share_len_supported(group,
+                                                                key_len);
                 supported_key_share_offered =
-                    supported_key_share_offered
-                    || ikev2_helper_tls_group_supported(group);
+                    supported_key_share_offered || supported_share;
+                if (!parsed.key_share_group && supported_share)
+                {
+                    parsed.key_share_group = group;
+                    parsed.key_share_len = key_len;
+                    memcpy(parsed.key_share, body + share_pos, key_len);
+                }
                 share_pos += key_len;
             }
         }
         pos += ext_len;
     }
 
-    return pos == ext_end
-           && (!supported_versions_seen || supported_version_offered)
-           && supported_groups_seen && supported_group_offered
-           && signature_algorithms_seen && supported_signature_offered
-           && key_share_seen && supported_key_share_offered;
+    const bool valid = pos == ext_end
+                       && (!supported_versions_seen
+                           || supported_version_offered)
+                       && supported_groups_seen && supported_group_offered
+                       && signature_algorithms_seen
+                       && supported_signature_offered
+                       && key_share_seen && supported_key_share_offered
+                       && parsed.tls_version && parsed.cipher_suite
+                       && parsed.signature_algorithm && parsed.named_group
+                       && parsed.key_share_group && parsed.key_share_len;
+    if (valid && metadata)
+    {
+        parsed.ready = true;
+        *metadata = parsed;
+    }
+    return valid;
 }
 
 static bool
-ikev2_helper_eap_tls_record_header_valid(const struct ikev2_helper_ike_sa *sa)
+ikev2_helper_eap_tls_record_header_valid(struct ikev2_helper_ike_sa *sa)
 {
+    if (sa)
+    {
+        CLEAR(sa->eap_tls_client_hello);
+    }
     if (!sa || !sa->eap_tls_rx || !sa->eap_tls_message_complete
         || sa->eap_tls_message_len < IKEV2_HELPER_TLS_RECORD_HEADER_SIZE
         || sa->eap_tls_received != sa->eap_tls_message_len)
@@ -3004,7 +3097,7 @@ ikev2_helper_eap_tls_record_header_valid(const struct ikev2_helper_ike_sa *sa)
                                 - IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE)
            && ikev2_helper_tls_client_hello_body_valid(
                handshake + IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE,
-               handshake_len);
+               handshake_len, &sa->eap_tls_client_hello);
 }
 
 static bool
