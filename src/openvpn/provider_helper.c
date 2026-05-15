@@ -143,6 +143,28 @@ provider_helper_supervisor_try_reap_child(struct provider_helper_supervisor *sup
         supervisor->pid = 0;
     }
 }
+
+static void
+provider_helper_child_close_fds_except(int keep)
+{
+    long fd_limit = sysconf(_SC_OPEN_MAX);
+    if (fd_limit < 0)
+    {
+        fd_limit = 1024;
+    }
+    if (fd_limit > INT_MAX)
+    {
+        fd_limit = INT_MAX;
+    }
+
+    for (int fd = 3; fd < (int)fd_limit; ++fd)
+    {
+        if (fd != keep)
+        {
+            close(fd);
+        }
+    }
+}
 #endif
 
 static void
@@ -754,6 +776,7 @@ provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
         char fd_env[16];
         snprintf(fd_env, sizeof(fd_env), "%d", PROVIDER_HELPER_CHILD_FD);
         setenv(PROVIDER_HELPER_FD_ENV, fd_env, 1);
+        provider_helper_child_close_fds_except(PROVIDER_HELPER_CHILD_FD);
         execv(path, argv);
         _exit(127);
     }

@@ -20,6 +20,9 @@
 
 #include "provider_helper.h"
 
+#define PROVIDER_HELPER_EXPECT_CLOSED_FD_ENV \
+    "OPENVPN_PROVIDER_HELPER_EXPECT_CLOSED_FD"
+
 static bool
 noop_write_header(int fd, uint32_t type, uint64_t sequence, uint64_t correlation_id)
 {
@@ -77,6 +80,21 @@ main(void)
     if (fd < 0)
     {
         return 3;
+    }
+
+    const char *closed_fd_env = getenv(PROVIDER_HELPER_EXPECT_CLOSED_FD_ENV);
+    if (closed_fd_env)
+    {
+        const int closed_fd = atoi(closed_fd_env);
+        errno = 0;
+        if (closed_fd >= 0 && fcntl(closed_fd, F_GETFD) >= 0)
+        {
+            return 10;
+        }
+        if (closed_fd >= 0 && errno != EBADF)
+        {
+            return 11;
+        }
     }
 
     if (!noop_write_header(fd, PROVIDER_HELPER_MSG_HELLO, 1, 1))

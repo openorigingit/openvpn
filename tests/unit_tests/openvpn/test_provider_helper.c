@@ -43,6 +43,9 @@
 static const char *noop_helper_path;
 static const char *ikev2_helper_path;
 
+#define PROVIDER_HELPER_EXPECT_CLOSED_FD_ENV \
+    "OPENVPN_PROVIDER_HELPER_EXPECT_CLOSED_FD"
+
 static const char *find_executable(const char *const *paths);
 
 struct provider_helper_status_capture
@@ -4377,6 +4380,52 @@ test_provider_helper_spawn_rejects_live_child_pid(void **state)
 }
 
 static void
+test_provider_helper_spawn_closes_unlisted_child_fds(void **state)
+{
+    (void)state;
+
+#ifdef _WIN32
+    skip();
+#else
+    if (!noop_helper_path)
+    {
+        skip();
+    }
+
+    int inherited_fds[2] = { -1, -1 };
+    assert_int_equal(pipe(inherited_fds), 0);
+    assert_true(inherited_fds[1] != PROVIDER_HELPER_CHILD_FD);
+
+    char fd_env[16];
+    snprintf(fd_env, sizeof(fd_env), "%d", inherited_fds[1]);
+    assert_int_equal(setenv(PROVIDER_HELPER_EXPECT_CLOSED_FD_ENV, fd_env, 1),
+                     0);
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+
+    char *const argv[] = { (char *)noop_helper_path, NULL };
+    assert_true(
+        provider_helper_supervisor_spawn(&supervisor, noop_helper_path, argv));
+    unsetenv(PROVIDER_HELPER_EXPECT_CLOSED_FD_ENV);
+    close(inherited_fds[0]);
+    close(inherited_fds[1]);
+
+    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_true(supervisor.pid > 0);
+    provider_helper_supervisor_stop(&supervisor);
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
+    assert_int_equal(supervisor.ipc_fd, -1);
+#endif
+}
+
+static void
 test_provider_helper_spawn_rejects_invalid_runtime_config(void **state)
 {
     (void)state;
@@ -7030,6 +7079,8 @@ main(void)
         cmocka_unit_test(test_provider_helper_preflight_timeout_fails_closed),
         cmocka_unit_test(test_provider_helper_spawn_noop),
         cmocka_unit_test(test_provider_helper_spawn_rejects_live_child_pid),
+        cmocka_unit_test(
+            test_provider_helper_spawn_closes_unlisted_child_fds),
         cmocka_unit_test(test_provider_helper_spawn_rejects_invalid_runtime_config),
         cmocka_unit_test(test_provider_helper_reaps_early_helper_exit),
         cmocka_unit_test(test_provider_helper_reaps_after_bad_ipc_header),
