@@ -114,9 +114,13 @@
 #define IKEV2_HELPER_TLS_CIPHER_TLS_AES_256_GCM_SHA384 0x1302
 #define IKEV2_HELPER_TLS_CIPHER_ECDHE_RSA_AES_128_GCM_SHA256 0xc02f
 #define IKEV2_HELPER_TLS_CIPHER_ECDHE_ECDSA_AES_128_GCM_SHA256 0xc02b
+#define IKEV2_HELPER_TLS_SIGALG_RSA_PKCS1_SHA256 0x0401
+#define IKEV2_HELPER_TLS_SIGALG_ECDSA_SECP256R1_SHA256 0x0403
+#define IKEV2_HELPER_TLS_SIGALG_RSA_PSS_RSAE_SHA256 0x0804
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_RANDOM_BYTES 32
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_SESSION_ID 32
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_EXTENSIONS 64
+#define IKEV2_HELPER_TLS_EXTENSION_SIGNATURE_ALGORITHMS 13
 #define IKEV2_HELPER_TLS_EXTENSION_SUPPORTED_VERSIONS 43
 #define IKEV2_HELPER_TLS_CONTENT_TYPE_ALERT 21
 #define IKEV2_HELPER_TLS_ALERT_FATAL 2
@@ -2710,6 +2714,21 @@ ikev2_helper_tls_cipher_supported(uint16_t cipher_suite)
 }
 
 static bool
+ikev2_helper_tls_signature_supported(uint16_t sigalg)
+{
+    switch (sigalg)
+    {
+        case IKEV2_HELPER_TLS_SIGALG_RSA_PKCS1_SHA256:
+        case IKEV2_HELPER_TLS_SIGALG_ECDSA_SECP256R1_SHA256:
+        case IKEV2_HELPER_TLS_SIGALG_RSA_PSS_RSAE_SHA256:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+static bool
 ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
                                          size_t body_len)
 {
@@ -2800,6 +2819,8 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
     uint32_t ext_count = 0;
     bool supported_versions_seen = false;
     bool supported_version_offered = false;
+    bool signature_algorithms_seen = false;
+    bool supported_signature_offered = false;
     while (pos < ext_end)
     {
         if (++ext_count > IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_EXTENSIONS
@@ -2837,11 +2858,34 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
                     || version == IKEV2_HELPER_TLS_VERSION_1_3;
             }
         }
+        else if (ext_type == IKEV2_HELPER_TLS_EXTENSION_SIGNATURE_ALGORITHMS)
+        {
+            if (signature_algorithms_seen || ext_len < 4)
+            {
+                return false;
+            }
+            signature_algorithms_seen = true;
+            const uint16_t sigalgs_len =
+                ikev2_helper_read_be16(body + pos);
+            if (!sigalgs_len || sigalgs_len != ext_len - 2
+                || (sigalgs_len & 1))
+            {
+                return false;
+            }
+            for (size_t i = 0; i < sigalgs_len; i += 2)
+            {
+                supported_signature_offered =
+                    supported_signature_offered
+                    || ikev2_helper_tls_signature_supported(
+                        ikev2_helper_read_be16(body + pos + 2 + i));
+            }
+        }
         pos += ext_len;
     }
 
     return pos == ext_end
-           && (!supported_versions_seen || supported_version_offered);
+           && (!supported_versions_seen || supported_version_offered)
+           && signature_algorithms_seen && supported_signature_offered;
 }
 
 static bool
