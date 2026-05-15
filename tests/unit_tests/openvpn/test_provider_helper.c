@@ -828,15 +828,13 @@ test_provider_helper_restart_backoff_after_ipc_failure(void **state)
     assert_true(provider_helper_supervisor_restart_ready(&supervisor));
     assert_int_equal(provider_helper_supervisor_restart_delay(&supervisor), 0);
 
-    fds[0] = -1;
-    fds[1] = -1;
-    assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
-    supervisor.ipc_fd = fds[0];
     provider_helper_supervisor_set_state(&supervisor,
-                                         PROVIDER_HELPER_STATE_READY);
-    close(fds[1]);
+                                         PROVIDER_HELPER_STATE_PREFLIGHT);
+    supervisor.last_state_change =
+        now - PROVIDER_HELPER_PREFLIGHT_TIMEOUT_SECONDS - 1;
 
-    assert_false(provider_helper_supervisor_send_stats_request(&supervisor, 89));
+    provider_helper_process_event(&supervisor);
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_DEGRADED);
     assert_int_equal(supervisor.restart_backoff_seconds,
                      PROVIDER_HELPER_RESTART_BACKOFF_INITIAL_SECONDS * 2);
     assert_int_equal(supervisor.next_restart_time, 1003);
@@ -844,6 +842,26 @@ test_provider_helper_restart_backoff_after_ipc_failure(void **state)
     provider_helper_supervisor_free(&supervisor);
     now = saved_now;
 #endif
+}
+
+static void
+test_provider_helper_ready_resets_restart_backoff(void **state)
+{
+    (void)state;
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.restart_backoff_seconds = 8;
+    supervisor.next_restart_time = time(NULL) + 8;
+
+    provider_helper_supervisor_set_state(&supervisor,
+                                         PROVIDER_HELPER_STATE_READY);
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.restart_backoff_seconds, 0);
+    assert_int_equal(supervisor.next_restart_time, 0);
+
+    provider_helper_supervisor_free(&supervisor);
 }
 
 static void
@@ -7287,6 +7305,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_stats_request_message),
         cmocka_unit_test(test_provider_helper_disconnected_ipc_send_fails_closed),
         cmocka_unit_test(test_provider_helper_restart_backoff_after_ipc_failure),
+        cmocka_unit_test(test_provider_helper_ready_resets_restart_backoff),
         cmocka_unit_test(test_provider_helper_status_output),
         cmocka_unit_test(test_provider_helper_xfrm_lease_roundtrip),
         cmocka_unit_test(test_provider_helper_auth_request_roundtrip),

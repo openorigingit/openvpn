@@ -137,6 +137,11 @@ provider_helper_supervisor_set_state(struct provider_helper_supervisor *supervis
 {
     if (supervisor)
     {
+        if (state == PROVIDER_HELPER_STATE_READY)
+        {
+            supervisor->restart_backoff_seconds = 0;
+            supervisor->next_restart_time = 0;
+        }
         supervisor->state = state;
         supervisor->last_state_change = provider_helper_supervisor_now();
     }
