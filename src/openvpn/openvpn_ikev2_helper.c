@@ -108,6 +108,9 @@
 #define IKEV2_HELPER_TLS_RECORD_VERSION_MAJOR 3
 #define IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE 4
 #define IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CLIENT_HELLO 1
+#define IKEV2_HELPER_TLS_CLIENT_HELLO_RANDOM_BYTES 32
+#define IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_SESSION_ID 32
+#define IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_EXTENSIONS 64
 #define IKEV2_HELPER_RATE_BUCKETS 64
 #define IKEV2_HELPER_POLL_TIMEOUT_MS 1000
 #define IKEV2_HELPER_IKE_SA_INIT_MESSAGE_ID 0
@@ -2654,6 +2657,103 @@ ikev2_helper_clear_eap_tls_buffer(struct ikev2_helper_ike_sa *sa)
 }
 
 static bool
+ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
+                                         size_t body_len)
+{
+    if (!body
+        || body_len < 2 + IKEV2_HELPER_TLS_CLIENT_HELLO_RANDOM_BYTES + 1
+                      + 2 + 2 + 1 + 1)
+    {
+        return false;
+    }
+
+    size_t pos = 0;
+    if (body[pos] != IKEV2_HELPER_TLS_RECORD_VERSION_MAJOR
+        || body[pos + 1] == 0)
+    {
+        return false;
+    }
+    pos += 2 + IKEV2_HELPER_TLS_CLIENT_HELLO_RANDOM_BYTES;
+
+    const uint8_t session_id_len = body[pos++];
+    if (session_id_len > IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_SESSION_ID
+        || session_id_len > body_len - pos)
+    {
+        return false;
+    }
+    pos += session_id_len;
+
+    if (body_len - pos < 2)
+    {
+        return false;
+    }
+    const uint16_t cipher_suites_len = ikev2_helper_read_be16(body + pos);
+    pos += 2;
+    if (!cipher_suites_len || (cipher_suites_len & 1)
+        || cipher_suites_len > body_len - pos)
+    {
+        return false;
+    }
+    pos += cipher_suites_len;
+
+    if (body_len - pos < 1)
+    {
+        return false;
+    }
+    const uint8_t compression_methods_len = body[pos++];
+    if (!compression_methods_len || compression_methods_len > body_len - pos)
+    {
+        return false;
+    }
+    bool saw_null_compression = false;
+    for (size_t i = 0; i < compression_methods_len; ++i)
+    {
+        saw_null_compression = saw_null_compression || body[pos + i] == 0;
+    }
+    if (!saw_null_compression)
+    {
+        return false;
+    }
+    pos += compression_methods_len;
+
+    if (pos == body_len)
+    {
+        return true;
+    }
+    if (body_len - pos < 2)
+    {
+        return false;
+    }
+    const uint16_t extensions_len = ikev2_helper_read_be16(body + pos);
+    pos += 2;
+    if (extensions_len != body_len - pos)
+    {
+        return false;
+    }
+
+    size_t ext_end = pos + extensions_len;
+    uint32_t ext_count = 0;
+    while (pos < ext_end)
+    {
+        if (++ext_count > IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_EXTENSIONS
+            || ext_end - pos < 4)
+        {
+            return false;
+        }
+        pos += 2; /* Extension type. */
+        const uint16_t ext_len = ikev2_helper_read_be16(body + pos);
+        pos += 2;
+        if (ext_len > ext_end - pos)
+        {
+            return false;
+        }
+        pos += ext_len;
+    }
+
+    return pos == ext_end;
+}
+
+static bool
 ikev2_helper_eap_tls_record_header_valid(const struct ikev2_helper_ike_sa *sa)
 {
     if (!sa || !sa->eap_tls_rx || !sa->eap_tls_message_complete
@@ -2681,7 +2781,13 @@ ikev2_helper_eap_tls_record_header_valid(const struct ikev2_helper_ike_sa *sa)
                                    | ((uint32_t)handshake[2] << 8)
                                    | handshake[3];
     return handshake[0] == IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CLIENT_HELLO
-           && handshake_len != 0;
+           && handshake_len != 0
+           && handshake_len
+                  == (uint32_t)(record_len
+                                - IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE)
+           && ikev2_helper_tls_client_hello_body_valid(
+               handshake + IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE,
+               handshake_len);
 }
 
 static bool

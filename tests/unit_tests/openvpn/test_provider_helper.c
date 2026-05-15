@@ -7493,20 +7493,35 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
     test_recv_ikev2_encrypted_server_auth_response(
         response_fd, initiator_spi, &sa_init_material, true);
 
-    const uint8_t first_fragment[] = { 0x16, 0x03, 0x01, 0x00, 0x04 };
+    const uint8_t client_hello[] = {
+        0x16, 0x03, 0x01, 0x00, 0x2f,
+        0x01, 0x00, 0x00, 0x2b,
+        0x03, 0x03,
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+        0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+        0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11,
+        0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+        0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+        0x1e, 0x1f,
+        0x00,
+        0x00, 0x02, 0x13, 0x01,
+        0x01, 0x00,
+        0x00, 0x00,
+    };
+    const size_t first_fragment_len = 5;
     test_send_ikev2_encrypted_ike_auth_eap_response_fragment_datagram_from(
         response_fd, natt_port, initiator_spi, &sa_init_material, true, 2, 1,
         TEST_IKEV2_EAP_TLS_FLAG_LENGTH_INCLUDED
         | TEST_IKEV2_EAP_TLS_FLAG_MORE_FRAGMENTS,
-        9, first_fragment, sizeof(first_fragment));
+        sizeof(client_hello), client_hello, first_fragment_len);
     usleep(10000);
     test_recv_ikev2_encrypted_eap_tls_request(
         response_fd, initiator_spi, &sa_init_material, 2, 2, 0, true);
 
-    const uint8_t final_fragment[] = { 0x01, 0x00, 0x00, 0x01 };
     test_send_ikev2_encrypted_ike_auth_eap_response_fragment_datagram_from(
         response_fd, natt_port, initiator_spi, &sa_init_material, true, 3, 2,
-        0, 0, final_fragment, sizeof(final_fragment));
+        0, 0, client_hello + first_fragment_len,
+        sizeof(client_hello) - first_fragment_len);
     usleep(10000);
     test_recv_ikev2_encrypted_notify_exchange_response(
         response_fd, initiator_spi, &sa_init_material,
