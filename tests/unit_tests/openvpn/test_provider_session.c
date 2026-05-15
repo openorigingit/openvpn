@@ -77,6 +77,8 @@ default_xfrm_lease(uint64_t provider_session_id)
         .lease_id = 42,
         .provider_session_id = provider_session_id,
         .policy_revision = 7,
+        .expires = 2000,
+        .rekey_deadline = 1900,
         .mark_value = 0x1000002u,
         .mark_mask = 0xffffffffu,
         .if_id = 9,
@@ -206,6 +208,10 @@ test_provider_session_xfrm_lease_validation(void **state)
 
     lease = default_xfrm_lease(session->id);
     lease.mark_mask = 0;
+    assert_false(provider_session_set_xfrm_lease(session, &lease));
+
+    lease = default_xfrm_lease(session->id);
+    lease.rekey_deadline = lease.expires + 1;
     assert_false(provider_session_set_xfrm_lease(session, &lease));
 
     lease = default_xfrm_lease(session->id);

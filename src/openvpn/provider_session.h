@@ -31,6 +31,8 @@ struct provider_session_xfrm_lease {
     uint64_t lease_id;
     uint64_t provider_session_id;
     uint64_t policy_revision;
+    uint64_t expires;
+    uint64_t rekey_deadline;
     uint32_t mark_value;
     uint32_t mark_mask;
     uint32_t if_id;

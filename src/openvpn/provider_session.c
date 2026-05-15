@@ -264,6 +264,11 @@ provider_session_set_xfrm_lease(struct provider_session *session,
     {
         return false;
     }
+    if (lease->expires && lease->rekey_deadline
+        && lease->rekey_deadline > lease->expires)
+    {
+        return false;
+    }
 
     if ((session->xfrm_lease_id && session->xfrm_lease_id != lease->lease_id)
         || (session->policy_revision

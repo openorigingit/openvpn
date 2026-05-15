@@ -941,6 +941,8 @@ test_provider_helper_xfrm_lease_roundtrip(void **state)
         .lease_id = 17,
         .provider_session_id = 7,
         .policy_revision = 3,
+        .expires = 2000,
+        .rekey_deadline = 1900,
         .mark_value = 0x4200,
         .mark_mask = 0xffff,
         .if_id = 12,
@@ -971,6 +973,8 @@ test_provider_helper_xfrm_lease_roundtrip(void **state)
     assert_int_equal(output.lease_id, input.lease_id);
     assert_int_equal(output.provider_session_id, input.provider_session_id);
     assert_int_equal(output.policy_revision, input.policy_revision);
+    assert_int_equal(output.expires, input.expires);
+    assert_int_equal(output.rekey_deadline, input.rekey_deadline);
     assert_int_equal(output.mark_value, input.mark_value);
     assert_int_equal(output.mark_mask, input.mark_mask);
     assert_int_equal(output.if_id, input.if_id);
@@ -991,6 +995,10 @@ test_provider_helper_xfrm_lease_roundtrip(void **state)
     assert_false(provider_helper_xfrm_lease_valid(&input, reason, sizeof(reason)));
     assert_non_null(strstr(reason, "reqid"));
     input.reqid = 1100;
+    input.rekey_deadline = 2001;
+    assert_false(provider_helper_xfrm_lease_valid(&input, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "deadline"));
+    input.rekey_deadline = 1900;
     input.local_ts_start_ipv4 = 0x0a580003;
     input.local_ts_end_ipv4 = 0x0a580001;
     assert_false(provider_helper_xfrm_lease_valid(&input, reason, sizeof(reason)));

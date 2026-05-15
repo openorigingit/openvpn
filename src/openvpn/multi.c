@@ -501,6 +501,8 @@ multi_ikev2_helper_copy_xfrm_lease(struct provider_helper_xfrm_lease *dst,
     dst->lease_id = src->lease_id;
     dst->provider_session_id = src->provider_session_id;
     dst->policy_revision = src->policy_revision;
+    dst->expires = src->expires;
+    dst->rekey_deadline = src->rekey_deadline;
     dst->mark_value = src->mark_value;
     dst->mark_mask = src->mark_mask;
     dst->if_id = src->if_id;

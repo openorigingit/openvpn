@@ -4319,6 +4319,8 @@ ikev2_helper_xfrm_lease_equal(const struct provider_helper_xfrm_lease *a,
            && a->mark_mask == b->mark_mask
            && a->if_id == b->if_id
            && a->reqid == b->reqid
+           && a->expires == b->expires
+           && a->rekey_deadline == b->rekey_deadline
            && a->address_family == b->address_family
            && a->flags == b->flags
            && a->local_ts_start_ipv4 == b->local_ts_start_ipv4

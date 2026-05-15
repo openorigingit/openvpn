@@ -37,7 +37,7 @@
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 56
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
 #define PROVIDER_HELPER_RUNTIME_STATS_SIZE  808
-#define PROVIDER_HELPER_XFRM_LEASE_SIZE     88
+#define PROVIDER_HELPER_XFRM_LEASE_SIZE     104
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
 #define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
 #define PROVIDER_HELPER_AUTH_SERIAL_SIZE      128
@@ -480,6 +480,8 @@ struct provider_helper_xfrm_lease {
     uint64_t lease_id;
     uint64_t provider_session_id;
     uint64_t policy_revision;
+    uint64_t expires;
+    uint64_t rekey_deadline;
     uint32_t mark_value;
     uint32_t mark_mask;
     uint32_t if_id;

@@ -306,6 +306,14 @@ provider_helper_xfrm_lease_valid(const struct provider_helper_xfrm_lease *lease,
                                       "XFRM lease mark mask and reqid must be nonzero");
         return false;
     }
+    if (lease->expires && lease->rekey_deadline
+        && lease->rekey_deadline > lease->expires)
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "XFRM lease rekey deadline must be <= expiration");
+        return false;
+    }
     if (lease->address_family != AF_INET && lease->address_family != AF_INET6)
     {
         provider_helper_config_reason(reason, reason_size,
@@ -1274,6 +1282,8 @@ provider_helper_ipc_encode_xfrm_lease(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u64(&pos, lease->lease_id);
     provider_helper_wire_write_u64(&pos, lease->provider_session_id);
     provider_helper_wire_write_u64(&pos, lease->policy_revision);
+    provider_helper_wire_write_u64(&pos, lease->expires);
+    provider_helper_wire_write_u64(&pos, lease->rekey_deadline);
     provider_helper_wire_write_u32(&pos, lease->mark_value);
     provider_helper_wire_write_u32(&pos, lease->mark_mask);
     provider_helper_wire_write_u32(&pos, lease->if_id);
@@ -1308,6 +1318,8 @@ provider_helper_ipc_decode_xfrm_lease(const uint8_t *src, size_t src_len,
     lease->lease_id = provider_helper_wire_read_u64(&pos);
     lease->provider_session_id = provider_helper_wire_read_u64(&pos);
     lease->policy_revision = provider_helper_wire_read_u64(&pos);
+    lease->expires = provider_helper_wire_read_u64(&pos);
+    lease->rekey_deadline = provider_helper_wire_read_u64(&pos);
     lease->mark_value = provider_helper_wire_read_u32(&pos);
     lease->mark_mask = provider_helper_wire_read_u32(&pos);
     lease->if_id = provider_helper_wire_read_u32(&pos);
