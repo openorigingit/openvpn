@@ -49,6 +49,17 @@
 #define PROVIDER_HELPER_SESSION_CLOSE_SIZE  168
 #define PROVIDER_HELPER_SESSION_STATE_TEXT_SIZE 32
 #define PROVIDER_HELPER_SESSION_UPDATE_SIZE 144
+#define PROVIDER_HELPER_SERVER_AUTH_ID_SIZE 256
+#define PROVIDER_HELPER_SERVER_AUTH_CERT_CHAIN_SIZE (16 * 1024)
+#define PROVIDER_HELPER_SERVER_AUTH_CONFIG_SIZE \
+    (32 + PROVIDER_HELPER_SERVER_AUTH_ID_SIZE \
+     + PROVIDER_HELPER_SERVER_AUTH_CERT_CHAIN_SIZE)
+#define PROVIDER_HELPER_SERVER_AUTH_TRANSCRIPT_SIZE (8 * 1024)
+#define PROVIDER_HELPER_SERVER_SIGN_REQUEST_SIZE \
+    (56 + PROVIDER_HELPER_SERVER_AUTH_TRANSCRIPT_SIZE)
+#define PROVIDER_HELPER_SERVER_AUTH_SIGNATURE_SIZE 4096
+#define PROVIDER_HELPER_SERVER_SIGN_RESPONSE_SIZE \
+    (40 + PROVIDER_HELPER_SERVER_AUTH_SIGNATURE_SIZE)
 #define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
 #define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE 4
 #define PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE 4
@@ -88,6 +99,12 @@
 
 #define PROVIDER_HELPER_XFRM_LEASE_IPV4   (1u << 0)
 #define PROVIDER_HELPER_XFRM_LEASE_IPV6   (1u << 1)
+
+#define PROVIDER_HELPER_SERVER_AUTH_SIGALG_RSA_PSS_SHA256   (1u << 0)
+#define PROVIDER_HELPER_SERVER_AUTH_SIGALG_ECDSA_P256_SHA256 (1u << 1)
+#define PROVIDER_HELPER_SERVER_AUTH_SIGALG_SUPPORTED \
+    (PROVIDER_HELPER_SERVER_AUTH_SIGALG_RSA_PSS_SHA256 \
+     | PROVIDER_HELPER_SERVER_AUTH_SIGALG_ECDSA_P256_SHA256)
 
 #define PROVIDER_HELPER_FEATURE_IKEV2_BASE (1ull << 0)
 
@@ -165,6 +182,10 @@ enum provider_helper_msg_type {
     PROVIDER_HELPER_MSG_AUTH_RESPONSE,
     PROVIDER_HELPER_MSG_SESSION_CLOSE,
     PROVIDER_HELPER_MSG_SESSION_UPDATE,
+    PROVIDER_HELPER_MSG_SERVER_AUTH_CONFIG,
+    PROVIDER_HELPER_MSG_SERVER_AUTH_CONFIG_ACK,
+    PROVIDER_HELPER_MSG_SERVER_SIGN_REQUEST,
+    PROVIDER_HELPER_MSG_SERVER_SIGN_RESPONSE,
 };
 
 enum provider_helper_session_update_state {
@@ -257,6 +278,15 @@ enum provider_helper_auth_decision {
     PROVIDER_HELPER_AUTH_ALLOW = 2,
 };
 
+enum provider_helper_server_auth_method {
+    PROVIDER_HELPER_SERVER_AUTH_METHOD_DIGITAL_SIGNATURE = 14,
+};
+
+enum provider_helper_server_sign_status {
+    PROVIDER_HELPER_SERVER_SIGN_OK = 1,
+    PROVIDER_HELPER_SERVER_SIGN_FAILED = 2,
+};
+
 struct provider_helper_msg_header {
     uint32_t magic;
     uint16_t version_major;
@@ -326,6 +356,44 @@ struct provider_helper_session_update {
     uint32_t reserved2;
     char helper_state[PROVIDER_HELPER_SESSION_STATE_TEXT_SIZE];
     char child_sa_state[PROVIDER_HELPER_SESSION_STATE_TEXT_SIZE];
+};
+
+struct provider_helper_server_auth_config {
+    uint64_t config_revision;
+    uint32_t ikev2_id_type;
+    uint32_t server_id_len;
+    uint32_t cert_chain_len;
+    uint32_t allowed_sigalgs;
+    uint32_t flags;
+    uint32_t reserved;
+    char server_id[PROVIDER_HELPER_SERVER_AUTH_ID_SIZE];
+    uint8_t cert_chain[PROVIDER_HELPER_SERVER_AUTH_CERT_CHAIN_SIZE];
+};
+
+struct provider_helper_server_sign_request {
+    uint64_t request_id;
+    uint64_t initiator_spi;
+    uint64_t responder_spi;
+    uint64_t config_revision;
+    uint32_t listener_id;
+    uint32_t auth_method;
+    uint32_t sigalg;
+    uint32_t transcript_len;
+    uint32_t flags;
+    uint32_t reserved;
+    uint8_t transcript[PROVIDER_HELPER_SERVER_AUTH_TRANSCRIPT_SIZE];
+};
+
+struct provider_helper_server_sign_response {
+    uint64_t request_id;
+    uint64_t config_revision;
+    uint32_t status;
+    uint32_t sigalg;
+    uint32_t signature_len;
+    uint32_t flags;
+    uint32_t reserved1;
+    uint32_t reserved2;
+    uint8_t signature[PROVIDER_HELPER_SERVER_AUTH_SIGNATURE_SIZE];
 };
 
 struct provider_helper_feature_set {
@@ -695,6 +763,18 @@ bool provider_helper_session_update_valid(
     const struct provider_helper_session_update *session_update,
     char *reason,
     size_t reason_size);
+bool provider_helper_server_auth_config_valid(
+    const struct provider_helper_server_auth_config *config,
+    char *reason,
+    size_t reason_size);
+bool provider_helper_server_sign_request_valid(
+    const struct provider_helper_server_sign_request *request,
+    char *reason,
+    size_t reason_size);
+bool provider_helper_server_sign_response_valid(
+    const struct provider_helper_server_sign_response *response,
+    char *reason,
+    size_t reason_size);
 
 bool provider_helper_ipc_write_header(struct buffer *buf,
                                       const struct provider_helper_msg_header *header);
@@ -741,6 +821,15 @@ bool provider_helper_ipc_write_session_close(
 bool provider_helper_ipc_write_session_update(
     struct buffer *buf,
     const struct provider_helper_session_update *session_update);
+bool provider_helper_ipc_write_server_auth_config(
+    struct buffer *buf,
+    const struct provider_helper_server_auth_config *config);
+bool provider_helper_ipc_write_server_sign_request(
+    struct buffer *buf,
+    const struct provider_helper_server_sign_request *request);
+bool provider_helper_ipc_write_server_sign_response(
+    struct buffer *buf,
+    const struct provider_helper_server_sign_response *response);
 bool provider_helper_ipc_encode_runtime_config(uint8_t *dst, size_t dst_len,
                                                const struct provider_helper_runtime_config *config);
 bool provider_helper_ipc_decode_runtime_config(const uint8_t *src, size_t src_len,
@@ -789,6 +878,30 @@ bool provider_helper_ipc_decode_session_update(
     const uint8_t *src,
     size_t src_len,
     struct provider_helper_session_update *session_update);
+bool provider_helper_ipc_encode_server_auth_config(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_server_auth_config *config);
+bool provider_helper_ipc_decode_server_auth_config(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_server_auth_config *config);
+bool provider_helper_ipc_encode_server_sign_request(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_server_sign_request *request);
+bool provider_helper_ipc_decode_server_sign_request(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_server_sign_request *request);
+bool provider_helper_ipc_encode_server_sign_response(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_server_sign_response *response);
+bool provider_helper_ipc_decode_server_sign_response(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_server_sign_response *response);
 enum provider_helper_ikev2_parse_result
 provider_helper_ikev2_parse_header(const uint8_t *packet,
                                    size_t packet_len,

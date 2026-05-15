@@ -737,6 +737,192 @@ provider_helper_session_update_valid(
     return true;
 }
 
+static bool
+provider_helper_server_auth_sigalg_valid(uint32_t sigalg)
+{
+    return sigalg && !(sigalg & (sigalg - 1))
+           && (sigalg & PROVIDER_HELPER_SERVER_AUTH_SIGALG_SUPPORTED);
+}
+
+bool
+provider_helper_server_auth_config_valid(
+    const struct provider_helper_server_auth_config *config,
+    char *reason,
+    size_t reason_size)
+{
+    if (!config)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "missing server auth config");
+        return false;
+    }
+    if (!config->config_revision)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "server auth config revision must be nonzero");
+        return false;
+    }
+    if (config->flags || config->reserved)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "server auth config reserved fields must be zero");
+        return false;
+    }
+    if (config->ikev2_id_type != PROVIDER_HELPER_IKEV2_ID_FQDN
+        && config->ikev2_id_type != PROVIDER_HELPER_IKEV2_ID_RFC822)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "unsupported server IKEv2 identity type");
+        return false;
+    }
+    if (!config->server_id_len
+        || config->server_id_len >= sizeof(config->server_id))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "invalid server identity length");
+        return false;
+    }
+    if (!provider_helper_auth_text_field_valid(
+            config->server_id, config->server_id_len,
+            sizeof(config->server_id), false))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "server identity contains invalid characters");
+        return false;
+    }
+    if (!config->cert_chain_len
+        || config->cert_chain_len > sizeof(config->cert_chain))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "invalid server certificate chain length");
+        return false;
+    }
+    if (!config->allowed_sigalgs
+        || (config->allowed_sigalgs
+            & ~PROVIDER_HELPER_SERVER_AUTH_SIGALG_SUPPORTED))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "unsupported server auth signature algorithms");
+        return false;
+    }
+
+    provider_helper_config_reason(reason, reason_size, "ok");
+    return true;
+}
+
+bool
+provider_helper_server_sign_request_valid(
+    const struct provider_helper_server_sign_request *request,
+    char *reason,
+    size_t reason_size)
+{
+    if (!request)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "missing server sign request");
+        return false;
+    }
+    if (!request->request_id || !request->initiator_spi
+        || !request->responder_spi || !request->config_revision
+        || !request->listener_id)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "server sign request ids must be nonzero");
+        return false;
+    }
+    if (request->flags || request->reserved)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "server sign request reserved fields must be zero");
+        return false;
+    }
+    if (request->auth_method
+        != PROVIDER_HELPER_SERVER_AUTH_METHOD_DIGITAL_SIGNATURE)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "unsupported server auth method");
+        return false;
+    }
+    if (!provider_helper_server_auth_sigalg_valid(request->sigalg))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "unsupported server sign request algorithm");
+        return false;
+    }
+    if (!request->transcript_len
+        || request->transcript_len > sizeof(request->transcript))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "invalid server sign transcript length");
+        return false;
+    }
+
+    provider_helper_config_reason(reason, reason_size, "ok");
+    return true;
+}
+
+bool
+provider_helper_server_sign_response_valid(
+    const struct provider_helper_server_sign_response *response,
+    char *reason,
+    size_t reason_size)
+{
+    if (!response)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "missing server sign response");
+        return false;
+    }
+    if (!response->request_id || !response->config_revision)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "server sign response ids must be nonzero");
+        return false;
+    }
+    if (response->flags || response->reserved1 || response->reserved2)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "server sign response reserved fields must be zero");
+        return false;
+    }
+    if (response->status != PROVIDER_HELPER_SERVER_SIGN_OK
+        && response->status != PROVIDER_HELPER_SERVER_SIGN_FAILED)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "unsupported server sign response status");
+        return false;
+    }
+    if (!provider_helper_server_auth_sigalg_valid(response->sigalg))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "unsupported server sign response algorithm");
+        return false;
+    }
+    if (response->signature_len > sizeof(response->signature))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "server signature length outside bounds");
+        return false;
+    }
+    if (response->status == PROVIDER_HELPER_SERVER_SIGN_OK
+        && !response->signature_len)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "successful server sign response requires signature");
+        return false;
+    }
+    if (response->status == PROVIDER_HELPER_SERVER_SIGN_FAILED
+        && response->signature_len)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "failed server sign response must not carry signature");
+        return false;
+    }
+
+    provider_helper_config_reason(reason, reason_size, "ok");
+    return true;
+}
+
 static void
 provider_helper_wire_write_u16(uint8_t **pos, uint16_t value)
 {
@@ -1611,6 +1797,179 @@ provider_helper_ipc_decode_session_update(
 
     return (size_t)(pos - src) == PROVIDER_HELPER_SESSION_UPDATE_SIZE
            && provider_helper_session_update_valid(session_update, NULL, 0);
+}
+
+bool
+provider_helper_ipc_encode_server_auth_config(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_server_auth_config *config)
+{
+    if (!dst || dst_len < PROVIDER_HELPER_SERVER_AUTH_CONFIG_SIZE
+        || !provider_helper_server_auth_config_valid(config, NULL, 0))
+    {
+        return false;
+    }
+
+    uint8_t *pos = dst;
+    provider_helper_wire_write_u64(&pos, config->config_revision);
+    provider_helper_wire_write_u32(&pos, config->ikev2_id_type);
+    provider_helper_wire_write_u32(&pos, config->server_id_len);
+    provider_helper_wire_write_u32(&pos, config->cert_chain_len);
+    provider_helper_wire_write_u32(&pos, config->allowed_sigalgs);
+    provider_helper_wire_write_u32(&pos, config->flags);
+    provider_helper_wire_write_u32(&pos, config->reserved);
+    memcpy(pos, config->server_id, sizeof(config->server_id));
+    pos += sizeof(config->server_id);
+    memcpy(pos, config->cert_chain, sizeof(config->cert_chain));
+    pos += sizeof(config->cert_chain);
+
+    return (size_t)(pos - dst) == PROVIDER_HELPER_SERVER_AUTH_CONFIG_SIZE;
+}
+
+bool
+provider_helper_ipc_decode_server_auth_config(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_server_auth_config *config)
+{
+    if (!src || src_len != PROVIDER_HELPER_SERVER_AUTH_CONFIG_SIZE || !config)
+    {
+        return false;
+    }
+
+    const uint8_t *pos = src;
+    CLEAR(*config);
+    config->config_revision = provider_helper_wire_read_u64(&pos);
+    config->ikev2_id_type = provider_helper_wire_read_u32(&pos);
+    config->server_id_len = provider_helper_wire_read_u32(&pos);
+    config->cert_chain_len = provider_helper_wire_read_u32(&pos);
+    config->allowed_sigalgs = provider_helper_wire_read_u32(&pos);
+    config->flags = provider_helper_wire_read_u32(&pos);
+    config->reserved = provider_helper_wire_read_u32(&pos);
+    memcpy(config->server_id, pos, sizeof(config->server_id));
+    pos += sizeof(config->server_id);
+    memcpy(config->cert_chain, pos, sizeof(config->cert_chain));
+    pos += sizeof(config->cert_chain);
+
+    return (size_t)(pos - src) == PROVIDER_HELPER_SERVER_AUTH_CONFIG_SIZE
+           && provider_helper_server_auth_config_valid(config, NULL, 0);
+}
+
+bool
+provider_helper_ipc_encode_server_sign_request(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_server_sign_request *request)
+{
+    if (!dst || dst_len < PROVIDER_HELPER_SERVER_SIGN_REQUEST_SIZE
+        || !provider_helper_server_sign_request_valid(request, NULL, 0))
+    {
+        return false;
+    }
+
+    uint8_t *pos = dst;
+    provider_helper_wire_write_u64(&pos, request->request_id);
+    provider_helper_wire_write_u64(&pos, request->initiator_spi);
+    provider_helper_wire_write_u64(&pos, request->responder_spi);
+    provider_helper_wire_write_u64(&pos, request->config_revision);
+    provider_helper_wire_write_u32(&pos, request->listener_id);
+    provider_helper_wire_write_u32(&pos, request->auth_method);
+    provider_helper_wire_write_u32(&pos, request->sigalg);
+    provider_helper_wire_write_u32(&pos, request->transcript_len);
+    provider_helper_wire_write_u32(&pos, request->flags);
+    provider_helper_wire_write_u32(&pos, request->reserved);
+    memcpy(pos, request->transcript, sizeof(request->transcript));
+    pos += sizeof(request->transcript);
+
+    return (size_t)(pos - dst) == PROVIDER_HELPER_SERVER_SIGN_REQUEST_SIZE;
+}
+
+bool
+provider_helper_ipc_decode_server_sign_request(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_server_sign_request *request)
+{
+    if (!src || src_len != PROVIDER_HELPER_SERVER_SIGN_REQUEST_SIZE
+        || !request)
+    {
+        return false;
+    }
+
+    const uint8_t *pos = src;
+    CLEAR(*request);
+    request->request_id = provider_helper_wire_read_u64(&pos);
+    request->initiator_spi = provider_helper_wire_read_u64(&pos);
+    request->responder_spi = provider_helper_wire_read_u64(&pos);
+    request->config_revision = provider_helper_wire_read_u64(&pos);
+    request->listener_id = provider_helper_wire_read_u32(&pos);
+    request->auth_method = provider_helper_wire_read_u32(&pos);
+    request->sigalg = provider_helper_wire_read_u32(&pos);
+    request->transcript_len = provider_helper_wire_read_u32(&pos);
+    request->flags = provider_helper_wire_read_u32(&pos);
+    request->reserved = provider_helper_wire_read_u32(&pos);
+    memcpy(request->transcript, pos, sizeof(request->transcript));
+    pos += sizeof(request->transcript);
+
+    return (size_t)(pos - src) == PROVIDER_HELPER_SERVER_SIGN_REQUEST_SIZE
+           && provider_helper_server_sign_request_valid(request, NULL, 0);
+}
+
+bool
+provider_helper_ipc_encode_server_sign_response(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_server_sign_response *response)
+{
+    if (!dst || dst_len < PROVIDER_HELPER_SERVER_SIGN_RESPONSE_SIZE
+        || !provider_helper_server_sign_response_valid(response, NULL, 0))
+    {
+        return false;
+    }
+
+    uint8_t *pos = dst;
+    provider_helper_wire_write_u64(&pos, response->request_id);
+    provider_helper_wire_write_u64(&pos, response->config_revision);
+    provider_helper_wire_write_u32(&pos, response->status);
+    provider_helper_wire_write_u32(&pos, response->sigalg);
+    provider_helper_wire_write_u32(&pos, response->signature_len);
+    provider_helper_wire_write_u32(&pos, response->flags);
+    provider_helper_wire_write_u32(&pos, response->reserved1);
+    provider_helper_wire_write_u32(&pos, response->reserved2);
+    memcpy(pos, response->signature, sizeof(response->signature));
+    pos += sizeof(response->signature);
+
+    return (size_t)(pos - dst) == PROVIDER_HELPER_SERVER_SIGN_RESPONSE_SIZE;
+}
+
+bool
+provider_helper_ipc_decode_server_sign_response(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_server_sign_response *response)
+{
+    if (!src || src_len != PROVIDER_HELPER_SERVER_SIGN_RESPONSE_SIZE
+        || !response)
+    {
+        return false;
+    }
+
+    const uint8_t *pos = src;
+    CLEAR(*response);
+    response->request_id = provider_helper_wire_read_u64(&pos);
+    response->config_revision = provider_helper_wire_read_u64(&pos);
+    response->status = provider_helper_wire_read_u32(&pos);
+    response->sigalg = provider_helper_wire_read_u32(&pos);
+    response->signature_len = provider_helper_wire_read_u32(&pos);
+    response->flags = provider_helper_wire_read_u32(&pos);
+    response->reserved1 = provider_helper_wire_read_u32(&pos);
+    response->reserved2 = provider_helper_wire_read_u32(&pos);
+    memcpy(response->signature, pos, sizeof(response->signature));
+    pos += sizeof(response->signature);
+
+    return (size_t)(pos - src) == PROVIDER_HELPER_SERVER_SIGN_RESPONSE_SIZE
+           && provider_helper_server_sign_response_valid(response, NULL, 0);
 }
 
 const char *

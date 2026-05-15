@@ -214,6 +214,54 @@ provider_helper_ipc_write_session_update(
            && buf_write(buf, payload, sizeof(payload));
 }
 
+bool
+provider_helper_ipc_write_server_auth_config(
+    struct buffer *buf,
+    const struct provider_helper_server_auth_config *config)
+{
+    if (!buf || !config)
+    {
+        return false;
+    }
+
+    uint8_t payload[PROVIDER_HELPER_SERVER_AUTH_CONFIG_SIZE];
+    return provider_helper_ipc_encode_server_auth_config(
+               payload, sizeof(payload), config)
+           && buf_write(buf, payload, sizeof(payload));
+}
+
+bool
+provider_helper_ipc_write_server_sign_request(
+    struct buffer *buf,
+    const struct provider_helper_server_sign_request *request)
+{
+    if (!buf || !request)
+    {
+        return false;
+    }
+
+    uint8_t payload[PROVIDER_HELPER_SERVER_SIGN_REQUEST_SIZE];
+    return provider_helper_ipc_encode_server_sign_request(
+               payload, sizeof(payload), request)
+           && buf_write(buf, payload, sizeof(payload));
+}
+
+bool
+provider_helper_ipc_write_server_sign_response(
+    struct buffer *buf,
+    const struct provider_helper_server_sign_response *response)
+{
+    if (!buf || !response)
+    {
+        return false;
+    }
+
+    uint8_t payload[PROVIDER_HELPER_SERVER_SIGN_RESPONSE_SIZE];
+    return provider_helper_ipc_encode_server_sign_response(
+               payload, sizeof(payload), response)
+           && buf_write(buf, payload, sizeof(payload));
+}
+
 enum provider_helper_ipc_result
 provider_helper_ipc_read_header(struct buffer *buf,
                                 struct provider_helper_msg_header *header,

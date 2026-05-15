@@ -1327,6 +1327,209 @@ test_provider_helper_session_update_roundtrip(void **state)
 }
 
 static void
+test_provider_helper_server_auth_config_roundtrip(void **state)
+{
+    (void)state;
+
+    struct provider_helper_server_auth_config input = {
+        .config_revision = 9,
+        .ikev2_id_type = PROVIDER_HELPER_IKEV2_ID_FQDN,
+        .allowed_sigalgs =
+            PROVIDER_HELPER_SERVER_AUTH_SIGALG_RSA_PSS_SHA256
+            | PROVIDER_HELPER_SERVER_AUTH_SIGALG_ECDSA_P256_SHA256,
+    };
+    const char server_id[] = "vpn.example.test";
+    snprintf(input.server_id, sizeof(input.server_id), "%s", server_id);
+    assert_true(strlen(input.server_id) <= UINT32_MAX);
+    input.server_id_len = (uint32_t)strlen(input.server_id);
+    input.cert_chain_len = 512;
+    for (uint32_t i = 0; i < input.cert_chain_len; ++i)
+    {
+        input.cert_chain[i] = (uint8_t)(i & 0xff);
+    }
+
+    struct provider_helper_server_auth_config output;
+    char reason[128];
+    uint8_t payload[PROVIDER_HELPER_SERVER_AUTH_CONFIG_SIZE];
+
+    assert_true(provider_helper_server_auth_config_valid(&input, reason,
+                                                         sizeof(reason)));
+    assert_true(provider_helper_ipc_encode_server_auth_config(
+                    payload, sizeof(payload), &input));
+    assert_true(provider_helper_ipc_decode_server_auth_config(
+                    payload, sizeof(payload), &output));
+    assert_int_equal(output.config_revision, input.config_revision);
+    assert_int_equal(output.ikev2_id_type, input.ikev2_id_type);
+    assert_int_equal(output.server_id_len, input.server_id_len);
+    assert_memory_equal(output.server_id, input.server_id,
+                        input.server_id_len);
+    assert_int_equal(output.cert_chain_len, input.cert_chain_len);
+    assert_memory_equal(output.cert_chain, input.cert_chain,
+                        input.cert_chain_len);
+    assert_int_equal(output.allowed_sigalgs, input.allowed_sigalgs);
+
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_SERVER_AUTH_CONFIG_SIZE);
+    assert_true(provider_helper_ipc_write_server_auth_config(&buf, &input));
+    assert_int_equal(BLEN(&buf), PROVIDER_HELPER_SERVER_AUTH_CONFIG_SIZE);
+    free_buf(&buf);
+
+    input.config_revision = 0;
+    assert_false(provider_helper_server_auth_config_valid(&input, reason,
+                                                          sizeof(reason)));
+    assert_non_null(strstr(reason, "revision"));
+    input.config_revision = 9;
+    input.ikev2_id_type = 0;
+    assert_false(provider_helper_server_auth_config_valid(&input, reason,
+                                                          sizeof(reason)));
+    assert_non_null(strstr(reason, "identity"));
+    input.ikev2_id_type = PROVIDER_HELPER_IKEV2_ID_FQDN;
+    input.server_id_len = 0;
+    assert_false(provider_helper_server_auth_config_valid(&input, reason,
+                                                          sizeof(reason)));
+    assert_non_null(strstr(reason, "identity length"));
+    input.server_id_len = (uint32_t)strlen(input.server_id);
+    input.server_id[3] = '\n';
+    assert_false(provider_helper_server_auth_config_valid(&input, reason,
+                                                          sizeof(reason)));
+    assert_non_null(strstr(reason, "identity"));
+    input.server_id[3] = '.';
+    input.cert_chain_len = 0;
+    assert_false(provider_helper_server_auth_config_valid(&input, reason,
+                                                          sizeof(reason)));
+    assert_non_null(strstr(reason, "certificate"));
+    input.cert_chain_len = 512;
+    input.allowed_sigalgs = 0;
+    assert_false(provider_helper_server_auth_config_valid(&input, reason,
+                                                          sizeof(reason)));
+    assert_non_null(strstr(reason, "signature"));
+}
+
+static void
+test_provider_helper_server_sign_request_roundtrip(void **state)
+{
+    (void)state;
+
+    struct provider_helper_server_sign_request input = {
+        .request_id = 27,
+        .initiator_spi = 0x0102030405060708ull,
+        .responder_spi = 0x8877665544332211ull,
+        .config_revision = 9,
+        .listener_id = 3,
+        .auth_method = PROVIDER_HELPER_SERVER_AUTH_METHOD_DIGITAL_SIGNATURE,
+        .sigalg = PROVIDER_HELPER_SERVER_AUTH_SIGALG_ECDSA_P256_SHA256,
+        .transcript_len = 384,
+    };
+    for (uint32_t i = 0; i < input.transcript_len; ++i)
+    {
+        input.transcript[i] = (uint8_t)((i * 7) & 0xff);
+    }
+
+    struct provider_helper_server_sign_request output;
+    char reason[128];
+    uint8_t payload[PROVIDER_HELPER_SERVER_SIGN_REQUEST_SIZE];
+
+    assert_true(provider_helper_server_sign_request_valid(&input, reason,
+                                                          sizeof(reason)));
+    assert_true(provider_helper_ipc_encode_server_sign_request(
+                    payload, sizeof(payload), &input));
+    assert_true(provider_helper_ipc_decode_server_sign_request(
+                    payload, sizeof(payload), &output));
+    assert_int_equal(output.request_id, input.request_id);
+    assert_int_equal(output.initiator_spi, input.initiator_spi);
+    assert_int_equal(output.responder_spi, input.responder_spi);
+    assert_int_equal(output.config_revision, input.config_revision);
+    assert_int_equal(output.listener_id, input.listener_id);
+    assert_int_equal(output.auth_method, input.auth_method);
+    assert_int_equal(output.sigalg, input.sigalg);
+    assert_int_equal(output.transcript_len, input.transcript_len);
+    assert_memory_equal(output.transcript, input.transcript,
+                        input.transcript_len);
+
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_SERVER_SIGN_REQUEST_SIZE);
+    assert_true(provider_helper_ipc_write_server_sign_request(&buf, &input));
+    assert_int_equal(BLEN(&buf), PROVIDER_HELPER_SERVER_SIGN_REQUEST_SIZE);
+    free_buf(&buf);
+
+    input.request_id = 0;
+    assert_false(provider_helper_server_sign_request_valid(&input, reason,
+                                                           sizeof(reason)));
+    assert_non_null(strstr(reason, "ids"));
+    input.request_id = 27;
+    input.auth_method = 0;
+    assert_false(provider_helper_server_sign_request_valid(&input, reason,
+                                                           sizeof(reason)));
+    assert_non_null(strstr(reason, "method"));
+    input.auth_method = PROVIDER_HELPER_SERVER_AUTH_METHOD_DIGITAL_SIGNATURE;
+    input.sigalg = PROVIDER_HELPER_SERVER_AUTH_SIGALG_SUPPORTED;
+    assert_false(provider_helper_server_sign_request_valid(&input, reason,
+                                                           sizeof(reason)));
+    assert_non_null(strstr(reason, "algorithm"));
+    input.sigalg = PROVIDER_HELPER_SERVER_AUTH_SIGALG_ECDSA_P256_SHA256;
+    input.transcript_len = 0;
+    assert_false(provider_helper_server_sign_request_valid(&input, reason,
+                                                           sizeof(reason)));
+    assert_non_null(strstr(reason, "transcript"));
+}
+
+static void
+test_provider_helper_server_sign_response_roundtrip(void **state)
+{
+    (void)state;
+
+    struct provider_helper_server_sign_response input = {
+        .request_id = 27,
+        .config_revision = 9,
+        .status = PROVIDER_HELPER_SERVER_SIGN_OK,
+        .sigalg = PROVIDER_HELPER_SERVER_AUTH_SIGALG_RSA_PSS_SHA256,
+        .signature_len = 256,
+    };
+    for (uint32_t i = 0; i < input.signature_len; ++i)
+    {
+        input.signature[i] = (uint8_t)(0xa5 ^ i);
+    }
+
+    struct provider_helper_server_sign_response output;
+    char reason[128];
+    uint8_t payload[PROVIDER_HELPER_SERVER_SIGN_RESPONSE_SIZE];
+
+    assert_true(provider_helper_server_sign_response_valid(&input, reason,
+                                                           sizeof(reason)));
+    assert_true(provider_helper_ipc_encode_server_sign_response(
+                    payload, sizeof(payload), &input));
+    assert_true(provider_helper_ipc_decode_server_sign_response(
+                    payload, sizeof(payload), &output));
+    assert_int_equal(output.request_id, input.request_id);
+    assert_int_equal(output.config_revision, input.config_revision);
+    assert_int_equal(output.status, input.status);
+    assert_int_equal(output.sigalg, input.sigalg);
+    assert_int_equal(output.signature_len, input.signature_len);
+    assert_memory_equal(output.signature, input.signature,
+                        input.signature_len);
+
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_SERVER_SIGN_RESPONSE_SIZE);
+    assert_true(provider_helper_ipc_write_server_sign_response(&buf, &input));
+    assert_int_equal(BLEN(&buf), PROVIDER_HELPER_SERVER_SIGN_RESPONSE_SIZE);
+    free_buf(&buf);
+
+    input.signature_len = 0;
+    assert_false(provider_helper_server_sign_response_valid(&input, reason,
+                                                            sizeof(reason)));
+    assert_non_null(strstr(reason, "signature"));
+    input.signature_len = 256;
+    input.status = PROVIDER_HELPER_SERVER_SIGN_FAILED;
+    assert_false(provider_helper_server_sign_response_valid(&input, reason,
+                                                            sizeof(reason)));
+    assert_non_null(strstr(reason, "signature"));
+    input.signature_len = 0;
+    assert_true(provider_helper_server_sign_response_valid(&input, reason,
+                                                           sizeof(reason)));
+    input.status = 0;
+    assert_false(provider_helper_server_sign_response_valid(&input, reason,
+                                                            sizeof(reason)));
+    assert_non_null(strstr(reason, "status"));
+}
+
+static void
 test_write_be16(uint8_t *dst, uint16_t value)
 {
     dst[0] = (uint8_t)(value >> 8);
@@ -8703,6 +8906,9 @@ main(void)
         cmocka_unit_test(test_provider_helper_auth_response_roundtrip),
         cmocka_unit_test(test_provider_helper_session_close_roundtrip),
         cmocka_unit_test(test_provider_helper_session_update_roundtrip),
+        cmocka_unit_test(test_provider_helper_server_auth_config_roundtrip),
+        cmocka_unit_test(test_provider_helper_server_sign_request_roundtrip),
+        cmocka_unit_test(test_provider_helper_server_sign_response_roundtrip),
         cmocka_unit_test(test_provider_helper_ikev2_parser),
         cmocka_unit_test(test_provider_helper_ikev2_payload_parser),
         cmocka_unit_test(test_provider_helper_ikev2_cookie_response),
