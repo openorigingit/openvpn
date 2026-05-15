@@ -4085,6 +4085,16 @@ ikev2_helper_find_listener(const struct ikev2_helper_listener *listeners,
     return NULL;
 }
 
+static bool
+ikev2_helper_listener_id_exists(const struct ikev2_helper_listener *listeners,
+                                size_t listener_count,
+                                uint32_t listener_id)
+{
+    return ikev2_helper_find_listener(listeners, listener_count,
+                                      listener_id)
+           != NULL;
+}
+
 static const struct provider_helper_xfrm_lease *
 ikev2_helper_find_xfrm_lease(const struct provider_helper_xfrm_lease *leases,
                              size_t lease_count,
@@ -6572,6 +6582,8 @@ ikev2_helper_loop(int fd)
                 if (!configured || listener_count >= SIZE(listeners)
                     || !ikev2_helper_read_listener_fd(fd, &header, &listener,
                                                       &listener_fd, &config)
+                    || ikev2_helper_listener_id_exists(
+                        listeners, listener_count, listener.listener_id)
                     || !ikev2_helper_enable_listener_pktinfo(&listener,
                                                              listener_fd)
                     || !ikev2_helper_send_header(fd, PROVIDER_HELPER_MSG_LISTENER_FD_ACK,

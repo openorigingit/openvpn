@@ -651,7 +651,8 @@ provider_helper_supervisor_send_xfrm_lease_msg(
 {
     if (!supervisor || supervisor->ipc_fd < 0
         || supervisor->state != PROVIDER_HELPER_STATE_READY
-        || !provider_helper_xfrm_lease_valid(lease, NULL, 0))
+        || !provider_helper_xfrm_lease_allowed_by_config(
+            &supervisor->runtime_config, lease, NULL, 0))
     {
         return false;
     }

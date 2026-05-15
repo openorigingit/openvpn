@@ -4605,6 +4605,74 @@ test_provider_helper_spawn_ikev2_natt_listener(void **state)
 }
 
 static void
+test_provider_helper_spawn_rejects_duplicate_listener_id(void **state)
+{
+    (void)state;
+
+    if (!ikev2_helper_path)
+    {
+        skip();
+    }
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+
+    char *const argv[] = { (char *)ikev2_helper_path, NULL };
+    assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
+                                                 argv));
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STARTING);
+
+    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 2);
+
+    uint16_t port = 0;
+    int listener_fd = test_create_udp_listener(&port);
+    const struct provider_helper_listener_fd listener = {
+        .listener_id = 2,
+        .family = AF_INET,
+        .socket_type = SOCK_DGRAM,
+        .protocol = IPPROTO_UDP,
+        .local_port = port,
+        .flags = PROVIDER_HELPER_LISTENER_FD_NATT,
+    };
+    assert_true(provider_helper_supervisor_send_listener_fd(&supervisor, listener_fd,
+                                                            &listener, 88));
+
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 3; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 3);
+
+    uint16_t duplicate_port = 0;
+    int duplicate_fd = test_create_udp_listener(&duplicate_port);
+    struct provider_helper_listener_fd duplicate = listener;
+    duplicate.local_port = duplicate_port;
+    assert_true(provider_helper_supervisor_send_listener_fd(
+                    &supervisor, duplicate_fd, &duplicate, 89));
+
+    for (int i = 0; i < 100 && supervisor.state == PROVIDER_HELPER_STATE_READY; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_DEGRADED);
+    close(duplicate_fd);
+    close(listener_fd);
+    provider_helper_supervisor_free(&supervisor);
+}
+
+static void
 test_provider_helper_spawn_ikev2_rejects_oversize_datagram(void **state)
 {
     (void)state;
@@ -6843,6 +6911,8 @@ main(void)
         cmocka_unit_test(test_provider_helper_reaps_early_helper_exit),
         cmocka_unit_test(test_provider_helper_reaps_after_bad_ipc_header),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_natt_listener),
+        cmocka_unit_test(
+            test_provider_helper_spawn_rejects_duplicate_listener_id),
         cmocka_unit_test(
             test_provider_helper_spawn_ikev2_rejects_oversize_datagram),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_unsupported_exchange),
