@@ -125,6 +125,7 @@
 #define IKEV2_HELPER_TLS_EXTENSION_SUPPORTED_GROUPS 10
 #define IKEV2_HELPER_TLS_EXTENSION_SIGNATURE_ALGORITHMS 13
 #define IKEV2_HELPER_TLS_EXTENSION_SUPPORTED_VERSIONS 43
+#define IKEV2_HELPER_TLS_EXTENSION_KEY_SHARE 51
 #define IKEV2_HELPER_TLS_CONTENT_TYPE_ALERT 21
 #define IKEV2_HELPER_TLS_ALERT_FATAL 2
 #define IKEV2_HELPER_TLS_ALERT_HANDSHAKE_FAILURE 40
@@ -2840,6 +2841,8 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
     bool supported_group_offered = false;
     bool signature_algorithms_seen = false;
     bool supported_signature_offered = false;
+    bool key_share_seen = false;
+    bool supported_key_share_offered = false;
     while (pos < ext_end)
     {
         if (++ext_count > IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_EXTENSIONS
@@ -2921,13 +2924,50 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
                         ikev2_helper_read_be16(body + pos + 2 + i));
             }
         }
+        else if (ext_type == IKEV2_HELPER_TLS_EXTENSION_KEY_SHARE)
+        {
+            if (key_share_seen || ext_len < 6)
+            {
+                return false;
+            }
+            key_share_seen = true;
+            const uint16_t shares_len = ikev2_helper_read_be16(body + pos);
+            if (!shares_len || shares_len != ext_len - 2)
+            {
+                return false;
+            }
+            size_t share_pos = pos + 2;
+            const size_t share_end = share_pos + shares_len;
+            while (share_pos < share_end)
+            {
+                if (share_end - share_pos < 4)
+                {
+                    return false;
+                }
+                const uint16_t group =
+                    ikev2_helper_read_be16(body + share_pos);
+                share_pos += 2;
+                const uint16_t key_len =
+                    ikev2_helper_read_be16(body + share_pos);
+                share_pos += 2;
+                if (!key_len || key_len > share_end - share_pos)
+                {
+                    return false;
+                }
+                supported_key_share_offered =
+                    supported_key_share_offered
+                    || ikev2_helper_tls_group_supported(group);
+                share_pos += key_len;
+            }
+        }
         pos += ext_len;
     }
 
     return pos == ext_end
            && (!supported_versions_seen || supported_version_offered)
            && supported_groups_seen && supported_group_offered
-           && signature_algorithms_seen && supported_signature_offered;
+           && signature_algorithms_seen && supported_signature_offered
+           && key_share_seen && supported_key_share_offered;
 }
 
 static bool
