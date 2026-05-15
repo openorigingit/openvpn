@@ -106,6 +106,8 @@
 #define IKEV2_HELPER_TLS_RECORD_HEADER_SIZE 5
 #define IKEV2_HELPER_TLS_CONTENT_TYPE_HANDSHAKE 22
 #define IKEV2_HELPER_TLS_RECORD_VERSION_MAJOR 3
+#define IKEV2_HELPER_TLS_VERSION_1_2 0x0303
+#define IKEV2_HELPER_TLS_VERSION_1_3 0x0304
 #define IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE 4
 #define IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CLIENT_HELLO 1
 #define IKEV2_HELPER_TLS_CIPHER_TLS_AES_128_GCM_SHA256 0x1301
@@ -115,6 +117,7 @@
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_RANDOM_BYTES 32
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_SESSION_ID 32
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_EXTENSIONS 64
+#define IKEV2_HELPER_TLS_EXTENSION_SUPPORTED_VERSIONS 43
 #define IKEV2_HELPER_TLS_CONTENT_TYPE_ALERT 21
 #define IKEV2_HELPER_TLS_ALERT_FATAL 2
 #define IKEV2_HELPER_TLS_ALERT_HANDSHAKE_FAILURE 40
@@ -2718,8 +2721,8 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
     }
 
     size_t pos = 0;
-    if (body[pos] != IKEV2_HELPER_TLS_RECORD_VERSION_MAJOR
-        || body[pos + 1] == 0)
+    const uint16_t legacy_version = ikev2_helper_read_be16(body + pos);
+    if (legacy_version != IKEV2_HELPER_TLS_VERSION_1_2)
     {
         return false;
     }
@@ -2795,6 +2798,8 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
 
     size_t ext_end = pos + extensions_len;
     uint32_t ext_count = 0;
+    bool supported_versions_seen = false;
+    bool supported_version_offered = false;
     while (pos < ext_end)
     {
         if (++ext_count > IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_EXTENSIONS
@@ -2802,17 +2807,41 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
         {
             return false;
         }
-        pos += 2; /* Extension type. */
+        const uint16_t ext_type = ikev2_helper_read_be16(body + pos);
+        pos += 2;
         const uint16_t ext_len = ikev2_helper_read_be16(body + pos);
         pos += 2;
         if (ext_len > ext_end - pos)
         {
             return false;
         }
+        if (ext_type == IKEV2_HELPER_TLS_EXTENSION_SUPPORTED_VERSIONS)
+        {
+            if (supported_versions_seen || ext_len < 3)
+            {
+                return false;
+            }
+            supported_versions_seen = true;
+            const uint8_t versions_len = body[pos];
+            if (versions_len != ext_len - 1 || (versions_len & 1))
+            {
+                return false;
+            }
+            for (size_t i = 0; i < versions_len; i += 2)
+            {
+                const uint16_t version =
+                    ikev2_helper_read_be16(body + pos + 1 + i);
+                supported_version_offered =
+                    supported_version_offered
+                    || version == IKEV2_HELPER_TLS_VERSION_1_2
+                    || version == IKEV2_HELPER_TLS_VERSION_1_3;
+            }
+        }
         pos += ext_len;
     }
 
-    return pos == ext_end;
+    return pos == ext_end
+           && (!supported_versions_seen || supported_version_offered);
 }
 
 static bool
