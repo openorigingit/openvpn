@@ -125,6 +125,7 @@
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_RANDOM_BYTES 32
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_SESSION_ID 32
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_EXTENSIONS 64
+#define IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_GROUPS 32
 #define IKEV2_HELPER_TLS_EXTENSION_SUPPORTED_GROUPS 10
 #define IKEV2_HELPER_TLS_EXTENSION_SIGNATURE_ALGORITHMS 13
 #define IKEV2_HELPER_TLS_EXTENSION_SUPPORTED_VERSIONS 43
@@ -2867,7 +2868,7 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
 
     if (pos == body_len)
     {
-        return true;
+        return false;
     }
     if (body_len - pos < 2)
     {
@@ -2890,6 +2891,9 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
     bool supported_signature_offered = false;
     bool key_share_seen = false;
     bool supported_key_share_offered = false;
+    uint16_t supported_groups[IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_GROUPS];
+    size_t supported_group_count = 0;
+    CLEAR(supported_groups);
     while (pos < ext_end)
     {
         if (++ext_count > IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_EXTENSIONS
@@ -2954,6 +2958,11 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
             {
                 const uint16_t group =
                     ikev2_helper_read_be16(body + pos + 2 + i);
+                if (supported_group_count >= SIZE(supported_groups))
+                {
+                    return false;
+                }
+                supported_groups[supported_group_count++] = group;
                 supported_group_offered =
                     supported_group_offered
                     || ikev2_helper_tls_group_supported(group);
@@ -3041,6 +3050,14 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
         pos += ext_len;
     }
 
+    bool key_share_group_advertised = false;
+    for (size_t i = 0; i < supported_group_count; ++i)
+    {
+        key_share_group_advertised =
+            key_share_group_advertised
+            || supported_groups[i] == parsed.key_share_group;
+    }
+
     const bool valid = pos == ext_end
                        && (!supported_versions_seen
                            || supported_version_offered)
@@ -3050,7 +3067,8 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
                        && key_share_seen && supported_key_share_offered
                        && parsed.tls_version && parsed.cipher_suite
                        && parsed.signature_algorithm && parsed.named_group
-                       && parsed.key_share_group && parsed.key_share_len;
+                       && parsed.key_share_group && parsed.key_share_len
+                       && key_share_group_advertised;
     if (valid && metadata)
     {
         parsed.ready = true;
