@@ -4584,9 +4584,10 @@ tunnel_server(struct context *top)
     /* initialize management interface */
     init_management_callback_multi(&multi);
 
+    multi_start_ikev2_helper(top);
+
     /* finished with initialization */
     initialization_sequence_completed(top, ISC_SERVER); /* --mode server --proto tcp-server */
-    multi_start_ikev2_helper(top);
 
 #ifdef ENABLE_ASYNC_PUSH
     multi.top.c2.inotify_fd = inotify_init();
