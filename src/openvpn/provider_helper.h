@@ -34,7 +34,7 @@
 #define PROVIDER_HELPER_FEATURE_SET_SIZE  16
 #define PROVIDER_HELPER_CHILD_FD          3
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
-#define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 56
+#define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 60
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
 #define PROVIDER_HELPER_RUNTIME_STATS_SIZE  832
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     104
@@ -139,6 +139,7 @@
 #define PROVIDER_HELPER_DEFAULT_MAX_CERT_BYTES    (64 * 1024)
 #define PROVIDER_HELPER_DEFAULT_MAX_CERT_DEPTH    4
 #define PROVIDER_HELPER_DEFAULT_MAX_EAP_TLS_BYTES (64 * 1024)
+#define PROVIDER_HELPER_DEFAULT_MAX_EAP_TLS_TX_FRAGMENT_BYTES 1200
 #define PROVIDER_HELPER_DEFAULT_RETRANSMIT_LIMIT  5
 #define PROVIDER_HELPER_DEFAULT_WORKER_LIMIT      4
 #define PROVIDER_HELPER_DEFAULT_HALF_OPEN_TIMEOUT 30
@@ -427,6 +428,7 @@ struct provider_helper_runtime_config {
     uint32_t max_cert_chain_bytes;
     uint32_t max_cert_chain_depth;
     uint32_t max_eap_tls_bytes;
+    uint32_t max_eap_tls_tx_fragment_bytes;
     uint32_t retransmit_limit;
     uint32_t worker_limit;
     uint32_t half_open_timeout_seconds;

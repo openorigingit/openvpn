@@ -221,6 +221,12 @@ struct ikev2_helper_ike_sa {
     bool eap_tls_message_complete;
     uint8_t *eap_tls_rx;
     size_t eap_tls_rx_capacity;
+    uint8_t *eap_tls_tx;
+    size_t eap_tls_tx_capacity;
+    size_t eap_tls_tx_len;
+    size_t eap_tls_tx_sent;
+    size_t eap_tls_tx_fragment_bytes;
+    bool eap_tls_tx_terminal;
     uint64_t pending_server_sign_request_id;
     uint64_t server_sign_config_revision;
     uint32_t server_sign_sigalg;
@@ -2659,6 +2665,26 @@ ikev2_helper_clear_eap_tls_buffer(struct ikev2_helper_ike_sa *sa)
     sa->eap_tls_message_complete = false;
 }
 
+static void
+ikev2_helper_clear_eap_tls_tx_buffer(struct ikev2_helper_ike_sa *sa)
+{
+    if (!sa)
+    {
+        return;
+    }
+    if (sa->eap_tls_tx)
+    {
+        ikev2_helper_secure_zero(sa->eap_tls_tx, sa->eap_tls_tx_capacity);
+        free(sa->eap_tls_tx);
+    }
+    sa->eap_tls_tx = NULL;
+    sa->eap_tls_tx_capacity = 0;
+    sa->eap_tls_tx_len = 0;
+    sa->eap_tls_tx_sent = 0;
+    sa->eap_tls_tx_fragment_bytes = 0;
+    sa->eap_tls_tx_terminal = false;
+}
+
 static bool
 ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
                                          size_t body_len)
@@ -2791,6 +2817,31 @@ ikev2_helper_eap_tls_record_header_valid(const struct ikev2_helper_ike_sa *sa)
            && ikev2_helper_tls_client_hello_body_valid(
                handshake + IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE,
                handshake_len);
+}
+
+static bool
+ikev2_helper_is_eap_tls_ack(
+    const struct ikev2_helper_ike_sa *sa,
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    const struct provider_helper_ikev2_payload_summary *summary)
+{
+    if (!sa || !sa->active || !sa->eap_tls_tx || !plaintext || !summary
+        || !summary->saw_eap || summary->eap_count != 1
+        || summary->eap_offset > plaintext_len
+        || summary->eap_len > plaintext_len - summary->eap_offset
+        || summary->eap_len != IKEV2_HELPER_EAP_TLS_HEADER_SIZE)
+    {
+        return false;
+    }
+
+    const uint8_t *eap = plaintext + summary->eap_offset;
+    const uint16_t eap_len = ((uint16_t)eap[2] << 8) | eap[3];
+    return eap[0] == IKEV2_HELPER_EAP_CODE_RESPONSE
+           && eap[1] == sa->pending_eap_identifier
+           && eap_len == summary->eap_len
+           && eap[4] == IKEV2_HELPER_EAP_TYPE_TLS
+           && eap[5] == 0;
 }
 
 static bool
@@ -4664,6 +4715,7 @@ ikev2_helper_zero_ike_sa(struct ikev2_helper_ike_sa_table *table,
 
     const bool decrement_active = table->active > 0;
     ikev2_helper_clear_eap_tls_buffer(sa);
+    ikev2_helper_clear_eap_tls_tx_buffer(sa);
     ikev2_helper_secure_zero(sa, sizeof(*sa));
     if (decrement_active)
     {
@@ -6008,6 +6060,7 @@ ikev2_helper_send_cached_server_auth_response(
 static bool
 ikev2_helper_build_eap_tls_request_plaintext(uint8_t eap_identifier,
                                              uint8_t eap_flags,
+                                             uint32_t tls_message_len,
                                              const uint8_t *tls_data,
                                              size_t tls_data_len,
                                              uint8_t *plaintext,
@@ -6018,15 +6071,32 @@ ikev2_helper_build_eap_tls_request_plaintext(uint8_t eap_identifier,
     {
         *plaintext_len = 0;
     }
+    const bool start = (eap_flags & IKEV2_HELPER_EAP_TLS_FLAG_START) != 0;
+    const bool length_included =
+        (eap_flags & IKEV2_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED) != 0;
+    const bool more_fragments =
+        (eap_flags & IKEV2_HELPER_EAP_TLS_FLAG_MORE_FRAGMENTS) != 0;
     if (!plaintext || !plaintext_len
-        || (eap_flags & ~IKEV2_HELPER_EAP_TLS_FLAG_START)
+        || (eap_flags
+            & ~(IKEV2_HELPER_EAP_TLS_FLAG_START
+                | IKEV2_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED
+                | IKEV2_HELPER_EAP_TLS_FLAG_MORE_FRAGMENTS))
+        || (start
+            && (tls_data_len || tls_message_len || length_included
+                || more_fragments))
+        || (!length_included && tls_message_len)
+        || (length_included
+            && (!tls_message_len || tls_data_len > tls_message_len))
         || (tls_data_len && !tls_data))
     {
         return false;
     }
 
+    const size_t eap_tls_length_len =
+        length_included ? IKEV2_HELPER_EAP_TLS_LENGTH_SIZE : 0u;
     const size_t eap_body_len =
-        IKEV2_HELPER_EAP_TLS_HEADER_SIZE + tls_data_len;
+        IKEV2_HELPER_EAP_TLS_HEADER_SIZE + eap_tls_length_len
+        + tls_data_len;
     const size_t eap_payload_len =
         PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + eap_body_len;
     const size_t total_len = eap_payload_len + 1u;
@@ -6045,6 +6115,13 @@ ikev2_helper_build_eap_tls_request_plaintext(uint8_t eap_identifier,
     ikev2_helper_write_be16(&pos, (uint16_t)eap_body_len);
     *pos++ = IKEV2_HELPER_EAP_TYPE_TLS;
     *pos++ = eap_flags;
+    if (eap_tls_length_len)
+    {
+        *pos++ = (uint8_t)(tls_message_len >> 24);
+        *pos++ = (uint8_t)(tls_message_len >> 16);
+        *pos++ = (uint8_t)(tls_message_len >> 8);
+        *pos++ = (uint8_t)tls_message_len;
+    }
     if (tls_data_len)
     {
         memcpy(pos, tls_data, tls_data_len);
@@ -6068,6 +6145,7 @@ ikev2_helper_send_cached_eap_tls_request(
     uint32_t message_id,
     uint8_t eap_identifier,
     uint8_t eap_flags,
+    uint32_t tls_message_len,
     const uint8_t *tls_data,
     size_t tls_data_len)
 {
@@ -6077,8 +6155,8 @@ ikev2_helper_send_cached_eap_tls_request(
     size_t response_len = 0;
     if (!listener || !sa || !sa->active
         || !ikev2_helper_build_eap_tls_request_plaintext(
-            eap_identifier, eap_flags, tls_data, tls_data_len, plaintext,
-            sizeof(plaintext), &plaintext_len)
+            eap_identifier, eap_flags, tls_message_len, tls_data,
+            tls_data_len, plaintext, sizeof(plaintext), &plaintext_len)
         || !ikev2_helper_build_encrypted_payload_response(
             response, sizeof(response), &response_len, listener, sa,
             PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH, message_id,
@@ -6101,11 +6179,120 @@ ikev2_helper_send_cached_eap_tls_request(
 }
 
 static bool
+ikev2_helper_send_cached_eap_tls_tx_fragment(
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_ike_sa *sa,
+    uint32_t message_id,
+    uint8_t eap_identifier,
+    bool *tx_pending,
+    bool *terminal_complete)
+{
+    if (tx_pending)
+    {
+        *tx_pending = false;
+    }
+    if (terminal_complete)
+    {
+        *terminal_complete = false;
+    }
+    if (!listener || !sa || !sa->active || !sa->eap_tls_tx
+        || !sa->eap_tls_tx_len || !sa->eap_tls_tx_fragment_bytes
+        || sa->eap_tls_tx_sent >= sa->eap_tls_tx_len || !tx_pending
+        || !terminal_complete)
+    {
+        return false;
+    }
+
+    const size_t remaining = sa->eap_tls_tx_len - sa->eap_tls_tx_sent;
+    const size_t fragment_len =
+        min_size(remaining, sa->eap_tls_tx_fragment_bytes);
+    const bool more_fragments = fragment_len < remaining;
+    uint8_t flags = more_fragments ? IKEV2_HELPER_EAP_TLS_FLAG_MORE_FRAGMENTS
+                                   : 0;
+    uint32_t tls_message_len = 0;
+    if (sa->eap_tls_tx_sent == 0 && more_fragments)
+    {
+        flags |= IKEV2_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED;
+        tls_message_len = (uint32_t)sa->eap_tls_tx_len;
+    }
+
+    if (!ikev2_helper_send_cached_eap_tls_request(
+            listener, sa, message_id, eap_identifier, flags,
+            tls_message_len, sa->eap_tls_tx + sa->eap_tls_tx_sent,
+            fragment_len))
+    {
+        ikev2_helper_clear_eap_tls_tx_buffer(sa);
+        return false;
+    }
+
+    sa->eap_tls_tx_sent += fragment_len;
+    if (sa->eap_tls_tx_sent == sa->eap_tls_tx_len)
+    {
+        *terminal_complete = sa->eap_tls_tx_terminal;
+        ikev2_helper_clear_eap_tls_tx_buffer(sa);
+    }
+    else
+    {
+        *tx_pending = true;
+    }
+    return true;
+}
+
+static bool
+ikev2_helper_send_cached_eap_tls_message(
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_ike_sa *sa,
+    uint32_t message_id,
+    uint8_t eap_identifier,
+    const uint8_t *tls_data,
+    size_t tls_data_len,
+    bool terminal,
+    const struct provider_helper_runtime_config *config,
+    bool *tx_pending,
+    bool *terminal_complete)
+{
+    if (tx_pending)
+    {
+        *tx_pending = false;
+    }
+    if (terminal_complete)
+    {
+        *terminal_complete = false;
+    }
+    if (!listener || !sa || !sa->active || !tls_data || !tls_data_len
+        || !config || !config->max_eap_tls_tx_fragment_bytes
+        || tls_data_len > config->max_eap_tls_bytes
+        || tls_data_len > UINT32_MAX || !tx_pending || !terminal_complete)
+    {
+        return false;
+    }
+
+    ikev2_helper_clear_eap_tls_tx_buffer(sa);
+    sa->eap_tls_tx = calloc(1, tls_data_len);
+    if (!sa->eap_tls_tx)
+    {
+        return false;
+    }
+    memcpy(sa->eap_tls_tx, tls_data, tls_data_len);
+    sa->eap_tls_tx_capacity = tls_data_len;
+    sa->eap_tls_tx_len = tls_data_len;
+    sa->eap_tls_tx_fragment_bytes = config->max_eap_tls_tx_fragment_bytes;
+    sa->eap_tls_tx_terminal = terminal;
+
+    return ikev2_helper_send_cached_eap_tls_tx_fragment(
+        listener, sa, message_id, eap_identifier, tx_pending,
+        terminal_complete);
+}
+
+static bool
 ikev2_helper_send_cached_eap_tls_alert_request(
     const struct ikev2_helper_listener *listener,
     struct ikev2_helper_ike_sa *sa,
     uint32_t message_id,
-    uint8_t eap_identifier)
+    uint8_t eap_identifier,
+    const struct provider_helper_runtime_config *config,
+    bool *tx_pending,
+    bool *terminal_complete)
 {
     const uint8_t alert[] = {
         IKEV2_HELPER_TLS_CONTENT_TYPE_ALERT,
@@ -6114,8 +6301,9 @@ ikev2_helper_send_cached_eap_tls_alert_request(
         IKEV2_HELPER_TLS_ALERT_FATAL,
         IKEV2_HELPER_TLS_ALERT_HANDSHAKE_FAILURE,
     };
-    return ikev2_helper_send_cached_eap_tls_request(
-        listener, sa, message_id, eap_identifier, 0, alert, sizeof(alert));
+    return ikev2_helper_send_cached_eap_tls_message(
+        listener, sa, message_id, eap_identifier, alert, sizeof(alert),
+        true, config, tx_pending, terminal_complete);
 }
 
 static bool
@@ -7163,11 +7351,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         plaintext, plaintext_len,
                         protected_summary.sk_next_payload, config,
                         &inner_summary);
-                bool more_eap_fragments = false;
-                if (inner_result != PROVIDER_HELPER_IKEV2_PARSE_OK
-                    || !ikev2_helper_process_followup_eap_tls_response(
-                        sa, plaintext, plaintext_len, &inner_summary, config,
-                        &more_eap_fragments))
+                if (inner_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
                 {
                     ++counters->ike_auth_inner_malformed;
                     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
@@ -7176,13 +7360,64 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 }
                 ++counters->ike_auth_inner_parsed;
                 ++counters->ike_auth_eap_tls_rx;
+
+                if (ikev2_helper_is_eap_tls_ack(sa, plaintext, plaintext_len,
+                                                &inner_summary))
+                {
+                    const uint8_t next_eap_identifier =
+                        (uint8_t)(sa->pending_eap_identifier + 1u);
+                    bool tx_pending = false;
+                    bool terminal_complete = false;
+                    if (ikev2_helper_send_cached_eap_tls_tx_fragment(
+                            listener, sa, header.message_id,
+                            next_eap_identifier, &tx_pending,
+                            &terminal_complete))
+                    {
+                        sa->message_id = header.message_id;
+                        sa->pending_eap_identifier = next_eap_identifier;
+                        sa->updated = time(NULL);
+                        if (terminal_complete)
+                        {
+                            ikev2_helper_clear_ike_sa(sa_table, sa,
+                                                       counters);
+                        }
+                    }
+                    else
+                    {
+                        ++counters->ike_auth_unsupported_response_failed;
+                        ikev2_helper_clear_ike_sa(sa_table, sa, counters);
+                    }
+                    ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+
+                if (sa->eap_tls_tx)
+                {
+                    ++counters->ike_auth_inner_malformed;
+                    ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+
+                bool more_eap_fragments = false;
+                if (!ikev2_helper_process_followup_eap_tls_response(
+                        sa, plaintext, plaintext_len, &inner_summary, config,
+                        &more_eap_fragments))
+                {
+                    ++counters->ike_auth_inner_malformed;
+                    ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+
                 if (more_eap_fragments)
                 {
                     const uint8_t next_eap_identifier =
                         (uint8_t)(sa->pending_eap_identifier + 1u);
                     if (ikev2_helper_send_cached_eap_tls_request(
                             listener, sa, header.message_id,
-                            next_eap_identifier, 0, NULL, 0))
+                            next_eap_identifier, 0, 0, NULL, 0))
                     {
                         sa->message_id = header.message_id;
                         sa->pending_eap_identifier = next_eap_identifier;
@@ -7200,17 +7435,30 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 ++counters->ike_auth_unsupported;
                 const uint8_t next_eap_identifier =
                     (uint8_t)(sa->pending_eap_identifier + 1u);
+                bool tx_pending = false;
+                bool terminal_complete = false;
                 if (ikev2_helper_send_cached_eap_tls_alert_request(
                         listener, sa, header.message_id,
-                        next_eap_identifier))
+                        next_eap_identifier, config, &tx_pending,
+                        &terminal_complete))
                 {
                     ++counters->ike_auth_unsupported_response_tx;
+                    if (tx_pending)
+                    {
+                        sa->message_id = header.message_id;
+                        sa->pending_eap_identifier = next_eap_identifier;
+                        sa->updated = time(NULL);
+                    }
+                    else
+                    {
+                        ikev2_helper_clear_ike_sa(sa_table, sa, counters);
+                    }
                 }
                 else
                 {
                     ++counters->ike_auth_unsupported_response_failed;
+                    ikev2_helper_clear_ike_sa(sa_table, sa, counters);
                 }
-                ikev2_helper_clear_ike_sa(sa_table, sa, counters);
                 ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                 counters->ike_sa_active = sa_table->active;
                 return;

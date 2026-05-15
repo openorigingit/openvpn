@@ -249,6 +249,8 @@ test_provider_helper_runtime_config_roundtrip(void **state)
     assert_int_equal(output.max_cert_chain_bytes, input.max_cert_chain_bytes);
     assert_int_equal(output.max_cert_chain_depth, input.max_cert_chain_depth);
     assert_int_equal(output.max_eap_tls_bytes, input.max_eap_tls_bytes);
+    assert_int_equal(output.max_eap_tls_tx_fragment_bytes,
+                     input.max_eap_tls_tx_fragment_bytes);
     assert_int_equal(output.retransmit_limit, input.retransmit_limit);
     assert_int_equal(output.worker_limit, input.worker_limit);
     assert_int_equal(output.half_open_timeout_seconds,
@@ -328,6 +330,17 @@ test_provider_helper_runtime_config_roundtrip(void **state)
                                                       sizeof(reason)));
     assert_non_null(strstr(reason, "max_eap_tls_bytes"));
     input.max_eap_tls_bytes = PROVIDER_HELPER_DEFAULT_MAX_EAP_TLS_BYTES;
+    input.max_eap_tls_tx_fragment_bytes = 0;
+    assert_false(provider_helper_runtime_config_valid(&input, reason,
+                                                      sizeof(reason)));
+    assert_non_null(strstr(reason, "max_eap_tls_tx_fragment_bytes"));
+    input.max_eap_tls_tx_fragment_bytes =
+        PROVIDER_HELPER_IPC_MAX_MESSAGE + 1;
+    assert_false(provider_helper_runtime_config_valid(&input, reason,
+                                                      sizeof(reason)));
+    assert_non_null(strstr(reason, "max_eap_tls_tx_fragment_bytes"));
+    input.max_eap_tls_tx_fragment_bytes =
+        PROVIDER_HELPER_DEFAULT_MAX_EAP_TLS_TX_FRAGMENT_BYTES;
     input.half_open_timeout_seconds = 0;
     assert_false(provider_helper_runtime_config_valid(&input, reason, sizeof(reason)));
     assert_non_null(strstr(reason, "half_open_timeout_seconds"));
@@ -3827,6 +3840,7 @@ test_recv_ikev2_encrypted_eap_tls_request(
     uint32_t expected_message_id,
     uint8_t expected_eap_identifier,
     uint8_t expected_eap_flags,
+    uint32_t expected_tls_message_len,
     const uint8_t *expected_tls_data,
     size_t expected_tls_data_len,
     bool expect_natt)
@@ -3837,8 +3851,11 @@ test_recv_ikev2_encrypted_eap_tls_request(
         expected_message_id, PROVIDER_HELPER_IKEV2_PAYLOAD_EAP, expect_natt,
         plaintext, sizeof(plaintext));
 
+    const bool expected_length_included =
+        (expected_eap_flags & TEST_IKEV2_EAP_TLS_FLAG_LENGTH_INCLUDED) != 0;
+    const size_t length_field_len = expected_length_included ? 4u : 0u;
     const size_t eap_payload_len =
-        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 6u
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 6u + length_field_len
         + expected_tls_data_len;
     assert_true(eap_payload_len <= UINT16_MAX);
     assert_int_equal(payload_len, eap_payload_len);
@@ -3848,13 +3865,24 @@ test_recv_ikev2_encrypted_eap_tls_request(
     assert_int_equal(plaintext[4], TEST_IKEV2_EAP_CODE_REQUEST);
     assert_int_equal(plaintext[5], expected_eap_identifier);
     assert_int_equal(test_read_be16(plaintext + 6),
-                     6 + expected_tls_data_len);
+                     6 + length_field_len + expected_tls_data_len);
     assert_int_equal(plaintext[8], TEST_IKEV2_EAP_TYPE_TLS);
     assert_int_equal(plaintext[9], expected_eap_flags);
+    size_t tls_offset = 10;
+    if (expected_length_included)
+    {
+        assert_int_equal(test_read_be32(plaintext + tls_offset),
+                         expected_tls_message_len);
+        tls_offset += 4;
+    }
+    else
+    {
+        assert_int_equal(expected_tls_message_len, 0);
+    }
     if (expected_tls_data_len)
     {
         assert_non_null(expected_tls_data);
-        assert_memory_equal(plaintext + 10, expected_tls_data,
+        assert_memory_equal(plaintext + tls_offset, expected_tls_data,
                             expected_tls_data_len);
     }
 
@@ -7420,6 +7448,7 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
 #else
     struct provider_helper_supervisor supervisor;
     provider_helper_supervisor_init(&supervisor);
+    supervisor.runtime_config.max_eap_tls_tx_fragment_bytes = 4;
 
     struct test_provider_helper_auth_cb_state auth_state;
     CLEAR(auth_state);
@@ -7527,7 +7556,7 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
         sizeof(client_hello), client_hello, first_fragment_len);
     usleep(10000);
     test_recv_ikev2_encrypted_eap_tls_request(
-        response_fd, initiator_spi, &sa_init_material, 2, 2, 0, NULL, 0,
+        response_fd, initiator_spi, &sa_init_material, 2, 2, 0, 0, NULL, 0,
         true);
 
     test_send_ikev2_encrypted_ike_auth_eap_response_fragment_datagram_from(
@@ -7535,12 +7564,21 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
         0, 0, client_hello + first_fragment_len,
         sizeof(client_hello) - first_fragment_len);
     usleep(10000);
-    const uint8_t expected_alert[] = {
-        0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28,
-    };
+    const uint8_t expected_alert[] = { 0x15, 0x03, 0x03, 0x00,
+                                       0x02, 0x02, 0x28 };
     test_recv_ikev2_encrypted_eap_tls_request(
-        response_fd, initiator_spi, &sa_init_material, 3, 3, 0,
-        expected_alert, sizeof(expected_alert), true);
+        response_fd, initiator_spi, &sa_init_material, 3, 3,
+        TEST_IKEV2_EAP_TLS_FLAG_LENGTH_INCLUDED
+        | TEST_IKEV2_EAP_TLS_FLAG_MORE_FRAGMENTS,
+        sizeof(expected_alert), expected_alert, 4, true);
+
+    test_send_ikev2_encrypted_ike_auth_eap_response_fragment_datagram_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, 4, 3,
+        0, 0, NULL, 0);
+    usleep(10000);
+    test_recv_ikev2_encrypted_eap_tls_request(
+        response_fd, initiator_spi, &sa_init_material, 4, 4, 0, 0,
+        expected_alert + 4, sizeof(expected_alert) - 4, true);
 
     uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd,
@@ -7555,7 +7593,7 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
     }
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.runtime_stats.ike_auth_idi_extracted, 1);
-    assert_int_equal(supervisor.runtime_stats.ike_auth_eap_tls_rx, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_eap_tls_rx, 3);
     assert_int_equal(supervisor.runtime_stats.ike_auth_request_tx, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported_response_tx,
