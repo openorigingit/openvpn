@@ -117,9 +117,12 @@
 #define IKEV2_HELPER_TLS_SIGALG_RSA_PKCS1_SHA256 0x0401
 #define IKEV2_HELPER_TLS_SIGALG_ECDSA_SECP256R1_SHA256 0x0403
 #define IKEV2_HELPER_TLS_SIGALG_RSA_PSS_RSAE_SHA256 0x0804
+#define IKEV2_HELPER_TLS_GROUP_SECP256R1 23
+#define IKEV2_HELPER_TLS_GROUP_X25519 29
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_RANDOM_BYTES 32
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_SESSION_ID 32
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_EXTENSIONS 64
+#define IKEV2_HELPER_TLS_EXTENSION_SUPPORTED_GROUPS 10
 #define IKEV2_HELPER_TLS_EXTENSION_SIGNATURE_ALGORITHMS 13
 #define IKEV2_HELPER_TLS_EXTENSION_SUPPORTED_VERSIONS 43
 #define IKEV2_HELPER_TLS_CONTENT_TYPE_ALERT 21
@@ -2714,6 +2717,20 @@ ikev2_helper_tls_cipher_supported(uint16_t cipher_suite)
 }
 
 static bool
+ikev2_helper_tls_group_supported(uint16_t group)
+{
+    switch (group)
+    {
+        case IKEV2_HELPER_TLS_GROUP_SECP256R1:
+        case IKEV2_HELPER_TLS_GROUP_X25519:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+static bool
 ikev2_helper_tls_signature_supported(uint16_t sigalg)
 {
     switch (sigalg)
@@ -2819,6 +2836,8 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
     uint32_t ext_count = 0;
     bool supported_versions_seen = false;
     bool supported_version_offered = false;
+    bool supported_groups_seen = false;
+    bool supported_group_offered = false;
     bool signature_algorithms_seen = false;
     bool supported_signature_offered = false;
     while (pos < ext_end)
@@ -2858,6 +2877,28 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
                     || version == IKEV2_HELPER_TLS_VERSION_1_3;
             }
         }
+        else if (ext_type == IKEV2_HELPER_TLS_EXTENSION_SUPPORTED_GROUPS)
+        {
+            if (supported_groups_seen || ext_len < 4)
+            {
+                return false;
+            }
+            supported_groups_seen = true;
+            const uint16_t groups_len =
+                ikev2_helper_read_be16(body + pos);
+            if (!groups_len || groups_len != ext_len - 2
+                || (groups_len & 1))
+            {
+                return false;
+            }
+            for (size_t i = 0; i < groups_len; i += 2)
+            {
+                supported_group_offered =
+                    supported_group_offered
+                    || ikev2_helper_tls_group_supported(
+                        ikev2_helper_read_be16(body + pos + 2 + i));
+            }
+        }
         else if (ext_type == IKEV2_HELPER_TLS_EXTENSION_SIGNATURE_ALGORITHMS)
         {
             if (signature_algorithms_seen || ext_len < 4)
@@ -2885,6 +2926,7 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
 
     return pos == ext_end
            && (!supported_versions_seen || supported_version_offered)
+           && supported_groups_seen && supported_group_offered
            && signature_algorithms_seen && supported_signature_offered;
 }
 
