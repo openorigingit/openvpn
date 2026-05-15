@@ -847,11 +847,15 @@ test_provider_helper_xfrm_lease_roundtrip(void **state)
         .remote_ts_end_port = 65535,
         .ip_protocol_id = 0,
     };
+    struct provider_helper_runtime_config config;
     struct provider_helper_xfrm_lease output;
     char reason[128];
     uint8_t payload[PROVIDER_HELPER_XFRM_LEASE_SIZE];
 
+    provider_helper_runtime_config_default(&config);
     assert_true(provider_helper_xfrm_lease_valid(&input, reason, sizeof(reason)));
+    assert_true(provider_helper_xfrm_lease_allowed_by_config(
+                    &config, &input, reason, sizeof(reason)));
     assert_true(provider_helper_ipc_encode_xfrm_lease(payload, sizeof(payload), &input));
     assert_true(provider_helper_ipc_decode_xfrm_lease(payload, sizeof(payload), &output));
     assert_int_equal(output.lease_id, input.lease_id);
@@ -887,6 +891,21 @@ test_provider_helper_xfrm_lease_roundtrip(void **state)
     input.remote_ts_end_port = 0;
     assert_false(provider_helper_xfrm_lease_valid(&input, reason, sizeof(reason)));
     assert_non_null(strstr(reason, "selector"));
+    input.remote_ts_start_port = 0;
+    input.remote_ts_end_port = 65535;
+    input.flags = PROVIDER_HELPER_XFRM_LEASE_IPV4
+                  | PROVIDER_HELPER_XFRM_LEASE_IPV6;
+    assert_false(provider_helper_xfrm_lease_valid(&input, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "address family"));
+    input.flags = PROVIDER_HELPER_XFRM_LEASE_IPV4;
+    input.address_family = AF_INET6;
+    assert_false(provider_helper_xfrm_lease_valid(&input, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "address family"));
+    input.flags = PROVIDER_HELPER_XFRM_LEASE_IPV6;
+    assert_true(provider_helper_xfrm_lease_valid(&input, reason, sizeof(reason)));
+    assert_false(provider_helper_xfrm_lease_allowed_by_config(
+                     &config, &input, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "IPv4-only"));
 }
 
 static void

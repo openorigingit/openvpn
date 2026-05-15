@@ -1410,8 +1410,11 @@ ikev2_helper_read_listener_fd(int fd, const struct provider_helper_msg_header *h
 }
 
 static bool
-ikev2_helper_read_xfrm_lease(int fd, const struct provider_helper_msg_header *header,
-                             struct provider_helper_xfrm_lease *lease)
+ikev2_helper_read_xfrm_lease(
+    int fd,
+    const struct provider_helper_msg_header *header,
+    const struct provider_helper_runtime_config *config,
+    struct provider_helper_xfrm_lease *lease)
 {
     uint8_t payload[PROVIDER_HELPER_XFRM_LEASE_SIZE];
     if (!header || header->payload_len != sizeof(payload)
@@ -1421,7 +1424,8 @@ ikev2_helper_read_xfrm_lease(int fd, const struct provider_helper_msg_header *he
     }
 
     return provider_helper_ipc_decode_xfrm_lease(payload, sizeof(payload), lease)
-           && provider_helper_xfrm_lease_valid(lease, NULL, 0);
+           && provider_helper_xfrm_lease_allowed_by_config(config, lease, NULL,
+                                                           0);
 }
 
 static bool
@@ -6596,7 +6600,8 @@ ikev2_helper_loop(int fd)
                 uint32_t revoked = 0;
                 CLEAR(replaced_lease);
                 if (!configured
-                    || !ikev2_helper_read_xfrm_lease(fd, &header, &lease)
+                    || !ikev2_helper_read_xfrm_lease(fd, &header, &config,
+                                                     &lease)
                     || !ikev2_helper_store_xfrm_lease(
                         xfrm_leases, &xfrm_lease_count, SIZE(xfrm_leases),
                         &lease, &replaced, &unchanged, &replace_index,
@@ -6638,7 +6643,8 @@ ikev2_helper_loop(int fd)
                 size_t deleted = 0;
                 uint32_t revoked = 0;
                 if (!configured
-                    || !ikev2_helper_read_xfrm_lease(fd, &header, &lease)
+                    || !ikev2_helper_read_xfrm_lease(fd, &header, &config,
+                                                     &lease)
                     || !ikev2_helper_clear_ike_sas_for_xfrm_lease(
                         &sa_table, &lease, &counters, &revoked)
                     || !ikev2_helper_delete_xfrm_lease(

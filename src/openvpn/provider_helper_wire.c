@@ -337,6 +337,41 @@ provider_helper_xfrm_lease_valid(const struct provider_helper_xfrm_lease *lease,
                                       "unsupported XFRM lease flags");
         return false;
     }
+    if ((lease->address_family == AF_INET
+         && lease->flags != PROVIDER_HELPER_XFRM_LEASE_IPV4)
+        || (lease->address_family == AF_INET6
+            && lease->flags != PROVIDER_HELPER_XFRM_LEASE_IPV6))
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "XFRM lease address family and flags must match");
+        return false;
+    }
+
+    provider_helper_config_reason(reason, reason_size, "ok");
+    return true;
+}
+
+bool
+provider_helper_xfrm_lease_allowed_by_config(
+    const struct provider_helper_runtime_config *config,
+    const struct provider_helper_xfrm_lease *lease,
+    char *reason,
+    size_t reason_size)
+{
+    if (!provider_helper_runtime_config_valid(config, reason, reason_size)
+        || !provider_helper_xfrm_lease_valid(lease, reason, reason_size))
+    {
+        return false;
+    }
+    if ((config->flags & PROVIDER_HELPER_CONFIG_IPV4_ONLY)
+        && lease->address_family != AF_INET)
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "IPv4-only config requires AF_INET XFRM leases");
+        return false;
+    }
 
     provider_helper_config_reason(reason, reason_size, "ok");
     return true;

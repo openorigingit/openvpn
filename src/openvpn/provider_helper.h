@@ -599,6 +599,11 @@ bool provider_helper_listener_fd_allowed_by_config(
 bool provider_helper_xfrm_lease_valid(const struct provider_helper_xfrm_lease *lease,
                                       char *reason,
                                       size_t reason_size);
+bool provider_helper_xfrm_lease_allowed_by_config(
+    const struct provider_helper_runtime_config *config,
+    const struct provider_helper_xfrm_lease *lease,
+    char *reason,
+    size_t reason_size);
 bool provider_helper_auth_request_valid(const struct provider_helper_auth_request *request,
                                         char *reason,
                                         size_t reason_size);
