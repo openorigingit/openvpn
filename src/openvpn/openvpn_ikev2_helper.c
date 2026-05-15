@@ -6134,6 +6134,18 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
             if (!inner_summary.saw_eap || inner_summary.eap_count != 1)
             {
                 ++counters->ike_auth_unsupported;
+                if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
+                        listener, sa, PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+                        header.message_id,
+                        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
+                {
+                    ++counters->ike_auth_unsupported_response_tx;
+                }
+                else
+                {
+                    ++counters->ike_auth_unsupported_response_failed;
+                }
+                ikev2_helper_clear_ike_sa(sa_table, sa, counters);
                 ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                 counters->ike_sa_active = sa_table->active;
                 return;

@@ -522,6 +522,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_auth_allow_missing_xfrm_lease = 50,
         .ike_auth_allow_unsupported = 42,
         .ike_auth_unsupported = 43,
+        .ike_auth_unsupported_response_tx = 98,
+        .ike_auth_unsupported_response_failed = 99,
         .ike_create_child_install_unsupported_tx = 80,
         .ike_create_child_install_unsupported_failed = 81,
         .ike_exchange_pre_auth_dropped = 82,
@@ -695,6 +697,10 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
     assert_int_equal(output.ike_auth_allow_unsupported,
                      input.ike_auth_allow_unsupported);
     assert_int_equal(output.ike_auth_unsupported, input.ike_auth_unsupported);
+    assert_int_equal(output.ike_auth_unsupported_response_tx,
+                     input.ike_auth_unsupported_response_tx);
+    assert_int_equal(output.ike_auth_unsupported_response_failed,
+                     input.ike_auth_unsupported_response_failed);
     assert_int_equal(output.ike_create_child_install_unsupported_tx,
                      input.ike_create_child_install_unsupported_tx);
     assert_int_equal(output.ike_create_child_install_unsupported_failed,
@@ -5949,10 +5955,14 @@ test_provider_helper_spawn_ikev2_rejects_inner_aggregate_limits(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_auth_inner_malformed, 4);
     assert_int_equal(supervisor.runtime_stats.ike_auth_inner_parsed, 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported_response_tx,
+                     1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_auth_unsupported_response_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_request_tx, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_cert_extracted, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_eap_tls_rx, 0);
-    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
 
     close(response_fd);
     close(listener_fd);
