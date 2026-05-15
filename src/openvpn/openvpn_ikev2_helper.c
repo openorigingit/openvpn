@@ -1372,10 +1372,18 @@ ikev2_helper_validate_listener_socket(
     switch (ss.ss_family)
     {
         case AF_INET:
+            if (ss_len < sizeof(struct sockaddr_in))
+            {
+                return false;
+            }
             return ntohs(((struct sockaddr_in *)&ss)->sin_port)
                    == listener->local_port;
 
         case AF_INET6:
+            if (ss_len < sizeof(struct sockaddr_in6))
+            {
+                return false;
+            }
             return ntohs(((struct sockaddr_in6 *)&ss)->sin6_port)
                    == listener->local_port;
 
@@ -1835,7 +1843,8 @@ ikev2_helper_socket_local_endpoint(int fd,
 
     socklen_t len = sizeof(*local);
     CLEAR(*local);
-    if (getsockname(fd, (struct sockaddr *)local, &len) != 0)
+    if (getsockname(fd, (struct sockaddr *)local, &len) != 0
+        || !ikev2_helper_sockaddr_len_valid(local, len))
     {
         return false;
     }
@@ -3995,6 +4004,10 @@ ikev2_helper_add_ike_sa(struct ikev2_helper_ike_sa_table *table,
     if (!table || !listener || !header || !peer || !selection
         || !selection->selected || !ikev2_helper_sockaddr_len_valid(peer,
                                                                     peer_len)
+        || (local_endpoint_ready
+            && (!local_endpoint
+                || !ikev2_helper_sockaddr_len_valid(local_endpoint,
+                                                    local_endpoint_len)))
         || !packet || !summary || !out_sa)
     {
         return IKEV2_HELPER_ADD_SA_STATE_FAILED;
