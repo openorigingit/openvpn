@@ -7459,6 +7459,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
+                ++counters->ike_auth_eap_tls_client_hello_rx;
                 ++counters->ike_auth_unsupported;
                 const uint8_t next_eap_identifier =
                     (uint8_t)(sa->pending_eap_identifier + 1u);

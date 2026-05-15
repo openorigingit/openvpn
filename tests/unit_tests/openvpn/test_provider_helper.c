@@ -522,6 +522,7 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_auth_idi_extracted = 33,
         .ike_auth_idi_invalid = 34,
         .ike_auth_eap_tls_rx = 35,
+        .ike_auth_eap_tls_client_hello_rx = 100,
         .ike_auth_cert_extracted = 36,
         .ike_auth_cert_invalid = 37,
         .ike_auth_request_tx = 38,
@@ -687,6 +688,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
     assert_int_equal(output.ike_auth_idi_invalid, input.ike_auth_idi_invalid);
     assert_int_equal(output.ike_auth_eap_tls_rx,
                      input.ike_auth_eap_tls_rx);
+    assert_int_equal(output.ike_auth_eap_tls_client_hello_rx,
+                     input.ike_auth_eap_tls_client_hello_rx);
     assert_int_equal(output.ike_auth_cert_extracted,
                      input.ike_auth_cert_extracted);
     assert_int_equal(output.ike_auth_cert_invalid,
@@ -7605,6 +7608,8 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.runtime_stats.ike_auth_idi_extracted, 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_eap_tls_rx, 3);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_auth_eap_tls_client_hello_rx, 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_request_tx, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported_response_tx,

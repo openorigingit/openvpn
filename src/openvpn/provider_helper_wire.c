@@ -1272,6 +1272,8 @@ provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u64(&pos, stats->ike_auth_idi_extracted);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_idi_invalid);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_eap_tls_rx);
+    provider_helper_wire_write_u64(&pos,
+                                   stats->ike_auth_eap_tls_client_hello_rx);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_cert_extracted);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_cert_invalid);
     provider_helper_wire_write_u64(&pos, stats->ike_auth_request_tx);
@@ -1432,6 +1434,8 @@ provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
     stats->ike_auth_idi_extracted = provider_helper_wire_read_u64(&pos);
     stats->ike_auth_idi_invalid = provider_helper_wire_read_u64(&pos);
     stats->ike_auth_eap_tls_rx = provider_helper_wire_read_u64(&pos);
+    stats->ike_auth_eap_tls_client_hello_rx =
+        provider_helper_wire_read_u64(&pos);
     stats->ike_auth_cert_extracted = provider_helper_wire_read_u64(&pos);
     stats->ike_auth_cert_invalid = provider_helper_wire_read_u64(&pos);
     stats->ike_auth_request_tx = provider_helper_wire_read_u64(&pos);

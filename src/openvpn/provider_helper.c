@@ -332,6 +332,8 @@ provider_helper_print_status_counters(
           stats->ike_auth_allow_missing_xfrm_lease },
         { "ike_auth_allow_unsupported", stats->ike_auth_allow_unsupported },
         { "ike_auth_unsupported", stats->ike_auth_unsupported },
+        { "ike_auth_eap_tls_client_hello_rx",
+          stats->ike_auth_eap_tls_client_hello_rx },
         { "ike_auth_unsupported_response_tx",
           stats->ike_auth_unsupported_response_tx },
         { "ike_auth_unsupported_response_failed",
