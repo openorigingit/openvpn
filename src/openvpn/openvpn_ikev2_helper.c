@@ -6326,15 +6326,15 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                                 header.message_id))
                         {
                             ++counters->ike_informational_delete_response_tx;
-                            (void)ikev2_helper_send_session_close(
-                                ipc_fd, tx_sequence, sa,
-                                "IKE SA deleted by peer");
                         }
                         else
                         {
                             ++counters
                                   ->ike_informational_delete_response_failed;
                         }
+                        (void)ikev2_helper_send_session_close(
+                            ipc_fd, tx_sequence, sa,
+                            "IKE SA deleted by peer");
                         sa->message_id = header.message_id;
                         ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                         ikev2_helper_secure_zero(sa, sizeof(*sa));
@@ -6366,10 +6366,6 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             {
                                 ++counters
                                       ->ike_informational_delete_response_tx;
-                                (void)ikev2_helper_send_session_update(
-                                    ipc_fd, tx_sequence, sa,
-                                    PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE,
-                                    "ike-authorized", "deleted");
                                 sa->updated = exchange_now;
                                 sa->message_id = header.message_id;
                             }
@@ -6378,6 +6374,10 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                                 ++counters
                                       ->ike_informational_delete_response_failed;
                             }
+                            (void)ikev2_helper_send_session_update(
+                                ipc_fd, tx_sequence, sa,
+                                PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE,
+                                "ike-authorized", "deleted");
                             ikev2_helper_secure_zero(&sa->child_sa,
                                                      sizeof(sa->child_sa));
                         }
