@@ -6308,18 +6308,22 @@ ikev2_helper_send_cached_eap_tls_alert_request(
 }
 
 static bool
-ikev2_helper_queue_server_sign_request(
+ikev2_helper_queue_server_sign_transcript_request(
     int ipc_fd,
     uint64_t *tx_sequence,
     uint64_t *next_server_sign_request_id,
     const struct ikev2_helper_listener *listener,
     struct ikev2_helper_ike_sa *sa,
     const struct provider_helper_server_auth_config *server_auth_config,
-    uint32_t purpose)
+    uint32_t purpose,
+    const uint8_t *transcript,
+    size_t transcript_len)
 {
     if (ipc_fd < 0 || !tx_sequence || !next_server_sign_request_id || !listener
         || !sa || !sa->active || !server_auth_config
-        || sa->pending_server_sign_request_id || sa->pending_auth_request_id)
+        || sa->pending_server_sign_request_id || sa->pending_auth_request_id
+        || !transcript || !transcript_len
+        || transcript_len > PROVIDER_HELPER_SERVER_AUTH_TRANSCRIPT_SIZE)
     {
         return false;
     }
@@ -6330,15 +6334,6 @@ ikev2_helper_queue_server_sign_request(
 
     struct provider_helper_server_sign_request request;
     CLEAR(request);
-    uint8_t transcript[PROVIDER_HELPER_SERVER_AUTH_TRANSCRIPT_SIZE];
-    size_t transcript_len = 0;
-    if (!ikev2_helper_build_responder_signed_octets(
-            sa, server_auth_config, transcript, sizeof(transcript),
-            &transcript_len))
-    {
-        return false;
-    }
-
     request.request_id = (*next_server_sign_request_id)++;
     request.initiator_spi = sa->initiator_spi;
     request.responder_spi = sa->responder_spi;
@@ -6350,7 +6345,6 @@ ikev2_helper_queue_server_sign_request(
     request.transcript_len = (uint32_t)transcript_len;
     request.purpose = purpose;
     memcpy(request.transcript, transcript, transcript_len);
-    ikev2_helper_secure_zero(transcript, sizeof(transcript));
 
     if (!provider_helper_server_sign_request_valid(&request, NULL, 0))
     {
@@ -6371,6 +6365,32 @@ ikev2_helper_queue_server_sign_request(
     sa->server_sign_purpose = request.purpose;
     ikev2_helper_secure_zero(&request, sizeof(request));
     return true;
+}
+
+static bool
+ikev2_helper_queue_ike_auth_server_sign_request(
+    int ipc_fd,
+    uint64_t *tx_sequence,
+    uint64_t *next_server_sign_request_id,
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_ike_sa *sa,
+    const struct provider_helper_server_auth_config *server_auth_config)
+{
+    uint8_t transcript[PROVIDER_HELPER_SERVER_AUTH_TRANSCRIPT_SIZE];
+    size_t transcript_len = 0;
+    const bool ready =
+        ikev2_helper_build_responder_signed_octets(
+            sa, server_auth_config, transcript, sizeof(transcript),
+            &transcript_len);
+
+    const bool ret =
+        ready
+        && ikev2_helper_queue_server_sign_transcript_request(
+               ipc_fd, tx_sequence, next_server_sign_request_id, listener, sa,
+               server_auth_config, PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH,
+               transcript, transcript_len);
+    ikev2_helper_secure_zero(transcript, sizeof(transcript));
+    return ret;
 }
 
 static bool
@@ -7646,10 +7666,9 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
             sa->message_id = header.message_id;
             sa->updated = auth_now;
 
-            if (ikev2_helper_queue_server_sign_request(
+            if (ikev2_helper_queue_ike_auth_server_sign_request(
                     ipc_fd, tx_sequence, next_server_sign_request_id,
-                    listener, sa, server_auth_config,
-                    PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH))
+                    listener, sa, server_auth_config))
             {
                 ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
             }
