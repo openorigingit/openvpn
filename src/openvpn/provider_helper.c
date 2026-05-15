@@ -720,6 +720,12 @@ provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
     {
         return false;
     }
+#ifndef _WIN32
+    if (supervisor->pid > 0)
+    {
+        return false;
+    }
+#endif
 
     int fds[2] = { -1, -1 };
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0)

@@ -4349,6 +4349,34 @@ test_provider_helper_spawn_noop(void **state)
 }
 
 static void
+test_provider_helper_spawn_rejects_live_child_pid(void **state)
+{
+    (void)state;
+
+#ifdef _WIN32
+    skip();
+#else
+    if (!noop_helper_path)
+    {
+        skip();
+    }
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.pid = 1;
+
+    char *const argv[] = { (char *)noop_helper_path, NULL };
+    assert_false(
+        provider_helper_supervisor_spawn(&supervisor, noop_helper_path, argv));
+    assert_int_equal(supervisor.pid, 1);
+    assert_int_equal(supervisor.ipc_fd, -1);
+
+    supervisor.pid = 0;
+    provider_helper_supervisor_free(&supervisor);
+#endif
+}
+
+static void
 test_provider_helper_spawn_rejects_invalid_runtime_config(void **state)
 {
     (void)state;
@@ -7008,6 +7036,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_start_timeout_fails_closed),
         cmocka_unit_test(test_provider_helper_preflight_timeout_fails_closed),
         cmocka_unit_test(test_provider_helper_spawn_noop),
+        cmocka_unit_test(test_provider_helper_spawn_rejects_live_child_pid),
         cmocka_unit_test(test_provider_helper_spawn_rejects_invalid_runtime_config),
         cmocka_unit_test(test_provider_helper_reaps_early_helper_exit),
         cmocka_unit_test(test_provider_helper_reaps_after_bad_ipc_header),
