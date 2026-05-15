@@ -40,6 +40,21 @@
 #ifndef _WIN32
 #include <sys/socket.h>
 #include <sys/wait.h>
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
+
+static void
+provider_helper_disable_sigpipe(int fd)
+{
+#ifdef SO_NOSIGPIPE
+    const int on = 1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+#else
+    (void)fd;
+#endif
+}
 #endif
 
 const char *
@@ -374,9 +389,16 @@ provider_helper_supervisor_free(struct provider_helper_supervisor *supervisor)
 static bool
 provider_helper_write_all(int fd, const uint8_t *data, size_t len)
 {
+#ifndef _WIN32
+    provider_helper_disable_sigpipe(fd);
+#endif
     while (len > 0)
     {
+#ifndef _WIN32
+        const ssize_t written = send(fd, data, len, MSG_NOSIGNAL);
+#else
         const ssize_t written = write(fd, data, len);
+#endif
         if (written < 0)
         {
             if (errno == EINTR)
@@ -607,6 +629,8 @@ static bool
 provider_helper_send_fd_payload(int ipc_fd, const uint8_t *payload, size_t payload_len,
                                 int fd)
 {
+    provider_helper_disable_sigpipe(ipc_fd);
+
     char control[CMSG_SPACE(sizeof(fd))];
     CLEAR(control);
 
@@ -633,7 +657,7 @@ provider_helper_send_fd_payload(int ipc_fd, const uint8_t *payload, size_t paylo
     ssize_t written;
     do
     {
-        written = sendmsg(ipc_fd, &msg, 0);
+        written = sendmsg(ipc_fd, &msg, MSG_NOSIGNAL);
     } while (written < 0 && errno == EINTR);
     return written == (ssize_t)payload_len;
 }
