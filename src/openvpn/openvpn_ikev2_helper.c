@@ -103,6 +103,8 @@
 #define IKEV2_HELPER_POLL_TIMEOUT_MS 1000
 #define IKEV2_HELPER_IKE_SA_INIT_MESSAGE_ID 0
 #define IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID 1
+#define IKEV2_HELPER_IKE_SA_INIT_TRANSCRIPT_BYTES \
+    PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE
 #define IKEV2_HELPER_PROTECTED_RESPONSE_CACHE_BYTES 2048
 #ifdef MSG_DONTWAIT
 #define IKEV2_HELPER_RECV_FLAGS MSG_DONTWAIT
@@ -153,6 +155,10 @@ struct ikev2_helper_ike_sa {
     uint32_t retransmits;
     uint32_t protected_retransmits;
     uint32_t protected_response_message_id;
+    size_t ike_sa_init_request_len;
+    uint8_t ike_sa_init_request[IKEV2_HELPER_IKE_SA_INIT_TRANSCRIPT_BYTES];
+    size_t ike_sa_init_response_len;
+    uint8_t ike_sa_init_response[IKEV2_HELPER_IKE_SA_INIT_TRANSCRIPT_BYTES];
     size_t protected_response_len;
     uint8_t protected_response[IKEV2_HELPER_PROTECTED_RESPONSE_CACHE_BYTES];
     uint16_t initiator_ke_group;
@@ -4132,11 +4138,12 @@ ikev2_helper_find_ike_auth_sa(struct ikev2_helper_ike_sa_table *table,
 static bool
 ikev2_helper_store_ike_sa_init_material(
     struct ikev2_helper_ike_sa *sa,
+    const struct provider_helper_ikev2_header *header,
     const uint8_t *packet,
     size_t packet_len,
     const struct provider_helper_ikev2_payload_summary *summary)
 {
-    if (!sa || !packet || !summary
+    if (!sa || !header || !packet || !summary
         || !summary->ke_dh_group
         || summary->ke_dh_group != PROVIDER_HELPER_IKEV2_DH_ECP_256
         || !summary->ke_data_len
@@ -4151,7 +4158,16 @@ ikev2_helper_store_ike_sa_init_material(
     {
         return false;
     }
+    if (header->header_offset > packet_len
+        || packet_len - header->header_offset
+               > sizeof(sa->ike_sa_init_request))
+    {
+        return false;
+    }
 
+    sa->ike_sa_init_request_len = packet_len - header->header_offset;
+    memcpy(sa->ike_sa_init_request, packet + header->header_offset,
+           sa->ike_sa_init_request_len);
     sa->initiator_ke_group = summary->ke_dh_group;
     sa->initiator_ke_len = summary->ke_data_len;
     memcpy(sa->initiator_ke, packet + summary->ke_data_offset,
@@ -4265,8 +4281,8 @@ ikev2_helper_add_ike_sa(struct ikev2_helper_ike_sa_table *table,
                 sa->local_endpoint = *local_endpoint;
                 sa->local_endpoint_len = local_endpoint_len;
             }
-            if (!ikev2_helper_store_ike_sa_init_material(sa, packet, packet_len,
-                                                         summary))
+            if (!ikev2_helper_store_ike_sa_init_material(
+                    sa, header, packet, packet_len, summary))
             {
                 ikev2_helper_secure_zero(sa, sizeof(*sa));
                 return IKEV2_HELPER_ADD_SA_STATE_FAILED;
@@ -5358,20 +5374,102 @@ ikev2_helper_select_server_sign_sigalg(uint32_t allowed_sigalgs)
 }
 
 static bool
+ikev2_helper_build_responder_id_body(
+    const struct provider_helper_server_auth_config *server_auth_config,
+    uint8_t *id_body,
+    size_t id_body_size,
+    size_t *id_body_len)
+{
+    if (id_body_len)
+    {
+        *id_body_len = 0;
+    }
+    if (!server_auth_config || !id_body || !id_body_len
+        || !server_auth_config->server_id_len
+        || server_auth_config->server_id_len
+               >= sizeof(server_auth_config->server_id)
+        || id_body_size
+               < 4u + (size_t)server_auth_config->server_id_len)
+    {
+        return false;
+    }
+
+    uint8_t *pos = id_body;
+    *pos++ = (uint8_t)server_auth_config->ikev2_id_type;
+    *pos++ = 0;
+    *pos++ = 0;
+    *pos++ = 0;
+    memcpy(pos, server_auth_config->server_id,
+           server_auth_config->server_id_len);
+    pos += server_auth_config->server_id_len;
+    *id_body_len = (size_t)(pos - id_body);
+    return true;
+}
+
+static bool
+ikev2_helper_build_responder_signed_octets(
+    const struct ikev2_helper_ike_sa *sa,
+    const struct provider_helper_server_auth_config *server_auth_config,
+    uint8_t *transcript,
+    size_t transcript_size,
+    size_t *transcript_len)
+{
+    if (transcript_len)
+    {
+        *transcript_len = 0;
+    }
+    if (!sa || !sa->active || !server_auth_config || !transcript
+        || !transcript_len || !sa->ike_sa_init_response_len
+        || !sa->initiator_nonce_len || !sa->sk_pr_len)
+    {
+        return false;
+    }
+
+    uint8_t id_body[4 + PROVIDER_HELPER_SERVER_AUTH_ID_SIZE];
+    uint8_t id_hash[IKEV2_HELPER_SHA256_DIGEST_BYTES];
+    size_t id_body_len = 0;
+    const size_t needed = sa->ike_sa_init_response_len
+                          + sa->initiator_nonce_len + sizeof(id_hash);
+
+    const bool ret =
+        needed <= transcript_size
+        && ikev2_helper_build_responder_id_body(server_auth_config,
+                                                id_body, sizeof(id_body),
+                                                &id_body_len)
+        && ikev2_helper_hmac_sha256(sa->sk_pr, sa->sk_pr_len, id_body,
+                                    id_body_len, id_hash, sizeof(id_hash));
+    if (ret)
+    {
+        uint8_t *pos = transcript;
+        memcpy(pos, sa->ike_sa_init_response, sa->ike_sa_init_response_len);
+        pos += sa->ike_sa_init_response_len;
+        memcpy(pos, sa->initiator_nonce, sa->initiator_nonce_len);
+        pos += sa->initiator_nonce_len;
+        memcpy(pos, id_hash, sizeof(id_hash));
+        pos += sizeof(id_hash);
+        *transcript_len = (size_t)(pos - transcript);
+    }
+
+    ikev2_helper_secure_zero(id_body, sizeof(id_body));
+    ikev2_helper_secure_zero(id_hash, sizeof(id_hash));
+    if (!ret)
+    {
+        ikev2_helper_secure_zero(transcript, transcript_size);
+    }
+    return ret;
+}
+
+static bool
 ikev2_helper_queue_server_sign_request(
     int ipc_fd,
     uint64_t *tx_sequence,
     uint64_t *next_server_sign_request_id,
     const struct ikev2_helper_listener *listener,
     struct ikev2_helper_ike_sa *sa,
-    const struct provider_helper_server_auth_config *server_auth_config,
-    const uint8_t *transcript,
-    size_t transcript_len)
+    const struct provider_helper_server_auth_config *server_auth_config)
 {
     if (ipc_fd < 0 || !tx_sequence || !next_server_sign_request_id || !listener
-        || !sa || !sa->active || !server_auth_config || !transcript
-        || !transcript_len
-        || transcript_len > PROVIDER_HELPER_SERVER_AUTH_TRANSCRIPT_SIZE
+        || !sa || !sa->active || !server_auth_config
         || sa->pending_server_sign_request_id || sa->pending_auth_request_id)
     {
         return false;
@@ -5383,6 +5481,15 @@ ikev2_helper_queue_server_sign_request(
 
     struct provider_helper_server_sign_request request;
     CLEAR(request);
+    uint8_t transcript[PROVIDER_HELPER_SERVER_AUTH_TRANSCRIPT_SIZE];
+    size_t transcript_len = 0;
+    if (!ikev2_helper_build_responder_signed_octets(
+            sa, server_auth_config, transcript, sizeof(transcript),
+            &transcript_len))
+    {
+        return false;
+    }
+
     request.request_id = (*next_server_sign_request_id)++;
     request.initiator_spi = sa->initiator_spi;
     request.responder_spi = sa->responder_spi;
@@ -5393,6 +5500,7 @@ ikev2_helper_queue_server_sign_request(
         server_auth_config->allowed_sigalgs);
     request.transcript_len = (uint32_t)transcript_len;
     memcpy(request.transcript, transcript, transcript_len);
+    ikev2_helper_secure_zero(transcript, sizeof(transcript));
 
     if (!provider_helper_server_sign_request_valid(&request, NULL, 0))
     {
@@ -5702,7 +5810,7 @@ ikev2_helper_send_sa_init_response(
     const struct sockaddr_storage *peer,
     socklen_t peer_len,
     const struct provider_helper_ikev2_header *header,
-    const struct ikev2_helper_ike_sa *sa)
+    struct ikev2_helper_ike_sa *sa)
 {
     uint8_t response[PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE
                      + PROVIDER_HELPER_IKEV2_HEADER_SIZE
@@ -5729,8 +5837,22 @@ ikev2_helper_send_sa_init_response(
         return false;
     }
 
+    const size_t response_offset =
+        (listener->descriptor.flags & PROVIDER_HELPER_LISTENER_FD_NATT)
+        ? PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE : 0;
+    if (response_len < response_offset
+        || response_len - response_offset > sizeof(sa->ike_sa_init_response))
+    {
+        ikev2_helper_secure_zero(response, sizeof(response));
+        return false;
+    }
+    sa->ike_sa_init_response_len = response_len - response_offset;
+    memcpy(sa->ike_sa_init_response, response + response_offset,
+           sa->ike_sa_init_response_len);
+
     const ssize_t sent = sendto(listener->fd, response, response_len, 0,
                                 (const struct sockaddr *)peer, peer_len);
+    ikev2_helper_secure_zero(response, sizeof(response));
     return sent == (ssize_t)response_len;
 }
 
@@ -6455,7 +6577,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
 
             if (ikev2_helper_queue_server_sign_request(
                     ipc_fd, tx_sequence, next_server_sign_request_id,
-                    listener, sa, server_auth_config, plaintext, plaintext_len))
+                    listener, sa, server_auth_config))
             {
                 ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
             }
@@ -7139,7 +7261,7 @@ ikev2_helper_loop(int fd)
     size_t listener_count = 0;
     size_t xfrm_lease_count = 0;
     struct provider_helper_runtime_stats counters;
-    struct ikev2_helper_ike_sa_table sa_table;
+    struct ikev2_helper_ike_sa_table *sa_table = NULL;
     struct ikev2_helper_sa_init_rate_state sa_init_rate_state;
     struct ikev2_helper_cookie_context cookie_ctx;
     struct provider_helper_runtime_config config;
@@ -7147,10 +7269,15 @@ ikev2_helper_loop(int fd)
     struct provider_helper_server_auth_config server_auth_config;
     provider_helper_runtime_config_default(&config);
     CLEAR(counters);
-    CLEAR(sa_table);
     CLEAR(sa_init_rate_state);
     CLEAR(listeners);
     CLEAR(server_auth_config);
+    sa_table = calloc(1, sizeof(*sa_table));
+    if (!sa_table)
+    {
+        ret = 12;
+        goto done;
+    }
     for (size_t i = 0; i < SIZE(listeners); ++i)
     {
         listeners[i].fd = -1;
@@ -7194,10 +7321,10 @@ ikev2_helper_loop(int fd)
         }
         if (poll_status == 0)
         {
-            ikev2_helper_expire_ike_sas(&sa_table, &counters, time(NULL),
+            ikev2_helper_expire_ike_sas(sa_table, &counters, time(NULL),
                                         config.half_open_timeout_seconds);
             if (!ikev2_helper_expire_authorized_ike_sas(
-                    &sa_table, &counters, time(NULL), fd, &tx_sequence))
+                    sa_table, &counters, time(NULL), fd, &tx_sequence))
             {
                 ret = 7;
                 goto done;
@@ -7230,7 +7357,7 @@ ikev2_helper_loop(int fd)
                     ikev2_helper_handle_datagram(&listeners[i - 1], &config,
                                                  server_auth_configured,
                                                  &server_auth_config,
-                                                 &sa_table,
+                                                 sa_table,
                                                  &sa_init_rate_state,
                                                  &counters, &cookie_ctx, fd,
                                                  &tx_sequence,
@@ -7244,10 +7371,10 @@ ikev2_helper_loop(int fd)
             }
         }
 
-        ikev2_helper_expire_ike_sas(&sa_table, &counters, time(NULL),
+        ikev2_helper_expire_ike_sas(sa_table, &counters, time(NULL),
                                     config.half_open_timeout_seconds);
         if (!ikev2_helper_expire_authorized_ike_sas(
-                &sa_table, &counters, time(NULL), fd, &tx_sequence))
+                sa_table, &counters, time(NULL), fd, &tx_sequence))
         {
             ret = 7;
             goto done;
@@ -7343,7 +7470,7 @@ ikev2_helper_loop(int fd)
                         &replaced_lease)
                     || (replaced
                         && !ikev2_helper_clear_ike_sas_for_xfrm_lease(
-                            &sa_table, &replaced_lease, &counters,
+                            sa_table, &replaced_lease, &counters,
                             &revoked, fd, &tx_sequence,
                             "XFRM lease replaced"))
                     || (replaced
@@ -7367,9 +7494,9 @@ ikev2_helper_loop(int fd)
                     ++counters.xfrm_lease_installed;
                 }
                 counters.xfrm_leases_active = xfrm_lease_count;
-                counters.ike_sa_active = sa_table.active;
+                counters.ike_sa_active = sa_table->active;
                 counters.ike_child_sa_scaffold_active =
-                    ikev2_helper_count_child_sa_scaffolds(&sa_table);
+                    ikev2_helper_count_child_sa_scaffolds(sa_table);
                 break;
             }
 
@@ -7382,7 +7509,7 @@ ikev2_helper_loop(int fd)
                     || !ikev2_helper_read_xfrm_lease(fd, &header, &config,
                                                      &lease)
                     || !ikev2_helper_clear_ike_sas_for_xfrm_lease(
-                        &sa_table, &lease, &counters, &revoked, fd,
+                        sa_table, &lease, &counters, &revoked, fd,
                         &tx_sequence, "XFRM lease deleted")
                     || !ikev2_helper_delete_xfrm_lease(
                         xfrm_leases, &xfrm_lease_count, &lease, &deleted)
@@ -7399,9 +7526,9 @@ ikev2_helper_loop(int fd)
                     counters.ike_sa_xfrm_lease_revoked += revoked;
                 }
                 counters.xfrm_leases_active = xfrm_lease_count;
-                counters.ike_sa_active = sa_table.active;
+                counters.ike_sa_active = sa_table->active;
                 counters.ike_child_sa_scaffold_active =
-                    ikev2_helper_count_child_sa_scaffolds(&sa_table);
+                    ikev2_helper_count_child_sa_scaffolds(sa_table);
                 break;
             }
 
@@ -7410,7 +7537,7 @@ ikev2_helper_loop(int fd)
                 struct provider_helper_auth_response response;
                 if (!configured
                     || !ikev2_helper_read_auth_response(fd, &header, &response)
-                    || !ikev2_helper_apply_auth_response(&sa_table, listeners,
+                    || !ikev2_helper_apply_auth_response(sa_table, listeners,
                                                          listener_count,
                                                          xfrm_leases,
                                                          xfrm_lease_count,
@@ -7431,7 +7558,7 @@ ikev2_helper_loop(int fd)
                     || !ikev2_helper_read_server_sign_response(fd, &header,
                                                                &response)
                     || !ikev2_helper_apply_server_sign_response(
-                        &sa_table, listeners, listener_count, &response, fd,
+                        sa_table, listeners, listener_count, &response, fd,
                         &tx_sequence, &next_auth_request_id, &counters))
                 {
                     ret = 6;
@@ -7485,9 +7612,9 @@ ikev2_helper_loop(int fd)
                     ret = 7;
                     goto done;
                 }
-                counters.ike_sa_active = sa_table.active;
+                counters.ike_sa_active = sa_table->active;
                 counters.ike_child_sa_scaffold_active =
-                    ikev2_helper_count_child_sa_scaffolds(&sa_table);
+                    ikev2_helper_count_child_sa_scaffolds(sa_table);
                 counters.xfrm_leases_stale =
                     ikev2_helper_count_stale_xfrm_leases(
                         xfrm_leases, xfrm_lease_count, time(NULL));
@@ -7511,9 +7638,15 @@ done:
         close(listeners[i].fd);
         listeners[i].fd = -1;
     }
-    if (!ikev2_helper_clear_ike_sa_table(&sa_table, &counters) && ret == 0)
+    if (sa_table && !ikev2_helper_clear_ike_sa_table(sa_table, &counters)
+        && ret == 0)
     {
         ret = 10;
+    }
+    if (sa_table)
+    {
+        ikev2_helper_secure_zero(sa_table, sizeof(*sa_table));
+        free(sa_table);
     }
     ikev2_helper_cookie_context_free(&cookie_ctx);
     ikev2_helper_secure_zero(&server_auth_config, sizeof(server_auth_config));
