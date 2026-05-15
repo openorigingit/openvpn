@@ -740,6 +740,8 @@ ikev2_helper_prf_plus_sha256(const uint8_t *key, size_t key_len,
     size_t t_len = 0;
     uint8_t counter = 1;
     bool ret = false;
+    CLEAR(t);
+    CLEAR(input);
 
     while (generated < output_len)
     {
@@ -1786,7 +1788,9 @@ ikev2_helper_enable_listener_pktinfo(
         return false;
     }
 
+#if defined(IP_PKTINFO) || defined(IPV6_RECVPKTINFO)
     const int one = 1;
+#endif
     if (listener->family == AF_INET)
     {
 #if defined(IP_PKTINFO)
@@ -3266,7 +3270,6 @@ ikev2_helper_extract_x509_metadata_openssl(
     char *serial_hex = NULL;
     BIO *issuer_bio = NULL;
     char *issuer_data = NULL;
-    long issuer_len = 0;
 
     serial_bn = ASN1_INTEGER_to_BN(X509_get0_serialNumber(cert), NULL);
     serial_hex = serial_bn && !BN_is_negative(serial_bn)
@@ -3286,7 +3289,7 @@ ikev2_helper_extract_x509_metadata_openssl(
         && X509_NAME_print_ex(issuer_bio, X509_get_issuer_name(cert), 0,
                               XN_FLAG_RFC2253) >= 0)
     {
-        issuer_len = BIO_get_mem_data(issuer_bio, &issuer_data);
+        const long issuer_len = BIO_get_mem_data(issuer_bio, &issuer_data);
         ret = issuer_len > 0
               && ikev2_helper_copy_metadata_field(
                      sa->cert_issuer, sizeof(sa->cert_issuer),
@@ -3426,7 +3429,7 @@ ikev2_helper_extract_claimed_idi(
         || summary->idi_count != 1
         || !ikev2_helper_body_inside(plaintext_len, summary->idi_offset,
                                      summary->idi_len)
-        || summary->idi_len <= 4)
+        || summary->idi_len < 4)
     {
         return false;
     }
@@ -5572,11 +5575,11 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 ++counters->datagrams_malformed;
                 return;
             }
-            const time_t now = time(NULL);
+            const time_t init_now = time(NULL);
             if (summary.saw_cookie_notify)
             {
                 ++counters->ike_sa_init_cookie_present;
-                const uint32_t epoch = ikev2_helper_cookie_epoch(now);
+                const uint32_t epoch = ikev2_helper_cookie_epoch(init_now);
                 if (!provider_helper_ikev2_verify_cookie(
                         packet + summary.cookie_offset, summary.cookie_len,
                         listener->descriptor.listener_id, &peer,
@@ -5591,7 +5594,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 ++counters->ike_sa_init_cookie_verified;
             }
 
-            ikev2_helper_expire_ike_sas(sa_table, counters, now,
+            ikev2_helper_expire_ike_sas(sa_table, counters, init_now,
                                         config->half_open_timeout_seconds);
 
             uint32_t max_half_open_sas = config->max_half_open_sas;
@@ -5611,7 +5614,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     return;
                 }
                 ++existing->retransmits;
-                existing->updated = now;
+                existing->updated = init_now;
                 ++counters->ike_sa_init_duplicate;
                 if (ikev2_helper_send_sa_init_response(listener, config, &peer,
                                                        peer_len, &header,
@@ -5654,7 +5657,8 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
             {
                 ++counters->ike_sa_init_cookie_required;
                 if (ikev2_helper_send_cookie_response(
-                        listener, cookie_ctx, &peer, peer_len, &header, now))
+                        listener, cookie_ctx, &peer, peer_len, &header,
+                        init_now))
                 {
                     ++counters->ike_sa_init_cookie_response_tx;
                 }
