@@ -368,29 +368,34 @@ multi_ikev2_helper_auth_request(void *arg,
     return true;
 }
 
-static void
-multi_start_ikev2_helper(struct context *t)
+static bool
+multi_spawn_ikev2_helper(struct context *t, bool fatal)
 {
     struct multi_context *m = t->multi;
     const char *helper_path = t->options.ikev2_helper_path;
 
     if (!helper_path)
     {
-        return;
+        return false;
     }
 
 #ifdef _WIN32
     msg(M_FATAL, "--experimental-ikev2-helper is not supported on Windows");
+    return false;
 #else
     struct provider_policy_preflight preflight;
     if (!provider_policy_preflight(&t->options, t->plugins, &preflight))
     {
-        msg(M_FATAL, "IKEv2 helper preflight failed: %s", preflight.reason);
+        msg(fatal ? M_FATAL : M_WARN,
+            "IKEv2 helper preflight failed: %s", preflight.reason);
+        return false;
     }
 
     if (platform_access(helper_path, X_OK) != 0)
     {
-        msg(M_FATAL | M_ERRNO, "IKEv2 helper is not executable: %s", helper_path);
+        msg((fatal ? M_FATAL : M_WARN) | M_ERRNO,
+            "IKEv2 helper is not executable: %s", helper_path);
+        return false;
     }
 
     provider_helper_supervisor_set_auth_callback(
@@ -403,10 +408,32 @@ multi_start_ikev2_helper(struct context *t)
     char *const argv[] = { (char *)helper_path, NULL };
     if (!provider_helper_supervisor_spawn(&m->provider_helper, helper_path, argv))
     {
-        msg(M_FATAL, "IKEv2 helper startup failed: %s", helper_path);
+        msg(fatal ? M_FATAL : M_WARN,
+            "IKEv2 helper startup failed: %s", helper_path);
+        return false;
     }
     msg(M_INFO, "IKEv2 helper starting: %s", helper_path);
+    return true;
 #endif
+}
+
+static void
+multi_start_ikev2_helper(struct context *t)
+{
+    (void)multi_spawn_ikev2_helper(t, true);
+}
+
+static bool
+multi_restart_ikev2_helper_ready(struct multi_context *m)
+{
+    if (!m->top.options.ikev2_helper_path)
+    {
+        return false;
+    }
+
+    return (m->provider_helper.state == PROVIDER_HELPER_STATE_FAILED
+            || m->provider_helper.state == PROVIDER_HELPER_STATE_DEGRADED)
+           && provider_helper_supervisor_restart_ready(&m->provider_helper);
 }
 
 /*
@@ -3920,6 +3947,10 @@ multi_process_per_second_timers_dowork(struct multi_context *m)
     if (m->top.options.ikev2_helper_path)
     {
         provider_helper_process_event(&m->provider_helper);
+        if (multi_restart_ikev2_helper_ready(m))
+        {
+            (void)multi_spawn_ikev2_helper(&m->top, false);
+        }
         if (provider_helper_stats_trigger(m))
         {
             (void)provider_helper_supervisor_send_stats_request(
