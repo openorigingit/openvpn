@@ -5225,6 +5225,68 @@ test_provider_helper_spawn_rejects_mismatched_listener_port(void **state)
 }
 
 static void
+test_provider_helper_spawn_rejects_expired_xfrm_lease(void **state)
+{
+    (void)state;
+
+    if (!ikev2_helper_path)
+    {
+        skip();
+    }
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+
+    char *const argv[] = { (char *)ikev2_helper_path, NULL };
+    assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
+                                                 argv));
+
+    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 2);
+
+    const struct provider_helper_xfrm_lease xfrm_lease = {
+        .lease_id = 202,
+        .provider_session_id = 101,
+        .policy_revision = 303,
+        .expires = 1,
+        .mark_value = 0x4200,
+        .mark_mask = 0xffff,
+        .if_id = 12,
+        .reqid = 1100,
+        .address_family = AF_INET,
+        .flags = PROVIDER_HELPER_XFRM_LEASE_IPV4,
+        .local_ts_start_ipv4 = 0x0a580001,
+        .local_ts_end_ipv4 = 0x0a580001,
+        .local_ts_start_port = 0,
+        .local_ts_end_port = 65535,
+        .remote_ts_start_ipv4 = 0x0a580002,
+        .remote_ts_end_ipv4 = 0x0a580002,
+        .remote_ts_start_port = 0,
+        .remote_ts_end_port = 65535,
+        .ip_protocol_id = 0,
+    };
+    assert_true(provider_helper_supervisor_send_xfrm_lease(&supervisor,
+                                                           &xfrm_lease, 91));
+
+    for (int i = 0; i < 100 && supervisor.state == PROVIDER_HELPER_STATE_READY;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_DEGRADED);
+    provider_helper_supervisor_free(&supervisor);
+}
+
+static void
 test_provider_helper_spawn_ikev2_rejects_oversize_datagram(void **state)
 {
     (void)state;
@@ -8493,6 +8555,8 @@ main(void)
             test_provider_helper_spawn_rejects_duplicate_listener_id),
         cmocka_unit_test(
             test_provider_helper_spawn_rejects_mismatched_listener_port),
+        cmocka_unit_test(
+            test_provider_helper_spawn_rejects_expired_xfrm_lease),
         cmocka_unit_test(
             test_provider_helper_spawn_ikev2_rejects_oversize_datagram),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_unsupported_exchange),

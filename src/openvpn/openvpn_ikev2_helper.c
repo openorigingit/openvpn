@@ -4269,10 +4269,33 @@ ikev2_helper_listener_id_exists(const struct ikev2_helper_listener *listeners,
            != NULL;
 }
 
+static const char *
+ikev2_helper_xfrm_lease_expiry_reason(
+    const struct provider_helper_xfrm_lease *lease,
+    time_t now)
+{
+    if (!lease || now < 0)
+    {
+        return NULL;
+    }
+
+    const uint64_t now_seconds = (uint64_t)now;
+    if (lease->expires && now_seconds >= lease->expires)
+    {
+        return "XFRM lease expired";
+    }
+    if (lease->rekey_deadline && now_seconds >= lease->rekey_deadline)
+    {
+        return "XFRM lease rekey deadline expired";
+    }
+    return NULL;
+}
+
 static const struct provider_helper_xfrm_lease *
 ikev2_helper_find_xfrm_lease(const struct provider_helper_xfrm_lease *leases,
                              size_t lease_count,
-                             const struct provider_helper_auth_response *response)
+                             const struct provider_helper_auth_response *response,
+                             time_t now)
 {
     if (!leases || !response)
     {
@@ -4284,7 +4307,8 @@ ikev2_helper_find_xfrm_lease(const struct provider_helper_xfrm_lease *leases,
         const struct provider_helper_xfrm_lease *lease = &leases[i];
         if (lease->lease_id == response->xfrm_lease_id
             && lease->provider_session_id == response->provider_session_id
-            && lease->policy_revision == response->policy_revision)
+            && lease->policy_revision == response->policy_revision
+            && !ikev2_helper_xfrm_lease_expiry_reason(lease, now))
         {
             return lease;
         }
@@ -5093,7 +5117,7 @@ ikev2_helper_apply_auth_response(
         {
             const struct provider_helper_xfrm_lease *lease =
                 ikev2_helper_find_xfrm_lease(xfrm_leases, xfrm_lease_count,
-                                             response);
+                                             response, time(NULL));
             const struct ikev2_helper_listener *listener =
                 ikev2_helper_find_listener(listeners, listener_count,
                                            sa->listener_id);
@@ -5260,23 +5284,13 @@ static const char *
 ikev2_helper_xfrm_lease_expired_reason(const struct ikev2_helper_ike_sa *sa,
                                        time_t now)
 {
-    if (!sa || !sa->active || !sa->auth_authorized || now < 0)
+    if (!sa || !sa->active || !sa->auth_authorized)
     {
         return NULL;
     }
 
-    const uint64_t now_seconds = (uint64_t)now;
-    const struct provider_helper_xfrm_lease *lease =
-        &sa->authorized_xfrm_lease;
-    if (lease->expires && now_seconds >= lease->expires)
-    {
-        return "XFRM lease expired";
-    }
-    if (lease->rekey_deadline && now_seconds >= lease->rekey_deadline)
-    {
-        return "XFRM lease rekey deadline expired";
-    }
-    return NULL;
+    return ikev2_helper_xfrm_lease_expiry_reason(&sa->authorized_xfrm_lease,
+                                                 now);
 }
 
 static bool
@@ -6930,6 +6944,8 @@ ikev2_helper_loop(int fd)
                 if (!configured
                     || !ikev2_helper_read_xfrm_lease(fd, &header, &config,
                                                      &lease)
+                    || ikev2_helper_xfrm_lease_expiry_reason(&lease,
+                                                             time(NULL))
                     || !ikev2_helper_store_xfrm_lease(
                         xfrm_leases, &xfrm_lease_count, SIZE(xfrm_leases),
                         &lease, &replaced, &unchanged, &replace_index,
