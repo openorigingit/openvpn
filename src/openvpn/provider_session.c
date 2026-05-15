@@ -187,6 +187,8 @@ provider_session_create(struct provider_session_table *table,
     session->management_cid = cid;
     session->xfrm_lease_id = create->xfrm_lease_id;
     session->policy_revision = create->policy_revision;
+    session->address_pool_handle = create->address_pool_handle;
+    session->has_address_pool_handle = create->has_address_pool_handle;
     session->created = create->now ? create->now : now;
     session->state = PROVIDER_SESSION_STATE_NEW;
 

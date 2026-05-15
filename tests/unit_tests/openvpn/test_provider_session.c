@@ -64,6 +64,8 @@ default_session_create(void)
         .authorized_selectors = "10.88.0.1/32[tcp/443]",
         .xfrm_lease_id = 42,
         .policy_revision = 7,
+        .address_pool_handle = 3,
+        .has_address_pool_handle = true,
         .now = 1000,
     };
 }
@@ -114,6 +116,8 @@ test_provider_session_create_lookup_update(void **state)
     assert_string_equal(session->authorized_selectors, "10.88.0.1/32[tcp/443]");
     assert_int_equal(session->xfrm_lease_id, 42);
     assert_int_equal(session->policy_revision, 7);
+    assert_true(session->has_address_pool_handle);
+    assert_int_equal(session->address_pool_handle, 3);
     assert_int_equal(session->created, 1000);
     assert_int_equal(provider_session_table_count(&table), 1);
     assert_ptr_equal(provider_session_lookup_by_cid(&table, 1), session);

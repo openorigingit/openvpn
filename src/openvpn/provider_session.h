@@ -74,6 +74,8 @@ struct provider_session {
 
     uint64_t xfrm_lease_id;
     uint64_t policy_revision;
+    int address_pool_handle;
+    bool has_address_pool_handle;
     bool has_xfrm_lease;
     struct provider_session_xfrm_lease xfrm_lease;
 
@@ -104,6 +106,8 @@ struct provider_session_create {
     const char *authorized_selectors;
     uint64_t xfrm_lease_id;
     uint64_t policy_revision;
+    int address_pool_handle;
+    bool has_address_pool_handle;
     time_t now;
 };
 

@@ -61,6 +61,9 @@
 #define MULTI_IKEV2_HELPER_NATT_PORT 4500
 #define MULTI_IKEV2_HELPER_IKE_LISTENER_ID 1
 #define MULTI_IKEV2_HELPER_NATT_LISTENER_ID 2
+#define MULTI_IKEV2_HELPER_PROVIDER_NAME "ikev2"
+#define MULTI_IKEV2_HELPER_XFRM_ID_BASE 0x0f000000u
+#define MULTI_IKEV2_HELPER_XFRM_ID_MAX  0x00ffffffu
 
 /*#define MULTI_DEBUG_EVENT_LOOP*/
 
@@ -444,6 +447,21 @@ multi_ikev2_helper_auth_deny(struct provider_helper_auth_response *response,
     response->reason_len = (uint32_t)strlen(response->reason);
 }
 
+static void
+multi_ikev2_helper_auth_allow(struct provider_helper_auth_response *response,
+                              uint64_t request_id,
+                              const struct provider_session *session)
+{
+    CLEAR(*response);
+    response->request_id = request_id;
+    response->decision = PROVIDER_HELPER_AUTH_ALLOW;
+    response->provider_session_id = session->id;
+    response->xfrm_lease_id = session->xfrm_lease_id;
+    response->policy_revision = session->policy_revision;
+    snprintf(response->reason, sizeof(response->reason), "%s", "authorized");
+    response->reason_len = (uint32_t)strlen(response->reason);
+}
+
 static enum provider_policy_profile_mode
 multi_ikev2_helper_policy_profile(uint32_t profile)
 {
@@ -475,7 +493,6 @@ multi_ikev2_helper_copy_auth_field(char *dst, size_t dst_size,
     return true;
 }
 
-#ifdef ENABLE_MANAGEMENT
 static void
 multi_ikev2_helper_copy_xfrm_lease(struct provider_helper_xfrm_lease *dst,
                                    const struct provider_session_xfrm_lease *src)
@@ -500,7 +517,219 @@ multi_ikev2_helper_copy_xfrm_lease(struct provider_helper_xfrm_lease *dst,
     dst->remote_ts_end_port = src->remote_ts_end_port;
     dst->ip_protocol_id = src->ip_protocol_id;
 }
-#endif
+
+static void
+multi_ikev2_helper_release_session_address(struct multi_context *m,
+                                           struct provider_session *session,
+                                           bool hard)
+{
+    if (m && m->ifconfig_pool && session && session->has_address_pool_handle)
+    {
+        ifconfig_pool_release(m->ifconfig_pool, session->address_pool_handle,
+                              hard);
+        session->has_address_pool_handle = false;
+        session->address_pool_handle = -1;
+    }
+}
+
+static bool
+multi_ikev2_helper_xfrm_id(uint64_t id, uint32_t *out)
+{
+    if (!id || id > MULTI_IKEV2_HELPER_XFRM_ID_MAX || !out)
+    {
+        return false;
+    }
+
+    *out = MULTI_IKEV2_HELPER_XFRM_ID_BASE | (uint32_t)id;
+    return true;
+}
+
+static bool
+multi_ikev2_helper_build_xfrm_lease(
+    const struct provider_session *session,
+    uint64_t policy_revision,
+    in_addr_t local_ipv4,
+    in_addr_t remote_ipv4,
+    struct provider_session_xfrm_lease *lease)
+{
+    uint32_t xfrm_id = 0;
+    if (!session || !policy_revision || !local_ipv4 || !remote_ipv4 || !lease
+        || !multi_ikev2_helper_xfrm_id(session->id, &xfrm_id))
+    {
+        return false;
+    }
+
+    CLEAR(*lease);
+    lease->lease_id = session->id;
+    lease->provider_session_id = session->id;
+    lease->policy_revision = policy_revision;
+    lease->mark_value = xfrm_id;
+    lease->mark_mask = 0xffffffffu;
+    lease->if_id = xfrm_id;
+    lease->reqid = xfrm_id;
+    lease->address_family = AF_INET;
+    lease->flags = PROVIDER_HELPER_XFRM_LEASE_IPV4;
+    lease->local_ts_start_ipv4 = local_ipv4;
+    lease->local_ts_end_ipv4 = local_ipv4;
+    lease->local_ts_start_port = 0;
+    lease->local_ts_end_port = 65535;
+    lease->remote_ts_start_ipv4 = remote_ipv4;
+    lease->remote_ts_end_ipv4 = remote_ipv4;
+    lease->remote_ts_start_port = 0;
+    lease->remote_ts_end_port = 65535;
+    lease->ip_protocol_id = 0;
+    return true;
+}
+
+static bool
+multi_ikev2_helper_max_clients_available(const struct multi_context *m)
+{
+    if (!m)
+    {
+        return false;
+    }
+
+    const size_t provider_count =
+        provider_session_table_count(&m->provider_sessions);
+    const size_t regular_count = m->n_clients > 0 ? (size_t)m->n_clients : 0;
+    return provider_count + regular_count < m->max_clients;
+}
+
+static bool
+multi_ikev2_helper_authorize_session(
+    struct multi_context *m,
+    const struct provider_helper_auth_request *request,
+    const char *principal,
+    const char *credential_fingerprint,
+    uint64_t policy_revision,
+    struct provider_helper_auth_response *response)
+{
+    if (!m || !request || !principal || !credential_fingerprint
+        || !policy_revision || !response)
+    {
+        return false;
+    }
+
+    if (!multi_ikev2_helper_max_clients_available(m))
+    {
+        multi_ikev2_helper_auth_deny(
+            response, request->request_id,
+            "provider session would exceed max-clients");
+        return true;
+    }
+
+    if (!m->ifconfig_pool || !m->top.options.ifconfig_pool_defined)
+    {
+        multi_ikev2_helper_auth_deny(
+            response, request->request_id,
+            "provider session requires an IPv4 ifconfig pool");
+        return true;
+    }
+
+    const char *pool_key = m->top.options.duplicate_cn ? NULL : principal;
+    in_addr_t pool_local = 0;
+    in_addr_t pool_remote = 0;
+    const ifconfig_pool_handle pool_handle =
+        ifconfig_pool_acquire(m->ifconfig_pool, &pool_local, &pool_remote,
+                              NULL, pool_key);
+    if (pool_handle < 0 || !pool_remote)
+    {
+        multi_ikev2_helper_auth_deny(
+            response, request->request_id,
+            "provider session IPv4 pool is exhausted");
+        return true;
+    }
+
+    const in_addr_t local_ts =
+        pool_local ? pool_local
+                   : (m->top.c1.tuntap ? m->top.c1.tuntap->local : 0);
+    if (!local_ts)
+    {
+        ifconfig_pool_release(m->ifconfig_pool, pool_handle, true);
+        multi_ikev2_helper_auth_deny(
+            response, request->request_id,
+            "provider session local IPv4 selector is unavailable");
+        return true;
+    }
+
+    struct gc_arena gc = gc_new();
+    const char *assigned_address = print_in_addr_t(pool_remote, 0, &gc);
+    const char *local_selector = print_in_addr_t(local_ts, 0, &gc);
+    const char *remote_selector = print_in_addr_t(pool_remote, 0, &gc);
+    char authorized_selectors[PROVIDER_POLICY_SELECTOR_SIZE];
+    const int selector_len =
+        snprintf(authorized_selectors, sizeof(authorized_selectors),
+                 "%s/32<->%s/32", local_selector, remote_selector);
+    if (selector_len < 0
+        || (size_t)selector_len >= sizeof(authorized_selectors))
+    {
+        gc_free(&gc);
+        ifconfig_pool_release(m->ifconfig_pool, pool_handle, true);
+        multi_ikev2_helper_auth_deny(
+            response, request->request_id,
+            "provider session selector is too long");
+        return true;
+    }
+
+    const struct provider_session_create create = {
+        .provider_name = MULTI_IKEV2_HELPER_PROVIDER_NAME,
+        .principal = principal,
+        .credential_fingerprint = credential_fingerprint,
+        .assigned_address = assigned_address,
+        .authorized_selectors = authorized_selectors,
+        .policy_revision = policy_revision,
+        .address_pool_handle = pool_handle,
+        .has_address_pool_handle = true,
+        .now = now,
+    };
+    struct provider_session *session =
+        provider_session_create(&m->provider_sessions, &create);
+    gc_free(&gc);
+    if (!session)
+    {
+        ifconfig_pool_release(m->ifconfig_pool, pool_handle, true);
+        multi_ikev2_helper_auth_deny(
+            response, request->request_id,
+            "provider session allocation failed");
+        return true;
+    }
+
+    struct provider_session_xfrm_lease session_lease;
+    struct provider_helper_xfrm_lease helper_lease;
+    if (!multi_ikev2_helper_build_xfrm_lease(
+            session, policy_revision, local_ts, pool_remote, &session_lease)
+        || !provider_session_set_xfrm_lease(session, &session_lease))
+    {
+        multi_ikev2_helper_release_session_address(m, session, true);
+        provider_session_delete(&m->provider_sessions, session);
+        multi_ikev2_helper_auth_deny(
+            response, request->request_id,
+            "provider session XFRM lease allocation failed");
+        return true;
+    }
+
+    multi_ikev2_helper_copy_xfrm_lease(&helper_lease, &session_lease);
+    if (!provider_helper_supervisor_send_xfrm_lease(
+            &m->provider_helper, &helper_lease, session_lease.lease_id))
+    {
+        multi_ikev2_helper_release_session_address(m, session, true);
+        provider_session_delete(&m->provider_sessions, session);
+        multi_ikev2_helper_auth_deny(
+            response, request->request_id,
+            "provider session XFRM lease handoff failed");
+        return true;
+    }
+
+    const struct provider_session_update update = {
+        .state = PROVIDER_SESSION_STATE_AUTH_PENDING,
+        .helper_state = "auth-allowed",
+        .child_sa_state = "xfrm-lease-issued",
+    };
+    (void)provider_session_update(session, &update);
+
+    multi_ikev2_helper_auth_allow(response, request->request_id, session);
+    return true;
+}
 
 static bool
 multi_ikev2_helper_auth_request(void *arg,
@@ -508,9 +737,8 @@ multi_ikev2_helper_auth_request(void *arg,
                                 struct provider_helper_auth_response *response)
 {
     struct multi_context *m = arg;
-    (void)m;
 
-    if (!request || !response)
+    if (!m || !request || !response)
     {
         return false;
     }
@@ -555,6 +783,12 @@ multi_ikev2_helper_auth_request(void *arg,
     };
     struct provider_policy_auth_result result;
     provider_policy_authorize(&context, &result);
+    if (result.status == PROVIDER_POLICY_AUTH_AUTHORIZED)
+    {
+        return multi_ikev2_helper_authorize_session(
+            m, request, principal, credential_fingerprint,
+            result.policy_revision, response);
+    }
 
     multi_ikev2_helper_auth_deny(response, request->request_id,
                                  result.reason);
@@ -4396,6 +4630,7 @@ management_kill_by_cid(void *arg, const unsigned long cid, const char *kill_msg)
             }
         }
 
+        multi_ikev2_helper_release_session_address(m, session, true);
         return provider_session_kill_by_cid(&m->provider_sessions, cid, kill_msg);
     }
 }
