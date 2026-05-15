@@ -533,6 +533,52 @@ multi_ikev2_helper_release_session_address(struct multi_context *m,
 }
 
 static bool
+multi_ikev2_helper_state_closes_sessions(enum provider_helper_state state)
+{
+    return state == PROVIDER_HELPER_STATE_DRAINING
+           || state == PROVIDER_HELPER_STATE_STOPPING
+           || state == PROVIDER_HELPER_STATE_STOPPED
+           || state == PROVIDER_HELPER_STATE_DEGRADED
+           || state == PROVIDER_HELPER_STATE_FAILED;
+}
+
+static size_t
+multi_ikev2_helper_close_provider_sessions(struct multi_context *m,
+                                           const char *reason)
+{
+    if (!m || !provider_session_table_count(&m->provider_sessions))
+    {
+        return 0;
+    }
+
+    size_t closed = 0;
+    for (struct provider_session *session = m->provider_sessions.head;
+         session;
+         )
+    {
+        struct provider_session *next = session->next;
+        if (!session->halt)
+        {
+            multi_ikev2_helper_release_session_address(m, session, true);
+            if (provider_session_kill_by_cid(&m->provider_sessions,
+                                             session->management_cid, reason))
+            {
+                ++closed;
+            }
+        }
+        session = next;
+    }
+
+    if (closed)
+    {
+        msg(M_INFO, "IKEv2 helper: closed %zu provider session%s: %s",
+            closed, closed == 1 ? "" : "s",
+            reason ? reason : "session closed");
+    }
+    return closed;
+}
+
+static bool
 multi_ikev2_helper_xfrm_id(uint64_t id, uint32_t *out)
 {
     if (!id || id > MULTI_IKEV2_HELPER_XFRM_ID_MAX || !out)
@@ -1284,6 +1330,7 @@ multi_uninit(struct multi_context *m)
 
         multi_reap_all(m);
 
+        multi_ikev2_helper_close_provider_sessions(m, "server shutdown");
         provider_helper_supervisor_free(&m->provider_helper);
         multi_ikev2_helper_listener_fds_close(m);
         provider_session_table_free(&m->provider_sessions);
@@ -4381,6 +4428,11 @@ multi_process_per_second_timers_dowork(struct multi_context *m)
     if (m->top.options.ikev2_helper_path)
     {
         provider_helper_process_event(&m->provider_helper);
+        if (multi_ikev2_helper_state_closes_sessions(m->provider_helper.state))
+        {
+            multi_ikev2_helper_close_provider_sessions(
+                m, "IKEv2 helper unavailable");
+        }
         if (multi_restart_ikev2_helper_ready(m))
         {
             (void)multi_spawn_ikev2_helper(&m->top, false);
