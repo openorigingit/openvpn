@@ -7309,6 +7309,180 @@ test_provider_helper_spawn_ikev2_auth_allow_fails_closed(void **state)
 }
 
 static void
+test_provider_helper_spawn_ikev2_lease_deadline_fails_closed(void **state)
+{
+    (void)state;
+
+    if (!ikev2_helper_path)
+    {
+        skip();
+    }
+#if !defined(ENABLE_CRYPTO_OPENSSL)
+    skip();
+#else
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.runtime_config.cookie_threshold = 1;
+    supervisor.runtime_config.half_open_timeout_seconds = 30;
+    supervisor.runtime_config.flags |=
+        PROVIDER_HELPER_CONFIG_TEST_AUTH_CONTINUATION;
+
+    struct test_provider_helper_auth_cb_state cb_state;
+    CLEAR(cb_state);
+    cb_state.allow = true;
+    provider_helper_supervisor_set_auth_callback(
+        &supervisor, test_provider_helper_auth_cb, &cb_state);
+    struct test_provider_helper_session_close_cb_state close_state;
+    CLEAR(close_state);
+    provider_helper_supervisor_set_session_close_callback(
+        &supervisor, test_provider_helper_session_close_cb, &close_state);
+
+    char *const argv[] = { (char *)ikev2_helper_path, NULL };
+    assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
+                                                 argv));
+    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 2);
+
+    uint16_t port = 0;
+    int listener_fd = test_create_udp_listener(&port);
+    const struct provider_helper_listener_fd listener = {
+        .listener_id = 1,
+        .family = AF_INET,
+        .socket_type = SOCK_DGRAM,
+        .protocol = IPPROTO_UDP,
+        .local_port = port,
+        .flags = PROVIDER_HELPER_LISTENER_FD_IKE,
+    };
+    assert_true(provider_helper_supervisor_send_listener_fd(&supervisor,
+                                                            listener_fd,
+                                                            &listener, 88));
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 3; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+
+    uint16_t natt_port = 0;
+    int natt_listener_fd = test_create_udp_listener(&natt_port);
+    const struct provider_helper_listener_fd natt_listener = {
+        .listener_id = 2,
+        .family = AF_INET,
+        .socket_type = SOCK_DGRAM,
+        .protocol = IPPROTO_UDP,
+        .local_port = natt_port,
+        .flags = PROVIDER_HELPER_LISTENER_FD_NATT,
+    };
+    assert_true(provider_helper_supervisor_send_listener_fd(
+                    &supervisor, natt_listener_fd, &natt_listener, 89));
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 4; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+
+    const uint64_t now = (uint64_t)time(NULL);
+    const struct provider_helper_xfrm_lease xfrm_lease = {
+        .lease_id = 202,
+        .provider_session_id = 101,
+        .policy_revision = 303,
+        .expires = now + 60,
+        .rekey_deadline = now + 1,
+        .mark_value = 0x4200,
+        .mark_mask = 0xffff,
+        .if_id = 12,
+        .reqid = 1100,
+        .address_family = AF_INET,
+        .flags = PROVIDER_HELPER_XFRM_LEASE_IPV4,
+        .local_ts_start_ipv4 = 0x0a580001,
+        .local_ts_end_ipv4 = 0x0a580001,
+        .local_ts_start_port = 0,
+        .local_ts_end_port = 65535,
+        .remote_ts_start_ipv4 = 0x0a580002,
+        .remote_ts_end_ipv4 = 0x0a580002,
+        .remote_ts_start_port = 0,
+        .remote_ts_end_port = 65535,
+        .ip_protocol_id = 0,
+    };
+    uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
+    assert_true(provider_helper_supervisor_send_xfrm_lease(&supervisor,
+                                                           &xfrm_lease, 99));
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+
+    uint8_t cert_der[2048];
+    size_t cert_der_len = 0;
+    test_make_der_certificate(cert_der, sizeof(cert_der), &cert_der_len);
+
+    int response_fd = test_create_udp_sender(0x7f000009u);
+    const uint64_t initiator_spi = 0x9876543210abcde2ull;
+    test_send_ikev2_datagram_from(response_fd, port, initiator_spi);
+    usleep(10000);
+    struct test_ikev2_sa_init_response_material sa_init_material;
+    assert_true(test_recv_ikev2_sa_init_response_material(
+                    response_fd, initiator_spi, &sa_init_material) != 0);
+
+    test_send_ikev2_encrypted_ike_auth_datagram_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, false,
+        cert_der, cert_der_len);
+    for (int i = 0; i < 100 && cb_state.calls < 1; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(cb_state.calls, 1);
+    test_recv_ikev2_encrypted_notify_response(
+        response_fd, initiator_spi, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
+    assert_int_equal(close_state.calls, 0);
+
+    sleep(2);
+    target_rx_sequence = supervisor.last_rx_sequence + 2;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 100);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(close_state.calls, 1);
+    assert_int_equal(close_state.session_close.provider_session_id, 101);
+    assert_int_equal(close_state.session_close.xfrm_lease_id, 202);
+    assert_int_equal(close_state.session_close.policy_revision, 303);
+    assert_memory_equal(close_state.session_close.reason,
+                        "XFRM lease rekey deadline expired",
+                        strlen("XFRM lease rekey deadline expired"));
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
+    assert_true(supervisor.runtime_stats.ike_sa_expired >= 1);
+
+    close(response_fd);
+    close(listener_fd);
+    close(natt_listener_fd);
+    provider_helper_supervisor_stop(&supervisor);
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
+    assert_int_equal(supervisor.ipc_fd, -1);
+#endif
+}
+
+static void
 test_provider_helper_spawn_ikev2_rekey_fails_closed(void **state)
 {
     (void)state;
@@ -8332,6 +8506,8 @@ main(void)
         cmocka_unit_test(test_provider_helper_spawn_ikev2_auth_allow_unsupported),
         cmocka_unit_test(
             test_provider_helper_spawn_ikev2_auth_allow_fails_closed),
+        cmocka_unit_test(
+            test_provider_helper_spawn_ikev2_lease_deadline_fails_closed),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_rekey_fails_closed),
         cmocka_unit_test(
             test_provider_helper_spawn_ikev2_xfrm_install_fails_closed),

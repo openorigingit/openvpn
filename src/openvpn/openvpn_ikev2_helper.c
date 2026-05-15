@@ -5256,6 +5256,65 @@ ikev2_helper_expire_ike_sas(struct ikev2_helper_ike_sa_table *table,
         ikev2_helper_count_child_sa_scaffolds(table);
 }
 
+static const char *
+ikev2_helper_xfrm_lease_expired_reason(const struct ikev2_helper_ike_sa *sa,
+                                       time_t now)
+{
+    if (!sa || !sa->active || !sa->auth_authorized || now < 0)
+    {
+        return NULL;
+    }
+
+    const uint64_t now_seconds = (uint64_t)now;
+    const struct provider_helper_xfrm_lease *lease =
+        &sa->authorized_xfrm_lease;
+    if (lease->expires && now_seconds >= lease->expires)
+    {
+        return "XFRM lease expired";
+    }
+    if (lease->rekey_deadline && now_seconds >= lease->rekey_deadline)
+    {
+        return "XFRM lease rekey deadline expired";
+    }
+    return NULL;
+}
+
+static bool
+ikev2_helper_expire_authorized_ike_sas(
+    struct ikev2_helper_ike_sa_table *table,
+    struct provider_helper_runtime_stats *counters,
+    time_t now,
+    int ipc_fd,
+    uint64_t *tx_sequence)
+{
+    if (!table || !counters || ipc_fd < 0 || !tx_sequence)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        const char *reason = ikev2_helper_xfrm_lease_expired_reason(sa, now);
+        if (!reason)
+        {
+            continue;
+        }
+
+        if (!ikev2_helper_clear_ike_sa_with_session_close(
+                table, sa, counters, ipc_fd, tx_sequence, reason))
+        {
+            return false;
+        }
+        ++counters->ike_sa_expired;
+    }
+
+    counters->ike_sa_active = table->active;
+    counters->ike_child_sa_scaffold_active =
+        ikev2_helper_count_child_sa_scaffolds(table);
+    return true;
+}
+
 static bool
 ikev2_helper_send_cookie_response(
     const struct ikev2_helper_listener *listener,
@@ -6757,6 +6816,12 @@ ikev2_helper_loop(int fd)
         {
             ikev2_helper_expire_ike_sas(&sa_table, &counters, time(NULL),
                                         config.half_open_timeout_seconds);
+            if (!ikev2_helper_expire_authorized_ike_sas(
+                    &sa_table, &counters, time(NULL), fd, &tx_sequence))
+            {
+                ret = 7;
+                goto done;
+            }
             continue;
         }
         if (pfds[0].revents & (POLLERR | POLLNVAL))
@@ -6794,6 +6859,12 @@ ikev2_helper_loop(int fd)
 
         ikev2_helper_expire_ike_sas(&sa_table, &counters, time(NULL),
                                     config.half_open_timeout_seconds);
+        if (!ikev2_helper_expire_authorized_ike_sas(
+                &sa_table, &counters, time(NULL), fd, &tx_sequence))
+        {
+            ret = 7;
+            goto done;
+        }
 
         if (!(pfds[0].revents & POLLIN))
         {
