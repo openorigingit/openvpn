@@ -108,6 +108,10 @@
 #define IKEV2_HELPER_TLS_RECORD_VERSION_MAJOR 3
 #define IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE 4
 #define IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CLIENT_HELLO 1
+#define IKEV2_HELPER_TLS_CIPHER_TLS_AES_128_GCM_SHA256 0x1301
+#define IKEV2_HELPER_TLS_CIPHER_TLS_AES_256_GCM_SHA384 0x1302
+#define IKEV2_HELPER_TLS_CIPHER_ECDHE_RSA_AES_128_GCM_SHA256 0xc02f
+#define IKEV2_HELPER_TLS_CIPHER_ECDHE_ECDSA_AES_128_GCM_SHA256 0xc02b
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_RANDOM_BYTES 32
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_SESSION_ID 32
 #define IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_EXTENSIONS 64
@@ -2687,6 +2691,22 @@ ikev2_helper_clear_eap_tls_tx_buffer(struct ikev2_helper_ike_sa *sa)
 }
 
 static bool
+ikev2_helper_tls_cipher_supported(uint16_t cipher_suite)
+{
+    switch (cipher_suite)
+    {
+        case IKEV2_HELPER_TLS_CIPHER_TLS_AES_128_GCM_SHA256:
+        case IKEV2_HELPER_TLS_CIPHER_TLS_AES_256_GCM_SHA384:
+        case IKEV2_HELPER_TLS_CIPHER_ECDHE_RSA_AES_128_GCM_SHA256:
+        case IKEV2_HELPER_TLS_CIPHER_ECDHE_ECDSA_AES_128_GCM_SHA256:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+static bool
 ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
                                          size_t body_len)
 {
@@ -2721,6 +2741,18 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
     pos += 2;
     if (!cipher_suites_len || (cipher_suites_len & 1)
         || cipher_suites_len > body_len - pos)
+    {
+        return false;
+    }
+    bool saw_supported_cipher = false;
+    for (size_t i = 0; i < cipher_suites_len; i += 2)
+    {
+        saw_supported_cipher =
+            saw_supported_cipher
+            || ikev2_helper_tls_cipher_supported(
+                ikev2_helper_read_be16(body + pos + i));
+    }
+    if (!saw_supported_cipher)
     {
         return false;
     }
