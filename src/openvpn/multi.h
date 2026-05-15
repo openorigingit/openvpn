@@ -44,6 +44,7 @@
 #include "reflect_filter.h"
 
 #define MULTI_PREFIX_MAX_LENGTH 256
+#define MULTI_IKEV2_HELPER_LISTENER_COUNT 2
 
 /*
  * Walk (don't run) through the routing table,
@@ -189,6 +190,11 @@ struct multi_context
     int status_file_version;
     int n_clients; /* current number of authenticated clients */
     struct provider_helper_supervisor provider_helper;
+    int provider_helper_listener_fds[MULTI_IKEV2_HELPER_LISTENER_COUNT];
+    struct provider_helper_listener_fd
+        provider_helper_listeners[MULTI_IKEV2_HELPER_LISTENER_COUNT];
+    size_t provider_helper_listener_count;
+    bool provider_helper_listener_fds_sent;
     struct provider_session_table provider_sessions;
 
 #ifdef ENABLE_MANAGEMENT

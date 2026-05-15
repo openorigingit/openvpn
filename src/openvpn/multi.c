@@ -44,6 +44,7 @@
 #include "route.h"
 #include "platform.h"
 #include "provider_policy.h"
+#include "fdmisc.h"
 #include <inttypes.h>
 #include <string.h>
 
@@ -56,6 +57,10 @@
 #include "reflect_filter.h"
 
 #define PROVIDER_HELPER_STATS_INTERVAL 5
+#define MULTI_IKEV2_HELPER_IKE_PORT 500
+#define MULTI_IKEV2_HELPER_NATT_PORT 4500
+#define MULTI_IKEV2_HELPER_IKE_LISTENER_ID 1
+#define MULTI_IKEV2_HELPER_NATT_LISTENER_ID 2
 
 /*#define MULTI_DEBUG_EVENT_LOOP*/
 
@@ -267,6 +272,166 @@ int_compare_function(const void *key1, const void *key2)
 #endif
 
 static void
+multi_ikev2_helper_listener_fds_init(struct multi_context *m)
+{
+    for (size_t i = 0; i < SIZE(m->provider_helper_listener_fds); ++i)
+    {
+        m->provider_helper_listener_fds[i] = -1;
+    }
+}
+
+static void
+multi_ikev2_helper_listener_fds_close(struct multi_context *m)
+{
+#ifndef _WIN32
+    for (size_t i = 0; i < SIZE(m->provider_helper_listener_fds); ++i)
+    {
+        if (m->provider_helper_listener_fds[i] >= 0)
+        {
+            openvpn_close_socket(m->provider_helper_listener_fds[i]);
+            m->provider_helper_listener_fds[i] = -1;
+        }
+    }
+#endif
+    m->provider_helper_listener_count = 0;
+    m->provider_helper_listener_fds_sent = false;
+    CLEAR(m->provider_helper_listeners);
+}
+
+#ifndef _WIN32
+static bool
+multi_ikev2_helper_bind_listener(struct multi_context *m,
+                                 size_t index,
+                                 uint32_t listener_id,
+                                 uint16_t port,
+                                 uint32_t flags,
+                                 bool fatal)
+{
+    ASSERT(index < SIZE(m->provider_helper_listener_fds));
+
+    if (m->provider_helper_listener_fds[index] >= 0)
+    {
+        return true;
+    }
+
+    const int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (fd < 0)
+    {
+        msg((fatal ? M_FATAL : M_WARN) | M_ERRNO,
+            "IKEv2 helper listener socket failed for udp/%u", port);
+        return false;
+    }
+
+    set_cloexec(fd);
+    set_nonblock(fd);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
+
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0)
+    {
+        msg((fatal ? M_FATAL : M_WARN) | M_ERRNO,
+            "IKEv2 helper listener bind failed for udp/%u", port);
+        openvpn_close_socket(fd);
+        return false;
+    }
+
+    struct provider_helper_listener_fd listener = {
+        .listener_id = listener_id,
+        .family = AF_INET,
+        .socket_type = SOCK_DGRAM,
+        .protocol = IPPROTO_UDP,
+        .local_port = port,
+        .flags = flags,
+    };
+
+    char reason[128];
+    if (!provider_helper_listener_fd_allowed_by_config(
+            &m->provider_helper.runtime_config, &listener, reason, sizeof(reason)))
+    {
+        msg((fatal ? M_FATAL : M_WARN),
+            "IKEv2 helper listener rejected for udp/%u: %s", port, reason);
+        openvpn_close_socket(fd);
+        return false;
+    }
+
+    m->provider_helper_listener_fds[index] = fd;
+    m->provider_helper_listeners[index] = listener;
+    if (m->provider_helper_listener_count <= index)
+    {
+        m->provider_helper_listener_count = index + 1;
+    }
+    msg(M_INFO, "IKEv2 helper listener bound: udp/%u", port);
+    return true;
+}
+#endif
+
+static bool
+multi_open_ikev2_helper_listeners(struct multi_context *m, bool fatal)
+{
+#ifdef _WIN32
+    (void)m;
+    (void)fatal;
+    return false;
+#else
+    const bool opened =
+        multi_ikev2_helper_bind_listener(
+            m, 0, MULTI_IKEV2_HELPER_IKE_LISTENER_ID,
+            MULTI_IKEV2_HELPER_IKE_PORT, PROVIDER_HELPER_LISTENER_FD_IKE,
+            fatal)
+        && multi_ikev2_helper_bind_listener(
+            m, 1, MULTI_IKEV2_HELPER_NATT_LISTENER_ID,
+            MULTI_IKEV2_HELPER_NATT_PORT, PROVIDER_HELPER_LISTENER_FD_NATT,
+            fatal);
+    if (!opened)
+    {
+        multi_ikev2_helper_listener_fds_close(m);
+    }
+    return opened;
+#endif
+}
+
+static bool
+multi_send_ikev2_helper_listener_fds(struct multi_context *m)
+{
+#ifdef _WIN32
+    (void)m;
+    return false;
+#else
+    if (m->provider_helper_listener_fds_sent
+        || m->provider_helper.state != PROVIDER_HELPER_STATE_READY)
+    {
+        return true;
+    }
+    if (m->provider_helper_listener_count != MULTI_IKEV2_HELPER_LISTENER_COUNT)
+    {
+        msg(M_WARN, "IKEv2 helper listener fds are not initialized");
+        return false;
+    }
+
+    for (size_t i = 0; i < m->provider_helper_listener_count; ++i)
+    {
+        if (!provider_helper_supervisor_send_listener_fd(
+                &m->provider_helper, m->provider_helper_listener_fds[i],
+                &m->provider_helper_listeners[i],
+                m->provider_helper_listeners[i].listener_id))
+        {
+            msg(M_WARN, "IKEv2 helper listener fd handoff failed for udp/%u",
+                m->provider_helper_listeners[i].local_port);
+            return false;
+        }
+    }
+
+    m->provider_helper_listener_fds_sent = true;
+    msg(M_INFO, "IKEv2 helper listener fds handed off");
+    return true;
+#endif
+}
+
+static void
 multi_ikev2_helper_auth_deny(struct provider_helper_auth_response *response,
                              uint64_t request_id,
                              const char *reason)
@@ -404,6 +569,10 @@ multi_spawn_ikev2_helper(struct context *t, bool fatal)
     {
         m->provider_helper.runtime_config.flags |= PROVIDER_HELPER_CONFIG_APPLY_XFRM;
     }
+    if (!multi_open_ikev2_helper_listeners(m, fatal))
+    {
+        return false;
+    }
 
     char *const argv[] = { (char *)helper_path, NULL };
     if (!provider_helper_supervisor_spawn(&m->provider_helper, helper_path, argv))
@@ -412,6 +581,7 @@ multi_spawn_ikev2_helper(struct context *t, bool fatal)
             "IKEv2 helper startup failed: %s", helper_path);
         return false;
     }
+    m->provider_helper_listener_fds_sent = false;
     msg(M_INFO, "IKEv2 helper starting: %s", helper_path);
     return true;
 #endif
@@ -457,6 +627,7 @@ multi_init(struct context *t)
      * Init our multi_context object.
      */
     CLEAR(*m);
+    multi_ikev2_helper_listener_fds_init(m);
     provider_helper_supervisor_init(&m->provider_helper);
     provider_session_table_init(&m->provider_sessions);
 
@@ -852,6 +1023,7 @@ multi_uninit(struct multi_context *m)
         multi_reap_all(m);
 
         provider_helper_supervisor_free(&m->provider_helper);
+        multi_ikev2_helper_listener_fds_close(m);
         provider_session_table_free(&m->provider_sessions);
 
         hash_free(m->hash);
@@ -3951,6 +4123,7 @@ multi_process_per_second_timers_dowork(struct multi_context *m)
         {
             (void)multi_spawn_ikev2_helper(&m->top, false);
         }
+        (void)multi_send_ikev2_helper_listener_fds(m);
         if (provider_helper_stats_trigger(m))
         {
             (void)provider_helper_supervisor_send_stats_request(
