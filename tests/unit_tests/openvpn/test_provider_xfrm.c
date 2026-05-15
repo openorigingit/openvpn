@@ -126,6 +126,26 @@ default_child_sa_spec(void)
     };
 }
 
+static struct provider_xfrm_child_sa_spec
+alternate_child_sa_spec(void)
+{
+    struct provider_xfrm_child_sa_spec spec = default_child_sa_spec();
+    spec.lease_id = 18;
+    spec.provider_session_id = 8;
+    spec.policy_revision = 4;
+    spec.mark_value = 0x4300;
+    spec.if_id = 13;
+    spec.reqid = 1101;
+    spec.remote_outer_ipv4 = 0xcb007115;
+    spec.local_ts.start_addr = 0x0a580003;
+    spec.local_ts.end_addr = 0x0a580003;
+    spec.remote_ts.start_addr = 0x0a580004;
+    spec.remote_ts.end_addr = 0x0a580004;
+    spec.initiator_inbound_spi = 0x01020305;
+    spec.responder_inbound_spi = 0xaabbccde;
+    return spec;
+}
+
 static struct provider_xfrm_lease
 build_default_lease(void)
 {
@@ -619,23 +639,47 @@ test_provider_xfrm_linux_apply_in_child_netns(void)
     }
 
     struct provider_xfrm_child_sa_plan plan;
+    struct provider_xfrm_child_sa_plan other_plan;
     struct provider_xfrm_linux_message_plan messages;
     struct provider_xfrm_result result;
     struct provider_xfrm_child_sa_spec spec = default_child_sa_spec();
+    struct provider_xfrm_child_sa_spec other_spec = alternate_child_sa_spec();
+    CLEAR(plan);
+    CLEAR(other_plan);
+    CLEAR(messages);
 
     const bool ret =
         provider_xfrm_child_sa_plan_build(&plan, &spec, &result)
+        && provider_xfrm_child_sa_plan_build(&other_plan, &other_spec, &result)
         && provider_xfrm_linux_child_sa_messages_build(&messages, &plan,
                                                        &result)
         && provider_xfrm_linux_message_plan_apply(&messages, &result)
-        && provider_xfrm_linux_child_sa_delete_messages_build(&messages, &plan,
-                                                              &result)
+        && provider_xfrm_linux_child_sa_messages_build(&messages, &other_plan,
+                                                       &result)
         && provider_xfrm_linux_message_plan_apply(&messages, &result);
+    if (ret
+        && (!provider_xfrm_linux_child_sa_reconcile_delete(&plan, &result)
+            || !provider_xfrm_linux_child_sa_reconcile_delete(&plan, &result)
+            || !provider_xfrm_linux_child_sa_delete_messages_build(
+                &messages, &other_plan, &result)
+            || !provider_xfrm_linux_message_plan_apply(&messages, &result)))
+    {
+        fprintf(stderr, "XFRM reconcile failed: %s\n", result.reason);
+        provider_xfrm_linux_child_sa_reconcile_delete(&other_plan, &result);
+        provider_xfrm_linux_child_sa_reconcile_delete(&plan, &result);
+        provider_xfrm_linux_message_plan_clear(&messages);
+        provider_xfrm_child_sa_plan_clear(&other_plan);
+        provider_xfrm_child_sa_plan_clear(&plan);
+        return 3;
+    }
     if (!ret)
     {
         fprintf(stderr, "XFRM apply failed: %s\n", result.reason);
+        provider_xfrm_linux_child_sa_reconcile_delete(&other_plan, &result);
+        provider_xfrm_linux_child_sa_reconcile_delete(&plan, &result);
     }
     provider_xfrm_linux_message_plan_clear(&messages);
+    provider_xfrm_child_sa_plan_clear(&other_plan);
     provider_xfrm_child_sa_plan_clear(&plan);
     return ret ? 0 : 3;
 }

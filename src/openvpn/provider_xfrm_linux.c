@@ -645,7 +645,14 @@ provider_xfrm_linux_netlink_open(struct provider_xfrm_result *result)
 }
 
 static bool
+provider_xfrm_linux_error_is_missing(int error_number)
+{
+    return error_number == ENOENT || error_number == ESRCH;
+}
+
+static bool
 provider_xfrm_linux_wait_ack(int fd, uint32_t sequence,
+                             bool ignore_missing,
                              struct provider_xfrm_result *result)
 {
     uint8_t buf[8192];
@@ -715,6 +722,11 @@ provider_xfrm_linux_wait_ack(int fd, uint32_t sequence,
             {
                 return true;
             }
+            if (ignore_missing
+                && provider_xfrm_linux_error_is_missing(-err->error))
+            {
+                return true;
+            }
             provider_xfrm_linux_set_errno(result, "NETLINK_XFRM operation",
                                           -err->error);
             return false;
@@ -726,6 +738,7 @@ static bool
 provider_xfrm_linux_message_apply(int fd,
                                   const struct provider_xfrm_linux_message *message,
                                   uint32_t sequence,
+                                  bool ignore_missing,
                                   struct provider_xfrm_result *result)
 {
     if (!message || message->len < sizeof(struct nlmsghdr)
@@ -778,16 +791,17 @@ provider_xfrm_linux_message_apply(int fd,
         break;
     }
 
-    ret = provider_xfrm_linux_wait_ack(fd, sequence, result);
+    ret = provider_xfrm_linux_wait_ack(fd, sequence, ignore_missing, result);
 
 cleanup:
     secure_memzero(data, sizeof(data));
     return ret;
 }
 
-bool
-provider_xfrm_linux_message_plan_apply(
+static bool
+provider_xfrm_linux_message_plan_apply_internal(
     const struct provider_xfrm_linux_message_plan *messages,
+    bool ignore_missing,
     struct provider_xfrm_result *result)
 {
     provider_xfrm_result_init(result);
@@ -809,7 +823,8 @@ provider_xfrm_linux_message_plan_apply(
     for (size_t i = 0; i < messages->count; ++i)
     {
         if (!provider_xfrm_linux_message_apply(
-                fd, &messages->messages[i], (uint32_t)(i + 1), result))
+                fd, &messages->messages[i], (uint32_t)(i + 1),
+                ignore_missing, result))
         {
             ret = false;
             break;
@@ -817,6 +832,30 @@ provider_xfrm_linux_message_plan_apply(
     }
     close(fd);
     return ret;
+}
+
+bool
+provider_xfrm_linux_child_sa_reconcile_delete(
+    const struct provider_xfrm_child_sa_plan *plan,
+    struct provider_xfrm_result *result)
+{
+    struct provider_xfrm_linux_message_plan messages;
+    const bool ret =
+        provider_xfrm_linux_child_sa_delete_messages_build(&messages, plan,
+                                                           result)
+        && provider_xfrm_linux_message_plan_apply_internal(&messages, true,
+                                                           result);
+    provider_xfrm_linux_message_plan_clear(&messages);
+    return ret;
+}
+
+bool
+provider_xfrm_linux_message_plan_apply(
+    const struct provider_xfrm_linux_message_plan *messages,
+    struct provider_xfrm_result *result)
+{
+    return provider_xfrm_linux_message_plan_apply_internal(messages, false,
+                                                          result);
 }
 
 #else  /* if defined(TARGET_LINUX) */
@@ -852,6 +891,18 @@ provider_xfrm_linux_child_sa_delete_messages_build(
     struct provider_xfrm_result *result)
 {
     (void)messages;
+    (void)plan;
+    provider_xfrm_result_init(result);
+    provider_xfrm_linux_set_error(result,
+                                  "Linux XFRM backend is unavailable");
+    return false;
+}
+
+bool
+provider_xfrm_linux_child_sa_reconcile_delete(
+    const struct provider_xfrm_child_sa_plan *plan,
+    struct provider_xfrm_result *result)
+{
     (void)plan;
     provider_xfrm_result_init(result);
     provider_xfrm_linux_set_error(result,
