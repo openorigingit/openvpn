@@ -3883,9 +3883,6 @@ ikev2_helper_find_ike_auth_sa(struct ikev2_helper_ike_sa_table *table,
             && sa->responder_spi == header->responder_spi
             && ikev2_helper_peer_address_equal(&sa->peer, peer))
         {
-            sa->listener_id = listener->descriptor.listener_id;
-            sa->peer = *peer;
-            sa->peer_len = peer_len;
             *natt_migrated = true;
             return sa;
         }
@@ -5758,10 +5755,6 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 counters->ike_sa_active = sa_table->active;
                 return;
             }
-            if (natt_migrated)
-            {
-                ++counters->ike_auth_natt_migrated;
-            }
             if (header.message_id == sa->message_id
                 && sa->protected_response_len)
             {
@@ -5859,6 +5852,13 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                                                 next_auth_request_id, listener,
                                                 sa))
             {
+                if (natt_migrated)
+                {
+                    sa->listener_id = listener->descriptor.listener_id;
+                    sa->peer = peer;
+                    sa->peer_len = peer_len;
+                    ++counters->ike_auth_natt_migrated;
+                }
                 sa->message_id = header.message_id;
                 sa->updated = auth_now;
                 ++counters->ike_auth_request_tx;

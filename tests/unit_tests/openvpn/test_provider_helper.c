@@ -2188,6 +2188,33 @@ test_send_ikev2_encrypted_ike_auth_datagram_from(
 }
 
 static void
+test_send_ikev2_corrupt_encrypted_ike_auth_datagram_from(
+    int fd,
+    uint16_t port,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt,
+    const uint8_t *cert_der,
+    size_t cert_der_len)
+{
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t packet_len = test_make_encrypted_ike_auth_packet(
+        packet, sizeof(packet), initiator_spi, material, natt, false,
+        cert_der, cert_der_len);
+    packet[packet_len - 1] ^= 0x01;
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    assert_int_equal(sendto(fd, packet, packet_len, 0,
+                            (struct sockaddr *)&addr, sizeof(addr)),
+                     packet_len);
+}
+
+static void
 test_send_ikev2_encrypted_ike_auth_without_eap_datagram_from(
     int fd,
     uint16_t port,
@@ -5470,6 +5497,12 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     uint8_t cert_der[2048];
     size_t cert_der_len = 0;
     test_make_der_certificate(cert_der, sizeof(cert_der), &cert_der_len);
+    int corrupt_natt_fd = test_create_udp_sender(0x7f000004u);
+    test_send_ikev2_corrupt_encrypted_ike_auth_datagram_from(
+        corrupt_natt_fd, natt_port, 0xfeedfacecafebeefull, &sa_init_material,
+        true, cert_der, cert_der_len);
+    usleep(10000);
+    close(corrupt_natt_fd);
     test_send_ikev2_encrypted_ike_auth_datagram_from(
         response_fd, natt_port, 0xfeedfacecafebeefull, &sa_init_material, true,
         false, cert_der, cert_der_len);
@@ -5656,9 +5689,9 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
         supervisor.runtime_stats.ike_sa_init_cookie_unverified_dropped >= 1);
     assert_true(supervisor.runtime_stats.ike_auth_rx >= 2);
     assert_true(supervisor.runtime_stats.ike_auth_no_state >= 1);
-    assert_true(supervisor.runtime_stats.ike_auth_natt_migrated >= 1);
-    assert_int_equal(supervisor.runtime_stats.ike_auth_decrypt_failed, 0);
 #if defined(ENABLE_CRYPTO_OPENSSL)
+    assert_int_equal(supervisor.runtime_stats.ike_auth_natt_migrated, 1);
+    assert_true(supervisor.runtime_stats.ike_auth_decrypt_failed >= 1);
     assert_true(supervisor.runtime_stats.ike_auth_decrypted >= 1);
     assert_true(supervisor.runtime_stats.ike_auth_inner_parsed >= 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_inner_malformed, 0);
@@ -5683,6 +5716,8 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
                      0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_allow_unsupported, 0);
 #else
+    assert_int_equal(supervisor.runtime_stats.ike_auth_natt_migrated, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_decrypt_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_decrypted, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_inner_parsed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_inner_malformed, 0);
