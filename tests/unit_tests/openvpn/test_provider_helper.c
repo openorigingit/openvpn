@@ -5933,6 +5933,9 @@ test_provider_helper_spawn_ikev2_rejects_inner_aggregate_limits(void **state)
         response_fd, natt_port, initiator_spi, &sa_init_material, true,
         fake_cert_der, sizeof(fake_cert_der));
     usleep(10000);
+    test_recv_ikev2_encrypted_notify_response(
+        response_fd, initiator_spi, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
 
     uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
