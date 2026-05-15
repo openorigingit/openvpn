@@ -3917,10 +3917,14 @@ multi_process_per_second_timers_dowork(struct multi_context *m)
     /* possibly reap instances/routes in vhash */
     multi_reap_process(m);
 
-    if (m->top.options.ikev2_helper_path && provider_helper_stats_trigger(m))
+    if (m->top.options.ikev2_helper_path)
     {
-        (void)provider_helper_supervisor_send_stats_request(
-            &m->provider_helper, (uint64_t)now);
+        provider_helper_process_event(&m->provider_helper);
+        if (provider_helper_stats_trigger(m))
+        {
+            (void)provider_helper_supervisor_send_stats_request(
+                &m->provider_helper, (uint64_t)now);
+        }
     }
 
     /* possibly print to status log */
