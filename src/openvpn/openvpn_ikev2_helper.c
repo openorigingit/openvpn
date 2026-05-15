@@ -200,6 +200,8 @@ struct ikev2_helper_ike_sa {
     char cert_serial[PROVIDER_HELPER_AUTH_SERIAL_SIZE];
     size_t cert_issuer_len;
     char cert_issuer[PROVIDER_HELPER_AUTH_ISSUER_SIZE];
+    bool eap_tls_started;
+    uint8_t pending_eap_identifier;
     uint64_t pending_server_sign_request_id;
     uint64_t server_sign_config_revision;
     uint32_t server_sign_sigalg;
@@ -2567,6 +2569,30 @@ ikev2_helper_parse_ike_auth_inner_payloads(
 
     return pos == plaintext_len ? PROVIDER_HELPER_IKEV2_PARSE_OK
                                 : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+}
+
+static bool
+ikev2_helper_followup_eap_tls_response_valid(
+    const struct ikev2_helper_ike_sa *sa,
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    const struct provider_helper_ikev2_payload_summary *summary)
+{
+    if (!sa || !sa->active || !sa->eap_tls_started || !plaintext || !summary
+        || !summary->saw_eap || summary->eap_count != 1
+        || summary->eap_offset > plaintext_len
+        || summary->eap_len > plaintext_len - summary->eap_offset
+        || summary->eap_len < IKEV2_HELPER_EAP_TLS_HEADER_SIZE)
+    {
+        return false;
+    }
+
+    const uint8_t *eap = plaintext + summary->eap_offset;
+    const uint16_t eap_len = ((uint16_t)eap[2] << 8) | eap[3];
+    return eap[0] == IKEV2_HELPER_EAP_CODE_RESPONSE
+           && eap[1] == sa->pending_eap_identifier
+           && eap_len == summary->eap_len
+           && eap[4] == IKEV2_HELPER_EAP_TYPE_TLS;
 }
 
 static bool
@@ -5641,6 +5667,11 @@ ikev2_helper_send_cached_server_auth_response(
     const bool ret = sent == (ssize_t)response_len
                      && ikev2_helper_cache_protected_response(
                          sa, sa->message_id, response, response_len);
+    if (ret)
+    {
+        sa->eap_tls_started = true;
+        sa->pending_eap_identifier = IKEV2_HELPER_EAP_TLS_START_REQUEST_ID;
+    }
     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
     ikev2_helper_secure_zero(response, sizeof(response));
     return ret;
@@ -6604,6 +6635,95 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                  && !(header.flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE))
         {
             ++counters->ike_auth_rx;
+            if (header.message_id != IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID)
+            {
+                struct provider_helper_ikev2_payload_summary protected_summary;
+                if (!ikev2_helper_protected_exchange_request_header_valid(
+                        &header)
+                    || !ikev2_helper_protected_exchange_request_shape_valid(
+                        packet, (size_t)n, &header, &protected_summary))
+                {
+                    ++counters->ike_auth_malformed;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+                if (!ikev2_helper_ike_auth_listener_allowed(listener, config))
+                {
+                    ++counters->ike_auth_unsupported;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+
+                struct ikev2_helper_ike_sa *sa =
+                    ikev2_helper_find_protected_exchange_sa(
+                        sa_table, listener, &header, &peer, peer_len);
+                if (!sa)
+                {
+                    ++counters->ike_auth_no_state;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+                if (sa->pending_auth_request_id
+                    || sa->pending_server_sign_request_id)
+                {
+                    ++counters->ike_auth_request_pending_dropped;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+                if (!sa->eap_tls_started || sa->auth_authorized
+                    || header.message_id != sa->message_id + 1)
+                {
+                    ++counters->ike_auth_unsupported;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+
+                uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+                size_t plaintext_len = 0;
+                if (!ikev2_helper_decrypt_sk_payload(
+                        sa, packet, (size_t)n, &header, &protected_summary,
+                        plaintext, sizeof(plaintext), &plaintext_len))
+                {
+                    ++counters->ike_auth_decrypt_failed;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+                ++counters->ike_auth_decrypted;
+
+                struct provider_helper_ikev2_payload_summary inner_summary;
+                const enum provider_helper_ikev2_parse_result inner_result =
+                    ikev2_helper_parse_ike_auth_inner_payloads(
+                        plaintext, plaintext_len,
+                        protected_summary.sk_next_payload, config,
+                        &inner_summary);
+                if (inner_result != PROVIDER_HELPER_IKEV2_PARSE_OK
+                    || !ikev2_helper_followup_eap_tls_response_valid(
+                        sa, plaintext, plaintext_len, &inner_summary))
+                {
+                    ++counters->ike_auth_inner_malformed;
+                    ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+                ++counters->ike_auth_inner_parsed;
+                ++counters->ike_auth_eap_tls_rx;
+                ++counters->ike_auth_unsupported;
+                if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
+                        listener, sa, PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+                        header.message_id,
+                        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
+                {
+                    ++counters->ike_auth_unsupported_response_tx;
+                }
+                else
+                {
+                    ++counters->ike_auth_unsupported_response_failed;
+                }
+                ikev2_helper_clear_ike_sa(sa_table, sa, counters);
+                ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
             if (!ikev2_helper_initial_ike_auth_request_header_valid(&header))
             {
                 ++counters->ike_auth_malformed;
