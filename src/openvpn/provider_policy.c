@@ -25,6 +25,7 @@
 #include "pushlist.h"
 
 #define PROVIDER_POLICY_MAX_PUSH_TOKENS 4
+#define PROVIDER_POLICY_STATIC_POLICY_REVISION 1
 
 static const char *
 provider_policy_skip_spaces(const char *str)
@@ -163,6 +164,100 @@ provider_policy_set_auth_result(struct provider_policy_auth_result *result,
     result->status = status;
     result->policy_revision = 0;
     snprintf(result->reason, sizeof(result->reason), "%s", reason);
+}
+
+bool
+provider_policy_fingerprint_valid(const char *fingerprint)
+{
+    if (!fingerprint || !*fingerprint)
+    {
+        return false;
+    }
+
+    const size_t len = strlen(fingerprint);
+    if (len >= PROVIDER_POLICY_FINGERPRINT_SIZE)
+    {
+        return false;
+    }
+
+    for (const char *pos = fingerprint; *pos; ++pos)
+    {
+        const unsigned char ch = (unsigned char)*pos;
+        if (ch <= ' ' || ch >= 0x7f)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool
+provider_policy_fingerprint_list_defined(
+    const struct provider_policy_fingerprint_list *list)
+{
+    return list && list->head;
+}
+
+bool
+provider_policy_fingerprint_list_contains(
+    const struct provider_policy_fingerprint_list *list,
+    const char *credential_fingerprint)
+{
+    if (!provider_policy_fingerprint_valid(credential_fingerprint))
+    {
+        return false;
+    }
+
+    for (const struct provider_policy_fingerprint_entry *entry =
+             list ? list->head : NULL;
+         entry;
+         entry = entry->next)
+    {
+        if (entry->credential_fingerprint
+            && strcasecmp(entry->credential_fingerprint,
+                          credential_fingerprint) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool
+provider_policy_fingerprint_list_add(
+    struct provider_policy_fingerprint_list *list,
+    const char *credential_fingerprint,
+    struct gc_arena *gc)
+{
+    if (!list || !provider_policy_fingerprint_valid(credential_fingerprint))
+    {
+        return false;
+    }
+
+    if (provider_policy_fingerprint_list_contains(list, credential_fingerprint))
+    {
+        return true;
+    }
+
+    struct provider_policy_fingerprint_entry *entry;
+    ALLOC_OBJ_CLEAR_GC(entry, struct provider_policy_fingerprint_entry, gc);
+    entry->credential_fingerprint = string_alloc(credential_fingerprint, gc);
+    if (!entry->credential_fingerprint)
+    {
+        return false;
+    }
+
+    if (list->tail)
+    {
+        list->tail->next = entry;
+    }
+    else
+    {
+        list->head = entry;
+    }
+    list->tail = entry;
+    ++list->count;
+    return true;
 }
 
 const char *
@@ -569,9 +664,20 @@ provider_policy_authorize(const struct provider_policy_auth_context *context,
                                         "provider certificate issuer is required");
         return false;
     }
+    if (!provider_policy_fingerprint_list_contains(
+            context->allowed_fingerprints, context->credential_fingerprint))
+    {
+        provider_policy_set_auth_result(
+            result, PROVIDER_POLICY_AUTH_DENIED,
+            "provider credential fingerprint is not allowed");
+        return false;
+    }
 
-    provider_policy_set_auth_result(
-        result, PROVIDER_POLICY_AUTH_DENIED,
-        "provider revocation and lease authorization are not implemented");
-    return false;
+    provider_policy_set_auth_result(result, PROVIDER_POLICY_AUTH_AUTHORIZED,
+                                    "authorized");
+    if (result)
+    {
+        result->policy_revision = PROVIDER_POLICY_STATIC_POLICY_REVISION;
+    }
+    return true;
 }

@@ -39,6 +39,7 @@
 #include "proxy.h"
 #include "comp.h"
 #include "pushlist.h"
+#include "provider_policy.h"
 #include "clinat.h"
 #include "crypto_backend.h"
 #include "dns.h"
@@ -476,6 +477,7 @@ struct options
 
     const char *ikev2_helper_path;
     bool ikev2_helper_apply_xfrm;
+    struct provider_policy_fingerprint_list ikev2_helper_allowed_fingerprints;
 
     bool server_bridge_proxy_dhcp;
 

@@ -551,6 +551,7 @@ multi_ikev2_helper_auth_request(void *arg,
                                       : NULL,
         .cert_serial = request->cert_serial_len ? cert_serial : NULL,
         .cert_issuer = request->cert_issuer_len ? cert_issuer : NULL,
+        .allowed_fingerprints = &m->top.options.ikev2_helper_allowed_fingerprints,
     };
     struct provider_policy_auth_result result;
     provider_policy_authorize(&context, &result);

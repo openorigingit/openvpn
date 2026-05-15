@@ -252,6 +252,33 @@ test_provider_policy_ignores_disabled_push_entry(void **state)
 }
 
 static void
+test_provider_policy_fingerprint_allowlist(void **state)
+{
+    (void)state;
+
+    assert_true(provider_policy_fingerprint_valid("SHA256:ABCD"));
+    assert_false(provider_policy_fingerprint_valid(""));
+    assert_false(provider_policy_fingerprint_valid("SHA256:AB CD"));
+
+    struct gc_arena gc = gc_new();
+    struct provider_policy_fingerprint_list list = { 0 };
+    assert_false(provider_policy_fingerprint_list_defined(&list));
+    assert_true(provider_policy_fingerprint_list_add(&list, "SHA256:ABCD",
+                                                     &gc));
+    assert_true(provider_policy_fingerprint_list_defined(&list));
+    assert_int_equal(list.count, 1);
+    assert_true(provider_policy_fingerprint_list_contains(&list,
+                                                          "sha256:abcd"));
+
+    assert_true(provider_policy_fingerprint_list_add(&list, "sha256:abcd",
+                                                     &gc));
+    assert_int_equal(list.count, 1);
+    assert_false(provider_policy_fingerprint_list_add(&list, "bad value",
+                                                      &gc));
+    gc_free(&gc);
+}
+
+static void
 test_provider_policy_authorize_fails_closed(void **state)
 {
     (void)state;
@@ -282,7 +309,36 @@ test_provider_policy_authorize_fails_closed(void **state)
     context.cert_issuer = "CN=Example CA";
     assert_false(provider_policy_authorize(&context, &result));
     assert_int_equal(result.status, PROVIDER_POLICY_AUTH_DENIED);
-    assert_non_null(strstr(result.reason, "lease authorization"));
+    assert_non_null(strstr(result.reason, "not allowed"));
+}
+
+static void
+test_provider_policy_authorize_allowlisted_fingerprint(void **state)
+{
+    (void)state;
+
+    struct provider_policy_fingerprint_entry entry = {
+        .credential_fingerprint = "SHA256:ABCD",
+    };
+    struct provider_policy_fingerprint_list list = {
+        .head = &entry,
+        .tail = &entry,
+        .count = 1,
+    };
+    struct provider_policy_auth_context context = {
+        .profile_mode = PROVIDER_POLICY_PROFILE_EAP_TLS,
+        .principal = "alice@example.test",
+        .credential_fingerprint = "sha256:abcd",
+        .cert_serial = "1234",
+        .cert_issuer = "CN=Example CA",
+        .allowed_fingerprints = &list,
+    };
+    struct provider_policy_auth_result result;
+
+    assert_true(provider_policy_authorize(&context, &result));
+    assert_int_equal(result.status, PROVIDER_POLICY_AUTH_AUTHORIZED);
+    assert_int_equal(result.policy_revision, 1);
+    assert_string_equal(result.reason, "authorized");
 }
 
 int
@@ -299,7 +355,9 @@ main(void)
         cmocka_unit_test(test_provider_policy_builds_route_dns_artifacts),
         cmocka_unit_test(test_provider_policy_rejects_ambiguous_route_artifact),
         cmocka_unit_test(test_provider_policy_ignores_disabled_push_entry),
+        cmocka_unit_test(test_provider_policy_fingerprint_allowlist),
         cmocka_unit_test(test_provider_policy_authorize_fails_closed),
+        cmocka_unit_test(test_provider_policy_authorize_allowlisted_fingerprint),
     };
 
     return cmocka_run_group_tests_name("provider_policy", tests, NULL, NULL);

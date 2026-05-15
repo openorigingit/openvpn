@@ -32,8 +32,20 @@ struct push_list;
 #define PROVIDER_POLICY_REASON_SIZE 256
 #define PROVIDER_POLICY_SELECTOR_SIZE 64
 #define PROVIDER_POLICY_DNS_SIZE 64
+#define PROVIDER_POLICY_FINGERPRINT_SIZE 128
 #define PROVIDER_POLICY_MAX_SELECTORS 32
 #define PROVIDER_POLICY_MAX_DNS_SERVERS 8
+
+struct provider_policy_fingerprint_entry {
+    struct provider_policy_fingerprint_entry *next;
+    const char *credential_fingerprint;
+};
+
+struct provider_policy_fingerprint_list {
+    struct provider_policy_fingerprint_entry *head;
+    struct provider_policy_fingerprint_entry *tail;
+    size_t count;
+};
 
 enum provider_policy_profile_mode {
     PROVIDER_POLICY_PROFILE_UNDEF = 0,
@@ -47,6 +59,7 @@ struct provider_policy_auth_context {
     const char *cert_serial;
     const char *cert_issuer;
     const char *peer_address;
+    const struct provider_policy_fingerprint_list *allowed_fingerprints;
 };
 
 enum provider_policy_preflight_status {
@@ -91,6 +104,17 @@ const char *provider_policy_preflight_status_name(
 void provider_policy_preflight_init(struct provider_policy_preflight *result);
 void provider_policy_artifacts_init(struct provider_policy_artifacts *artifacts);
 void provider_policy_auth_result_init(struct provider_policy_auth_result *result);
+
+bool provider_policy_fingerprint_valid(const char *fingerprint);
+bool provider_policy_fingerprint_list_defined(
+    const struct provider_policy_fingerprint_list *list);
+bool provider_policy_fingerprint_list_contains(
+    const struct provider_policy_fingerprint_list *list,
+    const char *credential_fingerprint);
+bool provider_policy_fingerprint_list_add(
+    struct provider_policy_fingerprint_list *list,
+    const char *credential_fingerprint,
+    struct gc_arena *gc);
 
 bool provider_policy_push_option_supported(const char *option);
 

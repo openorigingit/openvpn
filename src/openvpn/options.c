@@ -432,6 +432,8 @@ static const char usage_message[] =
     "--experimental-ikev2-helper path : Start experimental IKEv2 helper.\n"
     "                  OpenVPN remains the policy owner; unsupported policy\n"
     "                  hooks fail preflight before helper startup.\n"
+    "--experimental-ikev2-helper-allow-fingerprint fp : Authorize an IKEv2\n"
+    "                  provider client credential fingerprint. Repeatable.\n"
     "--experimental-ikev2-helper-apply-xfrm : Allow the experimental IKEv2\n"
     "                  helper to install OpenVPN-issued Linux XFRM state.\n"
     "--push \"option\" : Push a config file option back to the peer for remote\n"
@@ -2510,7 +2512,9 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
             msg(M_USAGE, "--mode server requires --tls-server");
         }
 #ifdef _WIN32
-        if (options->ikev2_helper_path || options->ikev2_helper_apply_xfrm)
+        if (options->ikev2_helper_path || options->ikev2_helper_apply_xfrm
+            || provider_policy_fingerprint_list_defined(
+                &options->ikev2_helper_allowed_fingerprints))
         {
             msg(M_USAGE, "--experimental-ikev2-helper is not supported on Windows");
         }
@@ -2526,6 +2530,13 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
         {
             msg(M_USAGE,
                 "--experimental-ikev2-helper-apply-xfrm requires --experimental-ikev2-helper");
+        }
+        if (provider_policy_fingerprint_list_defined(
+                &options->ikev2_helper_allowed_fingerprints)
+            && !options->ikev2_helper_path)
+        {
+            msg(M_USAGE,
+                "--experimental-ikev2-helper-allow-fingerprint requires --experimental-ikev2-helper");
         }
         MUST_BE_FALSE(ce->remote, "remote");
         MUST_BE_FALSE(!ce->bind_local, "nobind");
@@ -2647,6 +2658,9 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
         MUST_BE_UNDEF(ikev2_helper_path, "experimental-ikev2-helper");
         MUST_BE_FALSE(options->ikev2_helper_apply_xfrm,
                       "experimental-ikev2-helper-apply-xfrm");
+        MUST_BE_FALSE(provider_policy_fingerprint_list_defined(
+                          &options->ikev2_helper_allowed_fingerprints),
+                      "experimental-ikev2-helper-allow-fingerprint");
         MUST_BE_UNDEF(enable_c2c, "client-to-client");
         MUST_BE_UNDEF(duplicate_cn, "duplicate-cn");
         MUST_BE_UNDEF(cf_max, "connect-freq");
@@ -7289,6 +7303,18 @@ add_option(struct options *options, char *p[], bool is_inline, const char *file,
     {
         VERIFY_PERMISSION(OPT_P_GENERAL);
         options->ikev2_helper_path = p[1];
+    }
+    else if (streq(p[0], "experimental-ikev2-helper-allow-fingerprint")
+             && p[1] && !p[2])
+    {
+        VERIFY_PERMISSION(OPT_P_GENERAL);
+        if (!provider_policy_fingerprint_list_add(
+                &options->ikev2_helper_allowed_fingerprints, p[1],
+                &options->gc))
+        {
+            msg(msglevel, "invalid provider credential fingerprint: %s", p[1]);
+            goto err;
+        }
     }
     else if (streq(p[0], "experimental-ikev2-helper-apply-xfrm") && !p[1])
     {
