@@ -487,6 +487,19 @@ provider_helper_supervisor_set_session_update_callback(
 }
 
 void
+provider_helper_supervisor_set_server_sign_callback(
+    struct provider_helper_supervisor *supervisor,
+    provider_helper_server_sign_request_cb cb,
+    void *arg)
+{
+    if (supervisor)
+    {
+        supervisor->server_sign_request_cb = cb;
+        supervisor->server_sign_request_arg = arg;
+    }
+}
+
+void
 provider_helper_supervisor_free(struct provider_helper_supervisor *supervisor)
 {
     if (!supervisor)
@@ -725,6 +738,100 @@ provider_helper_supervisor_send_auth_response(
     const bool encoded = provider_helper_ipc_write_header(&buf, &header)
                          && provider_helper_ipc_write_auth_response(
                              &buf, response);
+    const bool written = encoded
+                         && provider_helper_write_all(supervisor->ipc_fd, BPTR(&buf),
+                                                      (size_t)BLEN(&buf));
+    free_buf(&buf);
+    if (!written)
+    {
+        provider_helper_supervisor_fail_ipc(supervisor,
+                                            PROVIDER_HELPER_STATE_DEGRADED);
+    }
+    return written;
+}
+
+static bool
+provider_helper_supervisor_default_server_sign_failure(
+    const struct provider_helper_server_sign_request *request,
+    struct provider_helper_server_sign_response *response)
+{
+    if (!request || !response)
+    {
+        return false;
+    }
+
+    CLEAR(*response);
+    response->request_id = request->request_id;
+    response->config_revision = request->config_revision;
+    response->status = PROVIDER_HELPER_SERVER_SIGN_FAILED;
+    response->sigalg = request->sigalg;
+    return provider_helper_server_sign_response_valid(response, NULL, 0);
+}
+
+static bool
+provider_helper_supervisor_server_sign_response_matches_request(
+    const struct provider_helper_server_sign_request *request,
+    const struct provider_helper_server_sign_response *response)
+{
+    return request && response
+           && response->request_id == request->request_id
+           && response->config_revision == request->config_revision
+           && response->sigalg == request->sigalg;
+}
+
+static bool
+provider_helper_supervisor_build_server_sign_response(
+    struct provider_helper_supervisor *supervisor,
+    const struct provider_helper_server_sign_request *request,
+    struct provider_helper_server_sign_response *response)
+{
+    if (!supervisor || !request || !response)
+    {
+        return false;
+    }
+
+    if (supervisor->server_sign_request_cb
+        && supervisor->server_sign_request_cb(
+            supervisor->server_sign_request_arg, request, response)
+        && provider_helper_server_sign_response_valid(response, NULL, 0)
+        && provider_helper_supervisor_server_sign_response_matches_request(
+            request, response))
+    {
+        return true;
+    }
+
+    return provider_helper_supervisor_default_server_sign_failure(request,
+                                                                 response);
+}
+
+static bool
+provider_helper_supervisor_send_server_sign_response(
+    struct provider_helper_supervisor *supervisor,
+    const struct provider_helper_server_sign_response *response,
+    uint64_t correlation_id)
+{
+    if (!supervisor || supervisor->ipc_fd < 0 || !response
+        || supervisor->state != PROVIDER_HELPER_STATE_READY
+        || !provider_helper_server_sign_response_valid(response, NULL, 0))
+    {
+        return false;
+    }
+
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE
+                                  + PROVIDER_HELPER_SERVER_SIGN_RESPONSE_SIZE);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_SERVER_SIGN_RESPONSE,
+        .sequence = supervisor->next_tx_sequence++,
+        .correlation_id = correlation_id,
+        .payload_len = PROVIDER_HELPER_SERVER_SIGN_RESPONSE_SIZE,
+    };
+
+    const bool encoded =
+        provider_helper_ipc_write_header(&buf, &header)
+        && provider_helper_ipc_write_server_sign_response(&buf, response);
     const bool written = encoded
                          && provider_helper_write_all(supervisor->ipc_fd, BPTR(&buf),
                                                       (size_t)BLEN(&buf));
@@ -1265,6 +1372,25 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
                 || (supervisor->session_update_cb
                     && !supervisor->session_update_cb(
                         supervisor->session_update_arg, &session_update)))
+            {
+                provider_helper_supervisor_fail_ipc(supervisor,
+                                                    PROVIDER_HELPER_STATE_FAILED);
+            }
+            return;
+        }
+
+        if (header.type == PROVIDER_HELPER_MSG_SERVER_SIGN_REQUEST
+            && payload_len == PROVIDER_HELPER_SERVER_SIGN_REQUEST_SIZE
+            && supervisor->state == PROVIDER_HELPER_STATE_READY)
+        {
+            struct provider_helper_server_sign_request request;
+            struct provider_helper_server_sign_response response;
+            if (!provider_helper_ipc_decode_server_sign_request(
+                    supervisor->payload_buf, payload_len, &request)
+                || !provider_helper_supervisor_build_server_sign_response(
+                    supervisor, &request, &response)
+                || !provider_helper_supervisor_send_server_sign_response(
+                    supervisor, &response, header.sequence))
             {
                 provider_helper_supervisor_fail_ipc(supervisor,
                                                     PROVIDER_HELPER_STATE_FAILED);

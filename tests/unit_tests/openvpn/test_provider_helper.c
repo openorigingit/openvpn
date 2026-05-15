@@ -6248,6 +6248,31 @@ write_helper_session_update_fd(
     free_buf(&buf);
 }
 
+static void
+write_helper_server_sign_request_fd(
+    int fd,
+    uint64_t sequence,
+    uint64_t correlation_id,
+    const struct provider_helper_server_sign_request *request)
+{
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE
+                                  + PROVIDER_HELPER_SERVER_SIGN_REQUEST_SIZE);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_SERVER_SIGN_REQUEST,
+        .sequence = sequence,
+        .correlation_id = correlation_id,
+        .payload_len = PROVIDER_HELPER_SERVER_SIGN_REQUEST_SIZE,
+    };
+
+    assert_true(provider_helper_ipc_write_header(&buf, &header));
+    assert_true(provider_helper_ipc_write_server_sign_request(&buf, request));
+    assert_int_equal(write(fd, BPTR(&buf), (size_t)BLEN(&buf)), BLEN(&buf));
+    free_buf(&buf);
+}
+
 struct test_provider_helper_auth_cb_state {
     unsigned int calls;
     bool allow;
@@ -6281,6 +6306,37 @@ test_provider_helper_auth_cb(void *arg,
     snprintf(response->reason, sizeof(response->reason), "%s",
              state->allow ? "unit test allow" : "unit test deny");
     response->reason_len = (uint32_t)strlen(response->reason);
+    return true;
+}
+
+struct test_provider_helper_server_sign_cb_state {
+    unsigned int calls;
+    struct provider_helper_server_sign_request request;
+};
+
+static bool
+test_provider_helper_server_sign_cb(
+    void *arg,
+    const struct provider_helper_server_sign_request *request,
+    struct provider_helper_server_sign_response *response)
+{
+    struct test_provider_helper_server_sign_cb_state *state = arg;
+    assert_non_null(state);
+    assert_non_null(request);
+    assert_non_null(response);
+
+    ++state->calls;
+    state->request = *request;
+    CLEAR(*response);
+    response->request_id = request->request_id;
+    response->config_revision = request->config_revision;
+    response->status = PROVIDER_HELPER_SERVER_SIGN_OK;
+    response->sigalg = request->sigalg;
+    response->signature_len = 64;
+    for (uint32_t i = 0; i < response->signature_len; ++i)
+    {
+        response->signature[i] = (uint8_t)(0x5a ^ i);
+    }
     return true;
 }
 
@@ -6491,6 +6547,104 @@ test_provider_helper_session_update_callback(void **state)
                         "ike-authorized", strlen("ike-authorized"));
     assert_memory_equal(cb_state.session_update.child_sa_state,
                         "installed", strlen("installed"));
+
+    close(fds[1]);
+    provider_helper_supervisor_free(&supervisor);
+}
+
+static void
+test_provider_helper_server_sign_request_callback(void **state)
+{
+    (void)state;
+
+    int fds[2] = { -1, -1 };
+    assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.ipc_fd = fds[0];
+    provider_helper_supervisor_set_state(&supervisor,
+                                         PROVIDER_HELPER_STATE_READY);
+
+    struct test_provider_helper_server_sign_cb_state cb_state;
+    CLEAR(cb_state);
+    provider_helper_supervisor_set_server_sign_callback(
+        &supervisor, test_provider_helper_server_sign_cb, &cb_state);
+
+    struct provider_helper_server_sign_request request = {
+        .request_id = 701,
+        .initiator_spi = 0x0102030405060708ull,
+        .responder_spi = 0x8877665544332211ull,
+        .config_revision = 9,
+        .listener_id = 1,
+        .auth_method = PROVIDER_HELPER_SERVER_AUTH_METHOD_DIGITAL_SIGNATURE,
+        .sigalg = PROVIDER_HELPER_SERVER_AUTH_SIGALG_RSA_PSS_SHA256,
+        .transcript_len = 96,
+    };
+    for (uint32_t i = 0; i < request.transcript_len; ++i)
+    {
+        request.transcript[i] = (uint8_t)(i & 0xff);
+    }
+
+    write_helper_server_sign_request_fd(fds[1], 1, 91, &request);
+    provider_helper_process_event(&supervisor);
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 1);
+    assert_int_equal(cb_state.calls, 1);
+    assert_int_equal(cb_state.request.request_id, request.request_id);
+    assert_memory_equal(cb_state.request.transcript, request.transcript,
+                        request.transcript_len);
+
+    uint8_t header_buf[PROVIDER_HELPER_IPC_HEADER_SIZE];
+    assert_int_equal(read(fds[1], header_buf, sizeof(header_buf)),
+                     sizeof(header_buf));
+    struct provider_helper_msg_header header;
+    uint64_t last_sequence = 0;
+    assert_int_equal(provider_helper_ipc_decode_header(
+                         header_buf, sizeof(header_buf), &header,
+                         PROVIDER_HELPER_IPC_MAX_MESSAGE, &last_sequence),
+                     PROVIDER_HELPER_IPC_OK);
+    assert_int_equal(header.type, PROVIDER_HELPER_MSG_SERVER_SIGN_RESPONSE);
+    assert_int_equal(header.correlation_id, 1);
+    assert_int_equal(header.payload_len,
+                     PROVIDER_HELPER_SERVER_SIGN_RESPONSE_SIZE);
+
+    uint8_t payload[PROVIDER_HELPER_SERVER_SIGN_RESPONSE_SIZE];
+    assert_int_equal(read(fds[1], payload, sizeof(payload)), sizeof(payload));
+    struct provider_helper_server_sign_response response;
+    assert_true(provider_helper_ipc_decode_server_sign_response(
+                    payload, sizeof(payload), &response));
+    assert_int_equal(response.request_id, request.request_id);
+    assert_int_equal(response.config_revision, request.config_revision);
+    assert_int_equal(response.status, PROVIDER_HELPER_SERVER_SIGN_OK);
+    assert_int_equal(response.sigalg, request.sigalg);
+    assert_int_equal(response.signature_len, 64);
+
+    provider_helper_supervisor_set_server_sign_callback(&supervisor, NULL, NULL);
+    request.request_id = 702;
+    write_helper_server_sign_request_fd(fds[1], 2, 92, &request);
+    provider_helper_process_event(&supervisor);
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 2);
+    assert_int_equal(cb_state.calls, 1);
+    assert_int_equal(read(fds[1], header_buf, sizeof(header_buf)),
+                     sizeof(header_buf));
+    assert_int_equal(provider_helper_ipc_decode_header(
+                         header_buf, sizeof(header_buf), &header,
+                         PROVIDER_HELPER_IPC_MAX_MESSAGE, &last_sequence),
+                     PROVIDER_HELPER_IPC_OK);
+    assert_int_equal(header.type, PROVIDER_HELPER_MSG_SERVER_SIGN_RESPONSE);
+    assert_int_equal(header.payload_len,
+                     PROVIDER_HELPER_SERVER_SIGN_RESPONSE_SIZE);
+    assert_int_equal(read(fds[1], payload, sizeof(payload)), sizeof(payload));
+    assert_true(provider_helper_ipc_decode_server_sign_response(
+                    payload, sizeof(payload), &response));
+    assert_int_equal(response.request_id, request.request_id);
+    assert_int_equal(response.config_revision, request.config_revision);
+    assert_int_equal(response.status, PROVIDER_HELPER_SERVER_SIGN_FAILED);
+    assert_int_equal(response.signature_len, 0);
 
     close(fds[1]);
     provider_helper_supervisor_free(&supervisor);
@@ -8920,6 +9074,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_auth_request_callback),
         cmocka_unit_test(test_provider_helper_session_close_callback),
         cmocka_unit_test(test_provider_helper_session_update_callback),
+        cmocka_unit_test(test_provider_helper_server_sign_request_callback),
         cmocka_unit_test(test_provider_helper_start_timeout_fails_closed),
         cmocka_unit_test(test_provider_helper_preflight_timeout_fails_closed),
         cmocka_unit_test(test_provider_helper_spawn_noop),

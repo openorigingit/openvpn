@@ -414,6 +414,11 @@ typedef bool (*provider_helper_session_update_cb)(
     void *arg,
     const struct provider_helper_session_update *session_update);
 
+typedef bool (*provider_helper_server_sign_request_cb)(
+    void *arg,
+    const struct provider_helper_server_sign_request *request,
+    struct provider_helper_server_sign_response *response);
+
 struct provider_helper_runtime_config {
     uint32_t flags;
     uint32_t max_half_open_sas;
@@ -703,6 +708,8 @@ struct provider_helper_supervisor {
     void *session_close_arg;
     provider_helper_session_update_cb session_update_cb;
     void *session_update_arg;
+    provider_helper_server_sign_request_cb server_sign_request_cb;
+    void *server_sign_request_arg;
 };
 
 struct status_output;
@@ -727,6 +734,10 @@ void provider_helper_supervisor_set_session_close_callback(
 void provider_helper_supervisor_set_session_update_callback(
     struct provider_helper_supervisor *supervisor,
     provider_helper_session_update_cb cb,
+    void *arg);
+void provider_helper_supervisor_set_server_sign_callback(
+    struct provider_helper_supervisor *supervisor,
+    provider_helper_server_sign_request_cb cb,
     void *arg);
 void provider_helper_runtime_config_default(struct provider_helper_runtime_config *config);
 bool provider_helper_runtime_config_valid(const struct provider_helper_runtime_config *config,
