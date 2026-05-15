@@ -5261,6 +5261,7 @@ ikev2_helper_queue_auth_request(
     if (!ikev2_helper_send_auth_request(ipc_fd, tx_sequence, request.request_id,
                                         &request))
     {
+        ikev2_helper_note_fatal_ipc_failure();
         return false;
     }
     sa->pending_auth_request_id = request.request_id;
