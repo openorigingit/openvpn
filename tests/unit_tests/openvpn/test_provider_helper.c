@@ -1240,6 +1240,71 @@ test_provider_helper_session_close_roundtrip(void **state)
 }
 
 static void
+test_provider_helper_session_update_roundtrip(void **state)
+{
+    (void)state;
+
+    struct provider_helper_session_update input = {
+        .provider_session_id = 7,
+        .xfrm_lease_id = 17,
+        .policy_revision = 3,
+        .bytes_received = 11,
+        .bytes_sent = 22,
+        .packets_received = 33,
+        .packets_sent = 44,
+        .state = PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE,
+    };
+    snprintf(input.helper_state, sizeof(input.helper_state), "%s",
+             "ike-authorized");
+    input.helper_state_len = (uint32_t)strlen(input.helper_state);
+    snprintf(input.child_sa_state, sizeof(input.child_sa_state), "%s",
+             "installed");
+    input.child_sa_state_len = (uint32_t)strlen(input.child_sa_state);
+
+    struct provider_helper_session_update output;
+    char reason[128];
+    uint8_t payload[PROVIDER_HELPER_SESSION_UPDATE_SIZE];
+
+    assert_true(provider_helper_session_update_valid(&input, reason,
+                                                     sizeof(reason)));
+    assert_true(provider_helper_ipc_encode_session_update(payload,
+                                                          sizeof(payload),
+                                                          &input));
+    assert_true(provider_helper_ipc_decode_session_update(payload,
+                                                          sizeof(payload),
+                                                          &output));
+    assert_int_equal(output.provider_session_id, input.provider_session_id);
+    assert_int_equal(output.xfrm_lease_id, input.xfrm_lease_id);
+    assert_int_equal(output.policy_revision, input.policy_revision);
+    assert_int_equal(output.state, input.state);
+    assert_int_equal(output.bytes_received, input.bytes_received);
+    assert_int_equal(output.bytes_sent, input.bytes_sent);
+    assert_int_equal(output.packets_received, input.packets_received);
+    assert_int_equal(output.packets_sent, input.packets_sent);
+    assert_int_equal(output.helper_state_len, input.helper_state_len);
+    assert_int_equal(output.child_sa_state_len, input.child_sa_state_len);
+    assert_memory_equal(output.helper_state, input.helper_state,
+                        input.helper_state_len);
+    assert_memory_equal(output.child_sa_state, input.child_sa_state,
+                        input.child_sa_state_len);
+
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_SESSION_UPDATE_SIZE);
+    assert_true(provider_helper_ipc_write_session_update(&buf, &input));
+    assert_int_equal(BLEN(&buf), PROVIDER_HELPER_SESSION_UPDATE_SIZE);
+    free_buf(&buf);
+
+    input.state = PROVIDER_HELPER_SESSION_UPDATE_STATE_UNCHANGED;
+    assert_false(provider_helper_session_update_valid(&input, reason,
+                                                      sizeof(reason)));
+    assert_non_null(strstr(reason, "state"));
+    input.state = PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE;
+    input.helper_state[3] = '\n';
+    assert_false(provider_helper_session_update_valid(&input, reason,
+                                                      sizeof(reason)));
+    assert_non_null(strstr(reason, "state text"));
+}
+
+static void
 test_write_be16(uint8_t *dst, uint16_t value)
 {
     dst[0] = (uint8_t)(value >> 8);
@@ -5806,6 +5871,30 @@ write_helper_session_close_fd(
     free_buf(&buf);
 }
 
+static void
+write_helper_session_update_fd(
+    int fd,
+    uint64_t sequence,
+    const struct provider_helper_session_update *session_update)
+{
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE
+                                  + PROVIDER_HELPER_SESSION_UPDATE_SIZE);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_SESSION_UPDATE,
+        .sequence = sequence,
+        .payload_len = PROVIDER_HELPER_SESSION_UPDATE_SIZE,
+    };
+
+    assert_true(provider_helper_ipc_write_header(&buf, &header));
+    assert_true(provider_helper_ipc_write_session_update(&buf,
+                                                         session_update));
+    assert_int_equal(write(fd, BPTR(&buf), (size_t)BLEN(&buf)), BLEN(&buf));
+    free_buf(&buf);
+}
+
 struct test_provider_helper_auth_cb_state {
     unsigned int calls;
     bool allow;
@@ -5858,6 +5947,25 @@ test_provider_helper_session_close_cb(
 
     ++state->calls;
     state->session_close = *session_close;
+    return true;
+}
+
+struct test_provider_helper_session_update_cb_state {
+    unsigned int calls;
+    struct provider_helper_session_update session_update;
+};
+
+static bool
+test_provider_helper_session_update_cb(
+    void *arg,
+    const struct provider_helper_session_update *session_update)
+{
+    struct test_provider_helper_session_update_cb_state *state = arg;
+    assert_non_null(state);
+    assert_non_null(session_update);
+
+    ++state->calls;
+    state->session_update = *session_update;
     return true;
 }
 
@@ -5976,6 +6084,60 @@ test_provider_helper_session_close_callback(void **state)
     assert_memory_equal(cb_state.session_close.reason,
                         "IKE SA deleted by peer",
                         strlen("IKE SA deleted by peer"));
+
+    close(fds[1]);
+    provider_helper_supervisor_free(&supervisor);
+}
+
+static void
+test_provider_helper_session_update_callback(void **state)
+{
+    (void)state;
+
+    int fds[2] = { -1, -1 };
+    assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.ipc_fd = fds[0];
+    provider_helper_supervisor_set_state(&supervisor,
+                                         PROVIDER_HELPER_STATE_READY);
+
+    struct test_provider_helper_session_update_cb_state cb_state;
+    CLEAR(cb_state);
+    provider_helper_supervisor_set_session_update_callback(
+        &supervisor, test_provider_helper_session_update_cb, &cb_state);
+
+    struct provider_helper_session_update session_update = {
+        .provider_session_id = 101,
+        .xfrm_lease_id = 202,
+        .policy_revision = 303,
+        .state = PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE,
+    };
+    snprintf(session_update.helper_state,
+             sizeof(session_update.helper_state), "%s", "ike-authorized");
+    session_update.helper_state_len =
+        (uint32_t)strlen(session_update.helper_state);
+    snprintf(session_update.child_sa_state,
+             sizeof(session_update.child_sa_state), "%s", "installed");
+    session_update.child_sa_state_len =
+        (uint32_t)strlen(session_update.child_sa_state);
+
+    write_helper_session_update_fd(fds[1], 1, &session_update);
+    provider_helper_process_event(&supervisor);
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 1);
+    assert_int_equal(cb_state.calls, 1);
+    assert_int_equal(cb_state.session_update.provider_session_id, 101);
+    assert_int_equal(cb_state.session_update.xfrm_lease_id, 202);
+    assert_int_equal(cb_state.session_update.policy_revision, 303);
+    assert_int_equal(cb_state.session_update.state,
+                     PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE);
+    assert_memory_equal(cb_state.session_update.helper_state,
+                        "ike-authorized", strlen("ike-authorized"));
+    assert_memory_equal(cb_state.session_update.child_sa_state,
+                        "installed", strlen("installed"));
 
     close(fds[1]);
     provider_helper_supervisor_free(&supervisor);
@@ -7087,7 +7249,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     const uint32_t child_spi = test_recv_ikev2_encrypted_child_sa_response(
         response_fd, initiator_spi, &sa_init_material, 2, &xfrm_lease, true);
 
-    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    target_rx_sequence = supervisor.last_rx_sequence + 2;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
                            supervisor.next_tx_sequence++, 100);
     for (int i = 0;
@@ -7198,7 +7360,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
         response_fd, initiator_spi, &sa_init_material,
         PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 5, true);
 
-    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    target_rx_sequence = supervisor.last_rx_sequence + 2;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
                            supervisor.next_tx_sequence++, 105);
     for (int i = 0;
@@ -7222,7 +7384,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     (void)test_recv_ikev2_encrypted_child_sa_response(
         response_fd, initiator_spi, &sa_init_material, 6, &xfrm_lease, true);
 
-    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    target_rx_sequence = supervisor.last_rx_sequence + 2;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
                            supervisor.next_tx_sequence++, 106);
     for (int i = 0;
@@ -7340,7 +7502,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
         response_fd, delete_initiator_spi, &sa_init_material,
         PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 3, true);
 
-    target_rx_sequence = supervisor.last_rx_sequence + 2;
+    target_rx_sequence = supervisor.last_rx_sequence + 3;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
                            supervisor.next_tx_sequence++, 112);
     for (int i = 0;
@@ -7447,6 +7609,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_auth_request_roundtrip),
         cmocka_unit_test(test_provider_helper_auth_response_roundtrip),
         cmocka_unit_test(test_provider_helper_session_close_roundtrip),
+        cmocka_unit_test(test_provider_helper_session_update_roundtrip),
         cmocka_unit_test(test_provider_helper_ikev2_parser),
         cmocka_unit_test(test_provider_helper_ikev2_payload_parser),
         cmocka_unit_test(test_provider_helper_ikev2_cookie_response),
@@ -7457,6 +7620,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_processes_partial_header),
         cmocka_unit_test(test_provider_helper_auth_request_callback),
         cmocka_unit_test(test_provider_helper_session_close_callback),
+        cmocka_unit_test(test_provider_helper_session_update_callback),
         cmocka_unit_test(test_provider_helper_start_timeout_fails_closed),
         cmocka_unit_test(test_provider_helper_preflight_timeout_fails_closed),
         cmocka_unit_test(test_provider_helper_spawn_noop),

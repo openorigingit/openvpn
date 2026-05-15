@@ -623,6 +623,91 @@ multi_ikev2_helper_session_close(
 }
 
 static bool
+multi_ikev2_helper_session_update_state(
+    uint32_t helper_state,
+    enum provider_session_state *session_state)
+{
+    if (!session_state)
+    {
+        return false;
+    }
+
+    switch (helper_state)
+    {
+        case PROVIDER_HELPER_SESSION_UPDATE_STATE_AUTH_PENDING:
+            *session_state = PROVIDER_SESSION_STATE_AUTH_PENDING;
+            return true;
+
+        case PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE:
+            *session_state = PROVIDER_SESSION_STATE_ACTIVE;
+            return true;
+
+        case PROVIDER_HELPER_SESSION_UPDATE_STATE_DRAINING:
+            *session_state = PROVIDER_SESSION_STATE_DRAINING;
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+static bool
+multi_ikev2_helper_session_update(
+    void *arg,
+    const struct provider_helper_session_update *session_update)
+{
+    struct multi_context *m = arg;
+    if (!m || !session_update)
+    {
+        return false;
+    }
+
+    struct provider_session *session =
+        provider_session_lookup_by_id(&m->provider_sessions,
+                                      session_update->provider_session_id);
+    if (!session)
+    {
+        return true;
+    }
+
+    if (session->xfrm_lease_id != session_update->xfrm_lease_id
+        || session->policy_revision != session_update->policy_revision)
+    {
+        msg(D_MULTI_ERRORS,
+            "IKEv2 helper: refused mismatched provider session update for session %" PRIu64,
+            session_update->provider_session_id);
+        return false;
+    }
+
+    enum provider_session_state session_state = PROVIDER_SESSION_STATE_UNDEF;
+    if (!multi_ikev2_helper_session_update_state(session_update->state,
+                                                 &session_state))
+    {
+        return false;
+    }
+
+    char helper_state[PROVIDER_HELPER_SESSION_STATE_TEXT_SIZE];
+    char child_sa_state[PROVIDER_HELPER_SESSION_STATE_TEXT_SIZE];
+    CLEAR(helper_state);
+    CLEAR(child_sa_state);
+    memcpy(helper_state, session_update->helper_state,
+           session_update->helper_state_len);
+    memcpy(child_sa_state, session_update->child_sa_state,
+           session_update->child_sa_state_len);
+
+    const struct provider_session_update update = {
+        .state = session_state,
+        .helper_state = helper_state,
+        .child_sa_state = child_sa_state,
+        .bytes_received = session_update->bytes_received,
+        .bytes_sent = session_update->bytes_sent,
+        .packets_received = session_update->packets_received,
+        .packets_sent = session_update->packets_sent,
+    };
+    return provider_session_update(session, &update);
+}
+
+static bool
 multi_ikev2_helper_xfrm_id(uint64_t id, uint32_t *out)
 {
     if (!id || id > MULTI_IKEV2_HELPER_XFRM_ID_MAX || !out)
@@ -919,6 +1004,8 @@ multi_spawn_ikev2_helper(struct context *t, bool fatal)
         &m->provider_helper, multi_ikev2_helper_auth_request, m);
     provider_helper_supervisor_set_session_close_callback(
         &m->provider_helper, multi_ikev2_helper_session_close, m);
+    provider_helper_supervisor_set_session_update_callback(
+        &m->provider_helper, multi_ikev2_helper_session_update, m);
     if (t->options.ikev2_helper_apply_xfrm)
     {
         m->provider_helper.runtime_config.flags |= PROVIDER_HELPER_CONFIG_APPLY_XFRM;

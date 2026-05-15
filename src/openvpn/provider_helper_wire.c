@@ -525,6 +525,34 @@ provider_helper_auth_reason_byte_allowed(uint8_t c)
     return c >= 0x20 && c <= 0x7e;
 }
 
+static bool
+provider_helper_session_update_state_valid(uint32_t state)
+{
+    return state == PROVIDER_HELPER_SESSION_UPDATE_STATE_AUTH_PENDING
+           || state == PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE
+           || state == PROVIDER_HELPER_SESSION_UPDATE_STATE_DRAINING;
+}
+
+static bool
+provider_helper_session_state_text_valid(const char *text,
+                                         uint32_t text_len,
+                                         size_t text_size)
+{
+    if (!text_len || text_len >= text_size)
+    {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < text_len; ++i)
+    {
+        if (!provider_helper_auth_reason_byte_allowed((uint8_t)text[i]))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool
 provider_helper_auth_response_valid(
     const struct provider_helper_auth_response *response,
@@ -643,6 +671,57 @@ provider_helper_session_close_valid(
                 "session close reason contains invalid characters");
             return false;
         }
+    }
+
+    provider_helper_config_reason(reason, reason_size, "ok");
+    return true;
+}
+
+bool
+provider_helper_session_update_valid(
+    const struct provider_helper_session_update *session_update,
+    char *reason,
+    size_t reason_size)
+{
+    if (!session_update)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "missing session update");
+        return false;
+    }
+    if (!session_update->provider_session_id || !session_update->xfrm_lease_id
+        || !session_update->policy_revision)
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "session update identity fields must be nonzero");
+        return false;
+    }
+    if (!provider_helper_session_update_state_valid(session_update->state))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "invalid session update state");
+        return false;
+    }
+    if (session_update->flags || session_update->reserved1
+        || session_update->reserved2)
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "session update reserved fields must be zero");
+        return false;
+    }
+    if (!provider_helper_session_state_text_valid(
+            session_update->helper_state, session_update->helper_state_len,
+            sizeof(session_update->helper_state))
+        || !provider_helper_session_state_text_valid(
+            session_update->child_sa_state,
+            session_update->child_sa_state_len,
+            sizeof(session_update->child_sa_state)))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "invalid session update state text");
+        return false;
     }
 
     provider_helper_config_reason(reason, reason_size, "ok");
@@ -1434,6 +1513,81 @@ provider_helper_ipc_decode_session_close(
 
     return (size_t)(pos - src) == PROVIDER_HELPER_SESSION_CLOSE_SIZE
            && provider_helper_session_close_valid(session_close, NULL, 0);
+}
+
+bool
+provider_helper_ipc_encode_session_update(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_session_update *session_update)
+{
+    if (!dst || dst_len < PROVIDER_HELPER_SESSION_UPDATE_SIZE
+        || !provider_helper_session_update_valid(session_update, NULL, 0))
+    {
+        return false;
+    }
+
+    uint8_t *pos = dst;
+    provider_helper_wire_write_u64(&pos, session_update->provider_session_id);
+    provider_helper_wire_write_u64(&pos, session_update->xfrm_lease_id);
+    provider_helper_wire_write_u64(&pos, session_update->policy_revision);
+    provider_helper_wire_write_u64(&pos, session_update->bytes_received);
+    provider_helper_wire_write_u64(&pos, session_update->bytes_sent);
+    provider_helper_wire_write_u64(&pos, session_update->packets_received);
+    provider_helper_wire_write_u64(&pos, session_update->packets_sent);
+    provider_helper_wire_write_u32(&pos, session_update->state);
+    provider_helper_wire_write_u32(&pos, session_update->helper_state_len);
+    provider_helper_wire_write_u32(&pos, session_update->child_sa_state_len);
+    provider_helper_wire_write_u32(&pos, session_update->flags);
+    provider_helper_wire_write_u32(&pos, session_update->reserved1);
+    provider_helper_wire_write_u32(&pos, session_update->reserved2);
+    memcpy(pos, session_update->helper_state,
+           sizeof(session_update->helper_state));
+    pos += sizeof(session_update->helper_state);
+    memcpy(pos, session_update->child_sa_state,
+           sizeof(session_update->child_sa_state));
+    pos += sizeof(session_update->child_sa_state);
+
+    return (size_t)(pos - dst) == PROVIDER_HELPER_SESSION_UPDATE_SIZE;
+}
+
+bool
+provider_helper_ipc_decode_session_update(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_session_update *session_update)
+{
+    if (!src || src_len != PROVIDER_HELPER_SESSION_UPDATE_SIZE
+        || !session_update)
+    {
+        return false;
+    }
+
+    const uint8_t *pos = src;
+    CLEAR(*session_update);
+    session_update->provider_session_id =
+        provider_helper_wire_read_u64(&pos);
+    session_update->xfrm_lease_id = provider_helper_wire_read_u64(&pos);
+    session_update->policy_revision = provider_helper_wire_read_u64(&pos);
+    session_update->bytes_received = provider_helper_wire_read_u64(&pos);
+    session_update->bytes_sent = provider_helper_wire_read_u64(&pos);
+    session_update->packets_received = provider_helper_wire_read_u64(&pos);
+    session_update->packets_sent = provider_helper_wire_read_u64(&pos);
+    session_update->state = provider_helper_wire_read_u32(&pos);
+    session_update->helper_state_len = provider_helper_wire_read_u32(&pos);
+    session_update->child_sa_state_len = provider_helper_wire_read_u32(&pos);
+    session_update->flags = provider_helper_wire_read_u32(&pos);
+    session_update->reserved1 = provider_helper_wire_read_u32(&pos);
+    session_update->reserved2 = provider_helper_wire_read_u32(&pos);
+    memcpy(session_update->helper_state, pos,
+           sizeof(session_update->helper_state));
+    pos += sizeof(session_update->helper_state);
+    memcpy(session_update->child_sa_state, pos,
+           sizeof(session_update->child_sa_state));
+    pos += sizeof(session_update->child_sa_state);
+
+    return (size_t)(pos - src) == PROVIDER_HELPER_SESSION_UPDATE_SIZE
+           && provider_helper_session_update_valid(session_update, NULL, 0);
 }
 
 const char *

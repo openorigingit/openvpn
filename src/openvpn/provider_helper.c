@@ -468,6 +468,19 @@ provider_helper_supervisor_set_session_close_callback(
 }
 
 void
+provider_helper_supervisor_set_session_update_callback(
+    struct provider_helper_supervisor *supervisor,
+    provider_helper_session_update_cb cb,
+    void *arg)
+{
+    if (supervisor)
+    {
+        supervisor->session_update_cb = cb;
+        supervisor->session_update_arg = arg;
+    }
+}
+
+void
 provider_helper_supervisor_free(struct provider_helper_supervisor *supervisor)
 {
     if (!supervisor)
@@ -1229,6 +1242,23 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
                 || (supervisor->session_close_cb
                     && !supervisor->session_close_cb(
                         supervisor->session_close_arg, &session_close)))
+            {
+                provider_helper_supervisor_fail_ipc(supervisor,
+                                                    PROVIDER_HELPER_STATE_FAILED);
+            }
+            return;
+        }
+
+        if (header.type == PROVIDER_HELPER_MSG_SESSION_UPDATE
+            && payload_len == PROVIDER_HELPER_SESSION_UPDATE_SIZE
+            && supervisor->state == PROVIDER_HELPER_STATE_READY)
+        {
+            struct provider_helper_session_update session_update;
+            if (!provider_helper_ipc_decode_session_update(
+                    supervisor->payload_buf, payload_len, &session_update)
+                || (supervisor->session_update_cb
+                    && !supervisor->session_update_cb(
+                        supervisor->session_update_arg, &session_update)))
             {
                 provider_helper_supervisor_fail_ipc(supervisor,
                                                     PROVIDER_HELPER_STATE_FAILED);

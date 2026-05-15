@@ -1264,6 +1264,83 @@ ikev2_helper_send_session_close(int fd, uint64_t *tx_sequence,
 }
 
 static bool
+ikev2_helper_session_update_set_text(char *dst, size_t dst_size,
+                                     uint32_t *dst_len, const char *text)
+{
+    if (!dst || !dst_size || !dst_len || !text)
+    {
+        return false;
+    }
+
+    const size_t text_len = strlen(text);
+    if (!text_len || text_len >= dst_size || text_len > UINT32_MAX)
+    {
+        return false;
+    }
+
+    memcpy(dst, text, text_len);
+    *dst_len = (uint32_t)text_len;
+    return true;
+}
+
+static bool
+ikev2_helper_send_session_update(int fd, uint64_t *tx_sequence,
+                                 const struct ikev2_helper_ike_sa *sa,
+                                 uint32_t state,
+                                 const char *helper_state,
+                                 const char *child_sa_state)
+{
+    if (fd < 0 || !tx_sequence || !*tx_sequence || !sa || !sa->active
+        || !sa->auth_authorized || !sa->provider_session_id
+        || !sa->xfrm_lease_id || !sa->policy_revision)
+    {
+        return false;
+    }
+
+    struct provider_helper_session_update session_update;
+    CLEAR(session_update);
+    session_update.provider_session_id = sa->provider_session_id;
+    session_update.xfrm_lease_id = sa->xfrm_lease_id;
+    session_update.policy_revision = sa->policy_revision;
+    session_update.state = state;
+    if (!ikev2_helper_session_update_set_text(
+            session_update.helper_state,
+            sizeof(session_update.helper_state),
+            &session_update.helper_state_len, helper_state)
+        || !ikev2_helper_session_update_set_text(
+            session_update.child_sa_state,
+            sizeof(session_update.child_sa_state),
+            &session_update.child_sa_state_len, child_sa_state))
+    {
+        return false;
+    }
+
+    uint8_t frame[PROVIDER_HELPER_IPC_HEADER_SIZE
+                  + PROVIDER_HELPER_SESSION_UPDATE_SIZE];
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_SESSION_UPDATE,
+        .sequence = *tx_sequence,
+        .payload_len = PROVIDER_HELPER_SESSION_UPDATE_SIZE,
+    };
+
+    if (!provider_helper_ipc_encode_header(
+            frame, PROVIDER_HELPER_IPC_HEADER_SIZE, &header)
+        || !provider_helper_ipc_encode_session_update(
+            frame + PROVIDER_HELPER_IPC_HEADER_SIZE,
+            PROVIDER_HELPER_SESSION_UPDATE_SIZE, &session_update)
+        || !ikev2_helper_write_all(fd, frame, sizeof(frame)))
+    {
+        return false;
+    }
+
+    ++*tx_sequence;
+    return true;
+}
+
+static bool
 ikev2_helper_read_all(int fd, uint8_t *data, size_t len)
 {
     while (len > 0 && !helper_stop)
@@ -6235,6 +6312,10 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             {
                                 ++counters
                                       ->ike_informational_delete_response_tx;
+                                (void)ikev2_helper_send_session_update(
+                                    ipc_fd, tx_sequence, sa,
+                                    PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE,
+                                    "ike-authorized", "deleted");
                                 sa->updated = exchange_now;
                                 sa->message_id = header.message_id;
                             }
@@ -6368,6 +6449,10 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             {
                                 ++counters->ike_create_child_response_tx;
                                 child_response_sent = true;
+                                (void)ikev2_helper_send_session_update(
+                                    ipc_fd, tx_sequence, sa,
+                                    PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE,
+                                    "ike-authorized", "installed");
                             }
                             else
                             {
