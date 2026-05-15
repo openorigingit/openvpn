@@ -7723,44 +7723,13 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
         supervisor.runtime_stats.ike_create_child_no_additional_sas_tx, 1);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
 
-    test_send_ikev2_encrypted_protected_exchange_from(
-        migrated_fd, natt_port, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
-        initiator_spi, &sa_init_material, true, 4);
-    usleep(10000);
-    test_send_ikev2_encrypted_mobike_update_from(
-        migrated_fd, natt_port, initiator_spi, &sa_init_material, true, 4);
-    usleep(10000);
-    test_recv_ikev2_encrypted_notify_exchange_response(
-        migrated_fd, initiator_spi, &sa_init_material,
-        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 4,
-        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
-
-    target_rx_sequence = supervisor.last_rx_sequence + 1;
-    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           supervisor.next_tx_sequence++, 104);
-    for (int i = 0;
-         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
-         ++i)
-    {
-        provider_helper_process_event(&supervisor);
-        usleep(10000);
-    }
-    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
-    assert_int_equal(supervisor.runtime_stats.ike_mobike_update_rx, 1);
-    assert_int_equal(supervisor.runtime_stats.ike_mobike_update_response_tx, 1);
-    assert_int_equal(supervisor.runtime_stats.ike_mobike_peer_migrated, 0);
-    assert_int_equal(
-        supervisor.runtime_stats.ike_mobike_unexpected_peer_dropped, 2);
-    assert_int_equal(supervisor.runtime_stats.ike_informational_empty_rx, 0);
-    assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
-
     test_send_ikev2_encrypted_child_delete_from(
-        response_fd, natt_port, initiator_spi, &sa_init_material, true, 5,
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, 4,
         child_spi);
     usleep(10000);
     test_recv_ikev2_encrypted_empty_exchange_response(
         response_fd, initiator_spi, &sa_init_material,
-        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 5, true);
+        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 4, true);
 
     target_rx_sequence = supervisor.last_rx_sequence + 2;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
@@ -7781,10 +7750,10 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
 
     test_send_ikev2_encrypted_create_child_from(
-        response_fd, natt_port, initiator_spi, &sa_init_material, true, 6);
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, 5);
     usleep(10000);
     (void)test_recv_ikev2_encrypted_child_sa_response(
-        response_fd, initiator_spi, &sa_init_material, 6, &xfrm_lease, true);
+        response_fd, initiator_spi, &sa_init_material, 5, &xfrm_lease, true);
 
     target_rx_sequence = supervisor.last_rx_sequence + 2;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
@@ -7880,6 +7849,90 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     }
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
 
+    const uint64_t mobike_initiator_spi = 0x66554433221100ffull;
+    test_send_ikev2_datagram_from(response_fd, port, mobike_initiator_spi);
+    usleep(10000);
+    assert_true(test_recv_ikev2_sa_init_response_material(
+                    response_fd, mobike_initiator_spi, &sa_init_material) != 0);
+    test_send_ikev2_encrypted_ike_auth_datagram_from(
+        response_fd, natt_port, mobike_initiator_spi, &sa_init_material, true,
+        false, cert_der, cert_der_len);
+    for (int i = 0; i < 100 && cb_state.calls < 2; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    test_recv_ikev2_encrypted_notify_response(
+        response_fd, mobike_initiator_spi, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
+
+    test_send_ikev2_encrypted_create_child_from(
+        response_fd, natt_port, mobike_initiator_spi, &sa_init_material, true,
+        2);
+    usleep(10000);
+    (void)test_recv_ikev2_encrypted_child_sa_response(
+        response_fd, mobike_initiator_spi, &sa_init_material, 2, &xfrm_lease,
+        true);
+
+    target_rx_sequence = supervisor.last_rx_sequence + 2;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 112);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_xfrm_install_ok,
+                     3);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_response_tx, 3);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
+
+    test_send_ikev2_encrypted_protected_exchange_from(
+        migrated_fd, natt_port, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
+        mobike_initiator_spi, &sa_init_material, true, 3);
+    usleep(10000);
+    test_send_ikev2_encrypted_mobike_update_from(
+        migrated_fd, natt_port, mobike_initiator_spi, &sa_init_material, true,
+        3);
+    usleep(10000);
+    test_recv_ikev2_encrypted_notify_exchange_response(
+        migrated_fd, mobike_initiator_spi, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 3,
+        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
+
+    target_rx_sequence = supervisor.last_rx_sequence + 2;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 113);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(close_state.calls, 2);
+    assert_int_equal(close_state.session_close.provider_session_id, 101);
+    assert_int_equal(close_state.session_close.xfrm_lease_id, 202);
+    assert_int_equal(close_state.session_close.policy_revision, 303);
+    assert_memory_equal(close_state.session_close.reason,
+                        "MOBIKE migration unsupported",
+                        strlen("MOBIKE migration unsupported"));
+    assert_int_equal(supervisor.runtime_stats.ike_mobike_update_rx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_mobike_update_response_tx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_mobike_peer_migrated, 0);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_mobike_unexpected_peer_dropped, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_informational_empty_rx, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 3);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
+
     const uint64_t delete_initiator_spi = 0x7766554433221100ull;
     test_send_ikev2_datagram_from(response_fd, port, delete_initiator_spi);
     usleep(10000);
@@ -7888,7 +7941,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     test_send_ikev2_encrypted_ike_auth_datagram_from(
         response_fd, natt_port, delete_initiator_spi, &sa_init_material, true,
         false, cert_der, cert_der_len);
-    for (int i = 0; i < 100 && cb_state.calls < 2; ++i)
+    for (int i = 0; i < 100 && cb_state.calls < 3; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
@@ -7913,7 +7966,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
 
     target_rx_sequence = supervisor.last_rx_sequence + 3;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           supervisor.next_tx_sequence++, 112);
+                           supervisor.next_tx_sequence++, 114);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -7925,10 +7978,10 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     assert_int_equal(supervisor.runtime_stats.ike_informational_delete_rx, 2);
     assert_int_equal(
         supervisor.runtime_stats.ike_informational_delete_response_tx, 2);
-    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 3);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 4);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
-    assert_int_equal(close_state.calls, 2);
+    assert_int_equal(close_state.calls, 3);
     assert_memory_equal(close_state.session_close.reason,
                         "IKE SA deleted by peer",
                         strlen("IKE SA deleted by peer"));

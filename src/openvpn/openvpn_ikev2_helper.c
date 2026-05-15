@@ -6257,8 +6257,15 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             }
                             sa->peer = old_peer;
                             sa->peer_len = old_peer_len;
+                            (void)ikev2_helper_send_session_close(
+                                ipc_fd, tx_sequence, sa,
+                                "MOBIKE migration unsupported");
+                            (void)ikev2_helper_clear_ike_sa(sa_table, sa,
+                                                            counters);
                             ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                             counters->ike_sa_active = sa_table->active;
+                            counters->ike_child_sa_scaffold_active =
+                                ikev2_helper_count_child_sa_scaffolds(sa_table);
                             return;
                         }
                         if (peer_update)
