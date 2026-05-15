@@ -4378,6 +4378,39 @@ test_provider_helper_spawn_noop(void **state)
 }
 
 static void
+test_provider_helper_restart_count_tracks_respawn(void **state)
+{
+    (void)state;
+
+#ifdef _WIN32
+    skip();
+#else
+    if (!noop_helper_path)
+    {
+        skip();
+    }
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+
+    char *const argv[] = { (char *)noop_helper_path, NULL };
+    assert_true(
+        provider_helper_supervisor_spawn(&supervisor, noop_helper_path, argv));
+    assert_true(supervisor.has_spawned);
+    assert_int_equal(supervisor.restart_count, 0);
+    provider_helper_supervisor_stop(&supervisor);
+
+    assert_true(
+        provider_helper_supervisor_spawn(&supervisor, noop_helper_path, argv));
+    assert_true(supervisor.has_spawned);
+    assert_int_equal(supervisor.restart_count, 1);
+    provider_helper_supervisor_stop(&supervisor);
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
+    assert_int_equal(supervisor.ipc_fd, -1);
+#endif
+}
+
+static void
 test_provider_helper_spawn_rejects_live_child_pid(void **state)
 {
     (void)state;
@@ -7147,6 +7180,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_start_timeout_fails_closed),
         cmocka_unit_test(test_provider_helper_preflight_timeout_fails_closed),
         cmocka_unit_test(test_provider_helper_spawn_noop),
+        cmocka_unit_test(test_provider_helper_restart_count_tracks_respawn),
         cmocka_unit_test(test_provider_helper_spawn_rejects_live_child_pid),
         cmocka_unit_test(
             test_provider_helper_spawn_closes_unlisted_child_fds),

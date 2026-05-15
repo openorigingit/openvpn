@@ -560,6 +560,7 @@ struct provider_helper_supervisor {
     struct provider_helper_runtime_config runtime_config;
     struct provider_helper_runtime_stats runtime_stats;
     unsigned int restart_count;
+    bool has_spawned;
     time_t last_state_change;
     uint8_t header_buf[PROVIDER_HELPER_IPC_HEADER_SIZE];
     size_t header_len;

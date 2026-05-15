@@ -831,6 +831,11 @@ provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
     close(fds[1]);
     set_cloexec(fds[0]);
     set_nonblock(fds[0]);
+    if (supervisor->has_spawned && supervisor->restart_count < UINT_MAX)
+    {
+        ++supervisor->restart_count;
+    }
+    supervisor->has_spawned = true;
     supervisor->ipc_fd = fds[0];
     supervisor->pid = pid;
     supervisor->last_rx_sequence = 0;
