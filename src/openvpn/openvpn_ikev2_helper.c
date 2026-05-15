@@ -6428,6 +6428,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     bool child_response_sent = false;
                     bool child_response_failed = false;
                     bool xfrm_apply_failed = false;
+                    bool sa_closed_fail_closed = false;
                     struct provider_helper_ikev2_child_sa_selection
                         child_selection;
                     struct provider_xfrm_ipv4_selector child_local_ts;
@@ -6548,6 +6549,13 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         if (rekey_request)
                         {
                             ++counters->ike_create_child_temp_failure_tx;
+                            (void)ikev2_helper_send_session_close(
+                                ipc_fd, tx_sequence, sa,
+                                "IKEv2 rekey unsupported");
+                            sa_closed_fail_closed =
+                                ikev2_helper_clear_ike_sa(sa_table, sa,
+                                                          counters);
+                            child_response_failed = !sa_closed_fail_closed;
                         }
                         else if (install_unsupported)
                         {
@@ -6594,6 +6602,13 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         if (rekey_request)
                         {
                             ++counters->ike_create_child_temp_failure_failed;
+                            (void)ikev2_helper_send_session_close(
+                                ipc_fd, tx_sequence, sa,
+                                "IKEv2 rekey unsupported");
+                            sa_closed_fail_closed =
+                                ikev2_helper_clear_ike_sa(sa_table, sa,
+                                                          counters);
+                            child_response_failed = !sa_closed_fail_closed;
                         }
                         else if (install_unsupported)
                         {
@@ -6619,6 +6634,14 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             ++counters
                                   ->ike_create_child_no_additional_sas_failed;
                         }
+                    }
+                    if (sa_closed_fail_closed || child_response_failed)
+                    {
+                        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                        counters->ike_sa_active = sa_table->active;
+                        counters->ike_child_sa_scaffold_active =
+                            ikev2_helper_count_child_sa_scaffolds(sa_table);
+                        return;
                     }
                     if (!child_response_failed)
                     {
