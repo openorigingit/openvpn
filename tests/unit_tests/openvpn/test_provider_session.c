@@ -307,7 +307,8 @@ test_provider_session_status_output(void **state)
     assert_non_null(strstr(capture.data, "HEADER,PROVIDER_SESSION"));
     assert_non_null(strstr(capture.data, "PROVIDER_SESSION,ikev2,1,alice@example.test"));
     assert_non_null(strstr(capture.data, ",10.88.0.2,10.88.0.1/32[tcp/443],55,66,"));
-    assert_non_null(strstr(capture.data, ",active,7,42"));
+    assert_non_null(strstr(capture.data,
+                           ",active,ike-established,installed,7,42"));
 
     provider_session_table_free(&table);
 }

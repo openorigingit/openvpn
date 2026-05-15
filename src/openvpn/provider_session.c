@@ -384,7 +384,8 @@ provider_session_print_status_v1(const struct provider_session_table *table,
     status_printf(so, "PROVIDER SESSION LIST");
     status_printf(so, "Provider,Management CID,Principal,Credential Fingerprint,"
                   "Assigned Address,Authorized Selectors,Bytes Received,Bytes Sent,"
-                  "Connected Since,State,Policy Revision,XFRM Lease ID");
+                  "Connected Since,State,Helper State,Child SA State,"
+                  "Policy Revision,XFRM Lease ID");
 
     for (const struct provider_session *session = table->head;
          session;
@@ -396,8 +397,8 @@ provider_session_print_status_v1(const struct provider_session_table *table,
         }
 
         struct gc_arena gc = gc_new();
-        status_printf(so, "%s,%lu,%s,%s,%s,%s,"
-                      counter_format "," counter_format ",%s,%s,%" PRIu64 ",%" PRIu64,
+        status_printf(so, "%s,%lu,%s,%s,%s,%s," counter_format ","
+                      counter_format ",%s,%s,%s,%s,%" PRIu64 ",%" PRIu64,
                       session->provider_name,
                       session->management_cid,
                       session->principal,
@@ -408,6 +409,8 @@ provider_session_print_status_v1(const struct provider_session_table *table,
                       session->bytes_sent,
                       time_string(session->created, 0, false, &gc),
                       provider_session_state_name(session->state),
+                      session->helper_state,
+                      session->child_sa_state,
                       session->policy_revision,
                       session->xfrm_lease_id);
         gc_free(&gc);
@@ -424,8 +427,9 @@ provider_session_print_status_v2(const struct provider_session_table *table,
     status_printf(so, "HEADER%cPROVIDER_SESSION%cProvider%cManagement CID%cPrincipal%c"
                   "Credential Fingerprint%cAssigned Address%cAuthorized Selectors%c"
                   "Bytes Received%cBytes Sent%cConnected Since%cState%c"
-                  "Policy Revision%cXFRM Lease ID",
-                  sep, sep, sep, sep, sep, sep, sep, sep, sep, sep, sep, sep, sep);
+                  "Helper State%cChild SA State%cPolicy Revision%cXFRM Lease ID",
+                  sep, sep, sep, sep, sep, sep, sep, sep, sep, sep, sep, sep, sep,
+                  sep, sep);
 
     for (const struct provider_session *session = table->head;
          session;
@@ -438,7 +442,8 @@ provider_session_print_status_v2(const struct provider_session_table *table,
 
         struct gc_arena gc = gc_new();
         status_printf(so, "PROVIDER_SESSION%c%s%c%lu%c%s%c%s%c%s%c%s%c"
-                      counter_format "%c" counter_format "%c%s%c%s%c%" PRIu64 "%c%" PRIu64,
+                      counter_format "%c" counter_format "%c%s%c%s%c%s%c%s%c%"
+                      PRIu64 "%c%" PRIu64,
                       sep,
                       session->provider_name,
                       sep,
@@ -459,6 +464,10 @@ provider_session_print_status_v2(const struct provider_session_table *table,
                       time_string(session->created, 0, false, &gc),
                       sep,
                       provider_session_state_name(session->state),
+                      sep,
+                      session->helper_state,
+                      sep,
+                      session->child_sa_state,
                       sep,
                       session->policy_revision,
                       sep,
