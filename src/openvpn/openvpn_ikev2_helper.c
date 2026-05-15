@@ -1405,7 +1405,7 @@ ikev2_helper_read_header(int fd, struct provider_helper_msg_header *header,
 
 static bool
 ikev2_helper_read_runtime_config(int fd, const struct provider_helper_msg_header *header,
-                                struct provider_helper_runtime_config *config)
+                                 struct provider_helper_runtime_config *config)
 {
     uint8_t payload[PROVIDER_HELPER_RUNTIME_CONFIG_SIZE];
     if (!header || header->payload_len != sizeof(payload)
@@ -1416,6 +1416,23 @@ ikev2_helper_read_runtime_config(int fd, const struct provider_helper_msg_header
 
     return provider_helper_ipc_decode_runtime_config(payload, sizeof(payload), config)
            && provider_helper_runtime_config_valid(config, NULL, 0);
+}
+
+static bool
+ikev2_helper_read_server_auth_config(
+    int fd,
+    const struct provider_helper_msg_header *header,
+    struct provider_helper_server_auth_config *config)
+{
+    uint8_t payload[PROVIDER_HELPER_SERVER_AUTH_CONFIG_SIZE];
+    if (!header || header->payload_len != sizeof(payload)
+        || !ikev2_helper_read_all(fd, payload, sizeof(payload)))
+    {
+        return false;
+    }
+
+    return provider_helper_ipc_decode_server_auth_config(
+        payload, sizeof(payload), config);
 }
 
 static bool
@@ -6986,6 +7003,22 @@ ikev2_helper_loop(int fd)
                 }
                 configured = true;
                 break;
+
+            case PROVIDER_HELPER_MSG_SERVER_AUTH_CONFIG:
+            {
+                struct provider_helper_server_auth_config server_auth_config;
+                if (!configured
+                    || !ikev2_helper_read_server_auth_config(
+                        fd, &header, &server_auth_config)
+                    || !ikev2_helper_send_header(
+                        fd, PROVIDER_HELPER_MSG_SERVER_AUTH_CONFIG_ACK,
+                        tx_sequence++, header.sequence))
+                {
+                    ret = 6;
+                    goto done;
+                }
+                break;
+            }
 
             case PROVIDER_HELPER_MSG_LISTENER_FD:
             {

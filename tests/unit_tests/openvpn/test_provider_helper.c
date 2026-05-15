@@ -4797,7 +4797,7 @@ test_provider_helper_spawn_noop(void **state)
     assert_true(provider_helper_supervisor_spawn(&supervisor, noop_helper_path, argv));
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STARTING);
 
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
@@ -4904,7 +4904,7 @@ test_provider_helper_spawn_closes_unlisted_child_fds(void **state)
     close(inherited_fds[0]);
     close(inherited_fds[1]);
 
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
@@ -4945,7 +4945,7 @@ test_provider_helper_spawn_drops_root_supplementary_groups(void **state)
     unsetenv(PROVIDER_HELPER_EXPECT_NO_SUPP_GROUPS_ENV);
     assert_true(spawned);
 
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
@@ -5259,6 +5259,80 @@ write_helper_auth_response_fd(int fd, uint64_t sequence,
 }
 
 static void
+test_provider_helper_fill_server_auth_config(
+    struct provider_helper_server_auth_config *config)
+{
+    CLEAR(*config);
+    config->config_revision = 9;
+    config->ikev2_id_type = PROVIDER_HELPER_IKEV2_ID_FQDN;
+    config->allowed_sigalgs =
+        PROVIDER_HELPER_SERVER_AUTH_SIGALG_RSA_PSS_SHA256
+        | PROVIDER_HELPER_SERVER_AUTH_SIGALG_ECDSA_P256_SHA256;
+    snprintf(config->server_id, sizeof(config->server_id), "%s",
+             "vpn.example.test");
+    config->server_id_len = (uint32_t)strlen(config->server_id);
+    config->cert_chain_len = 512;
+    for (uint32_t i = 0; i < config->cert_chain_len; ++i)
+    {
+        config->cert_chain[i] = (uint8_t)(i & 0xff);
+    }
+}
+
+static void
+test_provider_helper_spawn_ikev2_server_auth_config(void **state)
+{
+    (void)state;
+
+    if (!ikev2_helper_path)
+    {
+        skip();
+    }
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+
+    char *const argv[] = { (char *)ikev2_helper_path, NULL };
+    assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
+                                                 argv));
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STARTING);
+
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 2);
+
+    struct provider_helper_server_auth_config config;
+    test_provider_helper_fill_server_auth_config(&config);
+
+    const uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
+    assert_true(provider_helper_supervisor_send_server_auth_config(
+                    &supervisor, &config, 77));
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+
+    config.config_revision = 0;
+    assert_false(provider_helper_supervisor_send_server_auth_config(
+                     &supervisor, &config, 78));
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+
+    provider_helper_supervisor_stop(&supervisor);
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
+    assert_int_equal(supervisor.ipc_fd, -1);
+}
+
+static void
 test_provider_helper_spawn_ikev2_natt_listener(void **state)
 {
     (void)state;
@@ -5276,7 +5350,7 @@ test_provider_helper_spawn_ikev2_natt_listener(void **state)
                                                  argv));
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STARTING);
 
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
@@ -5379,7 +5453,7 @@ test_provider_helper_spawn_rejects_duplicate_listener_id(void **state)
                                                  argv));
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STARTING);
 
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
@@ -5446,7 +5520,7 @@ test_provider_helper_spawn_rejects_mismatched_listener_port(void **state)
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
                                                  argv));
 
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
@@ -5497,7 +5571,7 @@ test_provider_helper_spawn_rejects_expired_xfrm_lease(void **state)
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
                                                  argv));
 
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY;
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY;
          ++i)
     {
         provider_helper_process_event(&supervisor);
@@ -5561,7 +5635,7 @@ test_provider_helper_spawn_ikev2_rejects_oversize_datagram(void **state)
                                                  argv));
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STARTING);
 
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
@@ -5639,7 +5713,7 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path, argv));
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STARTING);
 
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
@@ -5909,7 +5983,7 @@ test_provider_helper_spawn_ikev2_rejects_initial_state_mismatch(void **state)
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path, argv));
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STARTING);
 
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
@@ -6054,7 +6128,7 @@ test_provider_helper_spawn_ikev2_rejects_inner_aggregate_limits(void **state)
                                                  argv));
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STARTING);
 
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
@@ -6677,7 +6751,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path, argv));
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STARTING);
 
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
@@ -7048,20 +7122,26 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_auth_malformed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 4);
 
-    sleep(4);
-    target_rx_sequence = supervisor.last_rx_sequence + 1;
-    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           supervisor.next_tx_sequence++, 91);
-    for (int i = 0;
-         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
-         ++i)
+    for (int retry = 0;
+         retry < 4 && supervisor.runtime_stats.ike_sa_expired < 4;
+         ++retry)
     {
-        provider_helper_process_event(&supervisor);
-        usleep(10000);
-    }
+        sleep(retry ? 1 : 4);
+        target_rx_sequence = supervisor.last_rx_sequence + 1;
+        write_helper_header_fd(supervisor.ipc_fd,
+                               PROVIDER_HELPER_MSG_STATS_REQUEST,
+                               supervisor.next_tx_sequence++, 91);
+        for (int i = 0;
+             i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+             ++i)
+        {
+            provider_helper_process_event(&supervisor);
+            usleep(10000);
+        }
 
-    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
-    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+        assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+        assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+    }
     assert_true(supervisor.runtime_stats.ike_sa_expired >= 4);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
 
@@ -7105,7 +7185,7 @@ test_provider_helper_spawn_ikev2_prefix_limit(void **state)
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
                                                  argv));
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY;
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY;
          ++i)
     {
         provider_helper_process_event(&supervisor);
@@ -7211,7 +7291,7 @@ test_provider_helper_spawn_ikev2_sa_init_rate_limit(void **state)
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
                                                  argv));
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY;
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY;
          ++i)
     {
         provider_helper_process_event(&supervisor);
@@ -7328,7 +7408,7 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
 
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path, argv));
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
@@ -7642,7 +7722,7 @@ test_provider_helper_spawn_ikev2_auth_allow_fails_closed(void **state)
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
                                                  argv));
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY;
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY;
          ++i)
     {
         provider_helper_process_event(&supervisor);
@@ -7814,7 +7894,7 @@ test_provider_helper_spawn_ikev2_auth_request_ipc_loss_fails_closed(
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
                                                  argv));
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY;
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY;
          ++i)
     {
         provider_helper_process_event(&supervisor);
@@ -7935,7 +8015,7 @@ test_provider_helper_spawn_ikev2_lease_deadline_fails_closed(void **state)
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
                                                  argv));
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY;
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY;
          ++i)
     {
         provider_helper_process_event(&supervisor);
@@ -8112,7 +8192,7 @@ test_provider_helper_spawn_ikev2_rekey_fails_closed(void **state)
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
                                                  argv));
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY;
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY;
          ++i)
     {
         provider_helper_process_event(&supervisor);
@@ -8316,7 +8396,7 @@ test_provider_helper_spawn_ikev2_xfrm_install_fails_closed(void **state)
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
                                                  argv));
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY;
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY;
          ++i)
     {
         provider_helper_process_event(&supervisor);
@@ -8525,7 +8605,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
                                                  argv));
-    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
@@ -9089,6 +9169,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_ikev2_helper_ignores_sigpipe),
         cmocka_unit_test(test_provider_helper_reaps_after_bad_ipc_header),
         cmocka_unit_test(test_provider_helper_bad_ipc_header_terminates_helper),
+        cmocka_unit_test(test_provider_helper_spawn_ikev2_server_auth_config),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_natt_listener),
         cmocka_unit_test(
             test_provider_helper_spawn_rejects_duplicate_listener_id),

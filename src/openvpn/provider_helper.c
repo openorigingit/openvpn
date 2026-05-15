@@ -610,6 +610,46 @@ provider_helper_supervisor_send_config(struct provider_helper_supervisor *superv
     return written;
 }
 
+bool
+provider_helper_supervisor_send_server_auth_config(
+    struct provider_helper_supervisor *supervisor,
+    const struct provider_helper_server_auth_config *config,
+    uint64_t correlation_id)
+{
+    if (!supervisor || supervisor->ipc_fd < 0 || !config
+        || supervisor->state != PROVIDER_HELPER_STATE_READY
+        || !provider_helper_server_auth_config_valid(config, NULL, 0))
+    {
+        return false;
+    }
+
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE
+                                  + PROVIDER_HELPER_SERVER_AUTH_CONFIG_SIZE);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_SERVER_AUTH_CONFIG,
+        .sequence = supervisor->next_tx_sequence++,
+        .correlation_id = correlation_id,
+        .payload_len = PROVIDER_HELPER_SERVER_AUTH_CONFIG_SIZE,
+    };
+
+    const bool encoded =
+        provider_helper_ipc_write_header(&buf, &header)
+        && provider_helper_ipc_write_server_auth_config(&buf, config);
+    const bool written = encoded
+                         && provider_helper_write_all(supervisor->ipc_fd, BPTR(&buf),
+                                                      (size_t)BLEN(&buf));
+    free_buf(&buf);
+    if (!written)
+    {
+        provider_helper_supervisor_fail_ipc(supervisor,
+                                            PROVIDER_HELPER_STATE_DEGRADED);
+    }
+    return written;
+}
+
 static bool
 provider_helper_supervisor_process_hello(
     struct provider_helper_supervisor *supervisor,
@@ -1488,6 +1528,7 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
             break;
 
         case PROVIDER_HELPER_MSG_LISTENER_FD_ACK:
+        case PROVIDER_HELPER_MSG_SERVER_AUTH_CONFIG_ACK:
         case PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL_ACK:
         case PROVIDER_HELPER_MSG_XFRM_LEASE_DELETE_ACK:
             if (supervisor->state != PROVIDER_HELPER_STATE_READY)

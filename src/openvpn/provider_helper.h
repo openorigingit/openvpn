@@ -1036,6 +1036,10 @@ bool provider_helper_supervisor_send_xfrm_lease_delete(
     const struct provider_helper_xfrm_lease *lease,
     uint64_t correlation_id);
 #endif
+bool provider_helper_supervisor_send_server_auth_config(
+    struct provider_helper_supervisor *supervisor,
+    const struct provider_helper_server_auth_config *config,
+    uint64_t correlation_id);
 bool provider_helper_supervisor_send_stats_request(
     struct provider_helper_supervisor *supervisor,
     uint64_t correlation_id);
