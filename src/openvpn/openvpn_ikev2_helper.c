@@ -230,6 +230,7 @@ struct ikev2_helper_ike_sa {
     uint64_t pending_server_sign_request_id;
     uint64_t server_sign_config_revision;
     uint32_t server_sign_sigalg;
+    uint32_t server_sign_purpose;
     uint64_t pending_auth_request_id;
     bool auth_authorized;
     uint64_t provider_session_id;
@@ -6313,7 +6314,8 @@ ikev2_helper_queue_server_sign_request(
     uint64_t *next_server_sign_request_id,
     const struct ikev2_helper_listener *listener,
     struct ikev2_helper_ike_sa *sa,
-    const struct provider_helper_server_auth_config *server_auth_config)
+    const struct provider_helper_server_auth_config *server_auth_config,
+    uint32_t purpose)
 {
     if (ipc_fd < 0 || !tx_sequence || !next_server_sign_request_id || !listener
         || !sa || !sa->active || !server_auth_config
@@ -6346,7 +6348,7 @@ ikev2_helper_queue_server_sign_request(
     request.sigalg = ikev2_helper_select_server_sign_sigalg(
         server_auth_config->allowed_sigalgs);
     request.transcript_len = (uint32_t)transcript_len;
-    request.purpose = PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH;
+    request.purpose = purpose;
     memcpy(request.transcript, transcript, transcript_len);
     ikev2_helper_secure_zero(transcript, sizeof(transcript));
 
@@ -6366,6 +6368,7 @@ ikev2_helper_queue_server_sign_request(
     sa->pending_server_sign_request_id = request.request_id;
     sa->server_sign_config_revision = request.config_revision;
     sa->server_sign_sigalg = request.sigalg;
+    sa->server_sign_purpose = request.purpose;
     ikev2_helper_secure_zero(&request, sizeof(request));
     return true;
 }
@@ -6431,7 +6434,9 @@ ikev2_helper_apply_server_sign_response(
         if (!listener || response->status != PROVIDER_HELPER_SERVER_SIGN_OK
             || response->config_revision != sa->server_sign_config_revision
             || response->sigalg != sa->server_sign_sigalg
-            || !response->signature_len)
+            || !response->signature_len
+            || sa->server_sign_purpose
+                   != PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH)
         {
             if (listener)
             {
@@ -6446,6 +6451,7 @@ ikev2_helper_apply_server_sign_response(
         sa->pending_server_sign_request_id = 0;
         sa->server_sign_config_revision = 0;
         sa->server_sign_sigalg = 0;
+        sa->server_sign_purpose = 0;
         if (!ikev2_helper_send_cached_server_auth_response(
                 listener, sa, server_auth_config, response))
         {
@@ -7642,7 +7648,8 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
 
             if (ikev2_helper_queue_server_sign_request(
                     ipc_fd, tx_sequence, next_server_sign_request_id,
-                    listener, sa, server_auth_config))
+                    listener, sa, server_auth_config,
+                    PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH))
             {
                 ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
             }
