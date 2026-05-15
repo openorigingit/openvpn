@@ -5279,6 +5279,28 @@ test_provider_helper_fill_server_auth_config(
 }
 
 static void
+test_provider_helper_send_server_auth_config(
+    struct provider_helper_supervisor *supervisor)
+{
+    struct provider_helper_server_auth_config config;
+    test_provider_helper_fill_server_auth_config(&config);
+
+    const uint64_t target_rx_sequence = supervisor->last_rx_sequence + 1;
+    assert_true(provider_helper_supervisor_send_server_auth_config(
+                    supervisor, &config, 77));
+    for (int i = 0;
+         i < 100 && supervisor->last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor->state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor->last_rx_sequence, target_rx_sequence);
+}
+
+static void
 test_provider_helper_spawn_ikev2_server_auth_config(void **state)
 {
     (void)state;
@@ -6857,6 +6879,8 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 7);
 
+    test_provider_helper_send_server_auth_config(&supervisor);
+
     int response_fd = test_create_udp_sender(0x7f000004u);
     test_send_ikev2_datagram_from(response_fd, port, 0xfeedfacecafebeefull);
     usleep(10000);
@@ -7456,6 +7480,8 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 4);
 
+    test_provider_helper_send_server_auth_config(&supervisor);
+
     uint8_t cert_der[2048];
     size_t cert_der_len = 0;
     test_make_der_certificate(cert_der, sizeof(cert_der), &cert_der_len);
@@ -7772,6 +7798,8 @@ test_provider_helper_spawn_ikev2_auth_allow_fails_closed(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 4);
 
+    test_provider_helper_send_server_auth_config(&supervisor);
+
     const struct provider_helper_xfrm_lease xfrm_lease = {
         .lease_id = 202,
         .provider_session_id = 101,
@@ -7941,6 +7969,8 @@ test_provider_helper_spawn_ikev2_auth_request_ipc_loss_fails_closed(
     }
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
 
+    test_provider_helper_send_server_auth_config(&supervisor);
+
     uint8_t cert_der[2048];
     size_t cert_der_len = 0;
     test_make_der_certificate(cert_der, sizeof(cert_der), &cert_der_len);
@@ -8062,6 +8092,8 @@ test_provider_helper_spawn_ikev2_lease_deadline_fails_closed(void **state)
         usleep(10000);
     }
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+
+    test_provider_helper_send_server_auth_config(&supervisor);
 
     const uint64_t now = (uint64_t)time(NULL);
     const struct provider_helper_xfrm_lease xfrm_lease = {
@@ -8241,6 +8273,8 @@ test_provider_helper_spawn_ikev2_rekey_fails_closed(void **state)
     }
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 4);
+
+    test_provider_helper_send_server_auth_config(&supervisor);
 
     const struct provider_helper_xfrm_lease xfrm_lease = {
         .lease_id = 202,
@@ -8445,6 +8479,8 @@ test_provider_helper_spawn_ikev2_xfrm_install_fails_closed(void **state)
     }
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 4);
+
+    test_provider_helper_send_server_auth_config(&supervisor);
 
     const struct provider_helper_xfrm_lease xfrm_lease = {
         .lease_id = 202,

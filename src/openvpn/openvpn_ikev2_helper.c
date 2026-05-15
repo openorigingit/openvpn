@@ -5776,6 +5776,8 @@ ikev2_helper_ike_auth_listener_allowed(
 static void
 ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                              const struct provider_helper_runtime_config *config,
+                             bool server_auth_configured,
+                             const struct provider_helper_server_auth_config *server_auth_config,
                              struct ikev2_helper_ike_sa_table *sa_table,
                              struct ikev2_helper_sa_init_rate_state *rate_state,
                              struct provider_helper_runtime_stats *counters,
@@ -6194,6 +6196,27 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 ++counters->ike_auth_cert_extracted;
             }
             ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+
+            if (!server_auth_configured
+                || !provider_helper_server_auth_config_valid(
+                    server_auth_config, NULL, 0))
+            {
+                ++counters->ike_auth_unsupported;
+                if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
+                        listener, sa, PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+                        header.message_id,
+                        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
+                {
+                    ++counters->ike_auth_unsupported_response_tx;
+                }
+                else
+                {
+                    ++counters->ike_auth_unsupported_response_failed;
+                }
+                ikev2_helper_clear_ike_sa(sa_table, sa, counters);
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
 
             if (ikev2_helper_queue_auth_request(ipc_fd, tx_sequence,
                                                 next_auth_request_id, listener,
@@ -6874,11 +6897,14 @@ ikev2_helper_loop(int fd)
     struct ikev2_helper_sa_init_rate_state sa_init_rate_state;
     struct ikev2_helper_cookie_context cookie_ctx;
     struct provider_helper_runtime_config config;
+    bool server_auth_configured = false;
+    struct provider_helper_server_auth_config server_auth_config;
     provider_helper_runtime_config_default(&config);
     CLEAR(counters);
     CLEAR(sa_table);
     CLEAR(sa_init_rate_state);
     CLEAR(listeners);
+    CLEAR(server_auth_config);
     for (size_t i = 0; i < SIZE(listeners); ++i)
     {
         listeners[i].fd = -1;
@@ -6956,6 +6982,8 @@ ikev2_helper_loop(int fd)
                 for (uint32_t j = 0; j < drain_budget; ++j)
                 {
                     ikev2_helper_handle_datagram(&listeners[i - 1], &config,
+                                                 server_auth_configured,
+                                                 &server_auth_config,
                                                  &sa_table,
                                                  &sa_init_rate_state,
                                                  &counters, &cookie_ctx, fd,
@@ -7006,10 +7034,10 @@ ikev2_helper_loop(int fd)
 
             case PROVIDER_HELPER_MSG_SERVER_AUTH_CONFIG:
             {
-                struct provider_helper_server_auth_config server_auth_config;
+                struct provider_helper_server_auth_config new_config;
                 if (!configured
                     || !ikev2_helper_read_server_auth_config(
-                        fd, &header, &server_auth_config)
+                        fd, &header, &new_config)
                     || !ikev2_helper_send_header(
                         fd, PROVIDER_HELPER_MSG_SERVER_AUTH_CONFIG_ACK,
                         tx_sequence++, header.sequence))
@@ -7017,6 +7045,8 @@ ikev2_helper_loop(int fd)
                     ret = 6;
                     goto done;
                 }
+                server_auth_config = new_config;
+                server_auth_configured = true;
                 break;
             }
 
@@ -7224,6 +7254,7 @@ done:
         ret = 10;
     }
     ikev2_helper_cookie_context_free(&cookie_ctx);
+    ikev2_helper_secure_zero(&server_auth_config, sizeof(server_auth_config));
 
     return ret;
 }
