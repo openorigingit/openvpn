@@ -45,6 +45,8 @@ static const char *ikev2_helper_path;
 
 #define PROVIDER_HELPER_EXPECT_CLOSED_FD_ENV \
     "OPENVPN_PROVIDER_HELPER_EXPECT_CLOSED_FD"
+#define PROVIDER_HELPER_EXPECT_NO_SUPP_GROUPS_ENV \
+    "OPENVPN_PROVIDER_HELPER_EXPECT_NO_SUPP_GROUPS"
 
 static const char *find_executable(const char *const *paths);
 
@@ -4426,6 +4428,48 @@ test_provider_helper_spawn_closes_unlisted_child_fds(void **state)
 }
 
 static void
+test_provider_helper_spawn_drops_root_supplementary_groups(void **state)
+{
+    (void)state;
+
+#ifdef _WIN32
+    skip();
+#else
+#if !defined(HAVE_SETGROUPS)
+    skip();
+#else
+    if (!noop_helper_path || geteuid() != 0 || getgroups(0, NULL) <= 0)
+    {
+        skip();
+    }
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+
+    assert_int_equal(setenv(PROVIDER_HELPER_EXPECT_NO_SUPP_GROUPS_ENV, "1", 1),
+                     0);
+    char *const argv[] = { (char *)noop_helper_path, NULL };
+    const bool spawned =
+        provider_helper_supervisor_spawn(&supervisor, noop_helper_path, argv);
+    unsetenv(PROVIDER_HELPER_EXPECT_NO_SUPP_GROUPS_ENV);
+    assert_true(spawned);
+
+    for (int i = 0; i < 100 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_true(supervisor.pid > 0);
+    provider_helper_supervisor_stop(&supervisor);
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
+    assert_int_equal(supervisor.ipc_fd, -1);
+#endif
+#endif
+}
+
+static void
 test_provider_helper_spawn_rejects_invalid_runtime_config(void **state)
 {
     (void)state;
@@ -7081,6 +7125,8 @@ main(void)
         cmocka_unit_test(test_provider_helper_spawn_rejects_live_child_pid),
         cmocka_unit_test(
             test_provider_helper_spawn_closes_unlisted_child_fds),
+        cmocka_unit_test(
+            test_provider_helper_spawn_drops_root_supplementary_groups),
         cmocka_unit_test(test_provider_helper_spawn_rejects_invalid_runtime_config),
         cmocka_unit_test(test_provider_helper_reaps_early_helper_exit),
         cmocka_unit_test(test_provider_helper_reaps_after_bad_ipc_header),

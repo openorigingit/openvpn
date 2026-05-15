@@ -22,6 +22,8 @@
 
 #define PROVIDER_HELPER_EXPECT_CLOSED_FD_ENV \
     "OPENVPN_PROVIDER_HELPER_EXPECT_CLOSED_FD"
+#define PROVIDER_HELPER_EXPECT_NO_SUPP_GROUPS_ENV \
+    "OPENVPN_PROVIDER_HELPER_EXPECT_NO_SUPP_GROUPS"
 
 static bool
 noop_write_header(int fd, uint32_t type, uint64_t sequence, uint64_t correlation_id)
@@ -95,6 +97,18 @@ main(void)
         {
             return 11;
         }
+    }
+
+    if (getenv(PROVIDER_HELPER_EXPECT_NO_SUPP_GROUPS_ENV))
+    {
+#if defined(HAVE_SETGROUPS)
+        if (getgroups(0, NULL) != 0)
+        {
+            return 12;
+        }
+#else
+        return 12;
+#endif
     }
 
     if (!noop_write_header(fd, PROVIDER_HELPER_MSG_HELLO, 1, 1))

@@ -144,6 +144,18 @@ provider_helper_supervisor_try_reap_child(struct provider_helper_supervisor *sup
     }
 }
 
+static bool
+provider_helper_child_drop_supplementary_groups(void)
+{
+#if defined(HAVE_SETGROUPS)
+    if (geteuid() == 0 && setgroups(0, NULL) != 0)
+    {
+        return false;
+    }
+#endif
+    return true;
+}
+
 static void
 provider_helper_child_close_fds_except(int keep)
 {
@@ -776,6 +788,10 @@ provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
         char fd_env[16];
         snprintf(fd_env, sizeof(fd_env), "%d", PROVIDER_HELPER_CHILD_FD);
         setenv(PROVIDER_HELPER_FD_ENV, fd_env, 1);
+        if (!provider_helper_child_drop_supplementary_groups())
+        {
+            _exit(126);
+        }
         provider_helper_child_close_fds_except(PROVIDER_HELPER_CHILD_FD);
         execv(path, argv);
         _exit(127);
