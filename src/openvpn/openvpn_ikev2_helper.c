@@ -4183,6 +4183,24 @@ ikev2_helper_add_ike_sa(struct ikev2_helper_ike_sa_table *table,
 }
 
 static bool
+ikev2_helper_zero_ike_sa(struct ikev2_helper_ike_sa_table *table,
+                         struct ikev2_helper_ike_sa *sa)
+{
+    if (!table || !sa || !sa->active)
+    {
+        return true;
+    }
+
+    const bool decrement_active = table->active > 0;
+    ikev2_helper_secure_zero(sa, sizeof(*sa));
+    if (decrement_active)
+    {
+        --table->active;
+    }
+    return true;
+}
+
+static bool
 ikev2_helper_clear_ike_sa(struct ikev2_helper_ike_sa_table *table,
                           struct ikev2_helper_ike_sa *sa,
                           struct provider_helper_runtime_stats *counters)
@@ -4192,17 +4210,33 @@ ikev2_helper_clear_ike_sa(struct ikev2_helper_ike_sa_table *table,
         return true;
     }
 
-    const bool decrement_active = table->active > 0;
     if (!ikev2_helper_delete_child_sa_xfrm(&sa->child_sa, counters))
     {
         return false;
     }
-    ikev2_helper_secure_zero(sa, sizeof(*sa));
-    if (decrement_active)
+    return ikev2_helper_zero_ike_sa(table, sa);
+}
+
+static bool
+ikev2_helper_clear_ike_sa_with_session_close(
+    struct ikev2_helper_ike_sa_table *table,
+    struct ikev2_helper_ike_sa *sa,
+    struct provider_helper_runtime_stats *counters,
+    int ipc_fd,
+    uint64_t *tx_sequence,
+    const char *reason)
+{
+    if (!table || !sa || !sa->active)
     {
-        --table->active;
+        return true;
     }
-    return true;
+
+    if (!ikev2_helper_delete_child_sa_xfrm(&sa->child_sa, counters)
+        || !ikev2_helper_send_session_close(ipc_fd, tx_sequence, sa, reason))
+    {
+        return false;
+    }
+    return ikev2_helper_zero_ike_sa(table, sa);
 }
 
 static const struct ikev2_helper_listener *
@@ -4527,7 +4561,10 @@ ikev2_helper_clear_ike_sas_for_xfrm_lease(
     struct ikev2_helper_ike_sa_table *table,
     const struct provider_helper_xfrm_lease *lease,
     struct provider_helper_runtime_stats *counters,
-    uint32_t *cleared)
+    uint32_t *cleared,
+    int ipc_fd,
+    uint64_t *tx_sequence,
+    const char *reason)
 {
     if (cleared)
     {
@@ -4543,7 +4580,8 @@ ikev2_helper_clear_ike_sas_for_xfrm_lease(
         struct ikev2_helper_ike_sa *sa = &table->entries[i];
         if (ikev2_helper_ike_sa_uses_xfrm_lease(sa, lease))
         {
-            if (ikev2_helper_clear_ike_sa(table, sa, counters))
+            if (ikev2_helper_clear_ike_sa_with_session_close(
+                    table, sa, counters, ipc_fd, tx_sequence, reason))
             {
                 if (cleared)
                 {
@@ -6782,7 +6820,8 @@ ikev2_helper_loop(int fd)
                     || (replaced
                         && !ikev2_helper_clear_ike_sas_for_xfrm_lease(
                             &sa_table, &replaced_lease, &counters,
-                            &revoked))
+                            &revoked, fd, &tx_sequence,
+                            "XFRM lease replaced"))
                     || (replaced
                         && !ikev2_helper_commit_xfrm_lease_replacement(
                             xfrm_leases, xfrm_lease_count, replace_index,
@@ -6819,7 +6858,8 @@ ikev2_helper_loop(int fd)
                     || !ikev2_helper_read_xfrm_lease(fd, &header, &config,
                                                      &lease)
                     || !ikev2_helper_clear_ike_sas_for_xfrm_lease(
-                        &sa_table, &lease, &counters, &revoked)
+                        &sa_table, &lease, &counters, &revoked, fd,
+                        &tx_sequence, "XFRM lease deleted")
                     || !ikev2_helper_delete_xfrm_lease(
                         xfrm_leases, &xfrm_lease_count, &lease, &deleted)
                     || !ikev2_helper_send_header(

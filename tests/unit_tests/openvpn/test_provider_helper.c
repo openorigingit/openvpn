@@ -6817,6 +6817,10 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     cb_state.allow = true;
     provider_helper_supervisor_set_auth_callback(
         &supervisor, test_provider_helper_auth_cb, &cb_state);
+    struct test_provider_helper_session_close_cb_state close_state;
+    CLEAR(close_state);
+    provider_helper_supervisor_set_session_close_callback(
+        &supervisor, test_provider_helper_session_close_cb, &close_state);
 
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path, argv));
@@ -7055,7 +7059,7 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
     assert_true(supervisor.runtime_stats.ike_sa_expired >= 1);
 
-    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    target_rx_sequence = supervisor.last_rx_sequence + 2;
     assert_true(provider_helper_supervisor_send_xfrm_lease_delete(
                     &supervisor, &xfrm_lease, 102));
     for (int i = 0;
@@ -7067,6 +7071,13 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     }
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+    assert_int_equal(close_state.calls, 1);
+    assert_int_equal(close_state.session_close.provider_session_id, 101);
+    assert_int_equal(close_state.session_close.xfrm_lease_id, 202);
+    assert_int_equal(close_state.session_close.policy_revision, 303);
+    assert_memory_equal(close_state.session_close.reason,
+                        "XFRM lease deleted",
+                        strlen("XFRM lease deleted"));
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
@@ -7119,6 +7130,10 @@ test_provider_helper_spawn_ikev2_auth_allow_fails_closed(void **state)
     cb_state.allow = true;
     provider_helper_supervisor_set_auth_callback(
         &supervisor, test_provider_helper_auth_cb, &cb_state);
+    struct test_provider_helper_session_close_cb_state close_state;
+    CLEAR(close_state);
+    provider_helper_supervisor_set_session_close_callback(
+        &supervisor, test_provider_helper_session_close_cb, &close_state);
 
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
@@ -7257,6 +7272,7 @@ test_provider_helper_spawn_ikev2_auth_allow_fails_closed(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
     assert_int_equal(supervisor.runtime_stats.xfrm_leases_active, 1);
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_installed, 1);
+    assert_int_equal(close_state.calls, 0);
 
     close(response_fd);
     close(listener_fd);
@@ -7314,6 +7330,10 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     cb_state.allow = true;
     provider_helper_supervisor_set_auth_callback(
         &supervisor, test_provider_helper_auth_cb, &cb_state);
+    struct test_provider_helper_session_close_cb_state close_state;
+    CLEAR(close_state);
+    provider_helper_supervisor_set_session_close_callback(
+        &supervisor, test_provider_helper_session_close_cb, &close_state);
 
     char *const argv[] = { (char *)ikev2_helper_path, NULL };
     assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
@@ -7581,7 +7601,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
 
     struct provider_helper_xfrm_lease replaced_xfrm_lease = xfrm_lease;
     replaced_xfrm_lease.policy_revision = xfrm_lease.policy_revision + 1;
-    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    target_rx_sequence = supervisor.last_rx_sequence + 2;
     assert_true(provider_helper_supervisor_send_xfrm_lease(
                     &supervisor, &replaced_xfrm_lease, 107));
     for (int i = 0;
@@ -7592,6 +7612,13 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
         usleep(10000);
     }
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(close_state.calls, 1);
+    assert_int_equal(close_state.session_close.provider_session_id, 101);
+    assert_int_equal(close_state.session_close.xfrm_lease_id, 202);
+    assert_int_equal(close_state.session_close.policy_revision, 303);
+    assert_memory_equal(close_state.session_close.reason,
+                        "XFRM lease replaced",
+                        strlen("XFRM lease replaced"));
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
@@ -7698,6 +7725,10 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 3);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
+    assert_int_equal(close_state.calls, 2);
+    assert_memory_equal(close_state.session_close.reason,
+                        "IKE SA deleted by peer",
+                        strlen("IKE SA deleted by peer"));
 
     close(response_fd);
     close(migrated_fd);
