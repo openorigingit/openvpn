@@ -96,16 +96,20 @@
 #define IKEV2_HELPER_EAP_CODE_SUCCESS 3
 #define IKEV2_HELPER_EAP_CODE_FAILURE 4
 #define IKEV2_HELPER_EAP_TYPE_TLS 13
+#define IKEV2_HELPER_EAP_TLS_FLAG_START 0x20
 #define IKEV2_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED 0x80
 #define IKEV2_HELPER_EAP_TLS_FLAGS_ALLOWED \
     IKEV2_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED
+#define IKEV2_HELPER_EAP_TLS_START_REQUEST_ID 1
 #define IKEV2_HELPER_RATE_BUCKETS 64
 #define IKEV2_HELPER_POLL_TIMEOUT_MS 1000
 #define IKEV2_HELPER_IKE_SA_INIT_MESSAGE_ID 0
 #define IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID 1
 #define IKEV2_HELPER_IKE_SA_INIT_TRANSCRIPT_BYTES \
     PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE
-#define IKEV2_HELPER_PROTECTED_RESPONSE_CACHE_BYTES 2048
+#define IKEV2_HELPER_PROTECTED_RESPONSE_CACHE_BYTES \
+    (PROVIDER_HELPER_SERVER_AUTH_CERT_CHAIN_SIZE \
+     + PROVIDER_HELPER_SERVER_AUTH_SIGNATURE_SIZE + 1024)
 #ifdef MSG_DONTWAIT
 #define IKEV2_HELPER_RECV_FLAGS MSG_DONTWAIT
 #define IKEV2_HELPER_CAN_DRAIN_LISTENER 1
@@ -5459,6 +5463,189 @@ ikev2_helper_build_responder_signed_octets(
     return ret;
 }
 
+static const uint8_t ikev2_helper_algid_rsa_pss_sha256[] = {
+    0x30, 0x41, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d,
+    0x01, 0x01, 0x0a, 0x30, 0x34, 0xa0, 0x0f, 0x30, 0x0d, 0x06,
+    0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+    0x05, 0x00, 0xa1, 0x1c, 0x30, 0x1a, 0x06, 0x09, 0x2a, 0x86,
+    0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x08, 0x30, 0x0d, 0x06,
+    0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+    0x05, 0x00, 0xa2, 0x03, 0x02, 0x01, 0x20,
+};
+
+static const uint8_t ikev2_helper_algid_ecdsa_sha256[] = {
+    0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86,
+    0x48, 0xce, 0x3d, 0x04, 0x03, 0x02,
+};
+
+static bool
+ikev2_helper_server_sigalg_algid(uint32_t sigalg,
+                                 const uint8_t **algid,
+                                 size_t *algid_len)
+{
+    if (!algid || !algid_len)
+    {
+        return false;
+    }
+    *algid = NULL;
+    *algid_len = 0;
+
+    switch (sigalg)
+    {
+        case PROVIDER_HELPER_SERVER_AUTH_SIGALG_RSA_PSS_SHA256:
+            *algid = ikev2_helper_algid_rsa_pss_sha256;
+            *algid_len = sizeof(ikev2_helper_algid_rsa_pss_sha256);
+            return true;
+
+        case PROVIDER_HELPER_SERVER_AUTH_SIGALG_ECDSA_P256_SHA256:
+            *algid = ikev2_helper_algid_ecdsa_sha256;
+            *algid_len = sizeof(ikev2_helper_algid_ecdsa_sha256);
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+static bool
+ikev2_helper_build_server_auth_plaintext(
+    const struct provider_helper_server_auth_config *server_auth_config,
+    const struct provider_helper_server_sign_response *sign_response,
+    uint8_t *plaintext,
+    size_t plaintext_size,
+    size_t *plaintext_len)
+{
+    if (plaintext_len)
+    {
+        *plaintext_len = 0;
+    }
+    if (!server_auth_config || !sign_response || !plaintext || !plaintext_len
+        || !provider_helper_server_auth_config_valid(server_auth_config,
+                                                     NULL, 0)
+        || !provider_helper_server_sign_response_valid(sign_response, NULL, 0)
+        || sign_response->status != PROVIDER_HELPER_SERVER_SIGN_OK)
+    {
+        return false;
+    }
+
+    const uint8_t *algid = NULL;
+    size_t algid_len = 0;
+    if (!ikev2_helper_server_sigalg_algid(sign_response->sigalg, &algid,
+                                          &algid_len))
+    {
+        return false;
+    }
+
+    const size_t id_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4u
+        + server_auth_config->server_id_len;
+    const size_t cert_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 1u
+        + server_auth_config->cert_chain_len;
+    const size_t auth_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4u + algid_len
+        + sign_response->signature_len;
+    const size_t eap_body_len = IKEV2_HELPER_EAP_TLS_HEADER_SIZE;
+    const size_t eap_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + eap_body_len;
+    const size_t total_len = id_payload_len + cert_payload_len
+                             + auth_payload_len + eap_payload_len + 1u;
+    if (id_payload_len > UINT16_MAX || cert_payload_len > UINT16_MAX
+        || auth_payload_len > UINT16_MAX || eap_payload_len > UINT16_MAX
+        || total_len > plaintext_size)
+    {
+        return false;
+    }
+
+    memset(plaintext, 0, total_len);
+    uint8_t *pos = plaintext;
+
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_CERT;
+    *pos++ = 0;
+    ikev2_helper_write_be16(&pos, (uint16_t)id_payload_len);
+    *pos++ = (uint8_t)server_auth_config->ikev2_id_type;
+    *pos++ = 0;
+    *pos++ = 0;
+    *pos++ = 0;
+    memcpy(pos, server_auth_config->server_id,
+           server_auth_config->server_id_len);
+    pos += server_auth_config->server_id_len;
+
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_AUTH;
+    *pos++ = 0;
+    ikev2_helper_write_be16(&pos, (uint16_t)cert_payload_len);
+    *pos++ = IKEV2_HELPER_CERT_ENCODING_X509_SIGNATURE;
+    memcpy(pos, server_auth_config->cert_chain,
+           server_auth_config->cert_chain_len);
+    pos += server_auth_config->cert_chain_len;
+
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_EAP;
+    *pos++ = 0;
+    ikev2_helper_write_be16(&pos, (uint16_t)auth_payload_len);
+    *pos++ = PROVIDER_HELPER_SERVER_AUTH_METHOD_DIGITAL_SIGNATURE;
+    *pos++ = 0;
+    *pos++ = 0;
+    *pos++ = 0;
+    memcpy(pos, algid, algid_len);
+    pos += algid_len;
+    memcpy(pos, sign_response->signature, sign_response->signature_len);
+    pos += sign_response->signature_len;
+
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+    *pos++ = 0;
+    ikev2_helper_write_be16(&pos, (uint16_t)eap_payload_len);
+    *pos++ = IKEV2_HELPER_EAP_CODE_REQUEST;
+    *pos++ = IKEV2_HELPER_EAP_TLS_START_REQUEST_ID;
+    ikev2_helper_write_be16(&pos, (uint16_t)eap_body_len);
+    *pos++ = IKEV2_HELPER_EAP_TYPE_TLS;
+    *pos++ = IKEV2_HELPER_EAP_TLS_FLAG_START;
+
+    *pos++ = 0; /* Pad Length: no padding bytes for AEAD. */
+    if ((size_t)(pos - plaintext) != total_len)
+    {
+        ikev2_helper_secure_zero(plaintext, plaintext_size);
+        return false;
+    }
+    *plaintext_len = total_len;
+    return true;
+}
+
+static bool
+ikev2_helper_send_cached_server_auth_response(
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_ike_sa *sa,
+    const struct provider_helper_server_auth_config *server_auth_config,
+    const struct provider_helper_server_sign_response *sign_response)
+{
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    uint8_t response[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    size_t plaintext_len = 0;
+    size_t response_len = 0;
+    if (!listener || !sa || !sa->active
+        || !ikev2_helper_build_server_auth_plaintext(
+            server_auth_config, sign_response, plaintext, sizeof(plaintext),
+            &plaintext_len)
+        || !ikev2_helper_build_encrypted_payload_response(
+            response, sizeof(response), &response_len, listener, sa,
+            PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH, sa->message_id,
+            PROVIDER_HELPER_IKEV2_PAYLOAD_IDR, plaintext, plaintext_len))
+    {
+        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+        ikev2_helper_secure_zero(response, sizeof(response));
+        return false;
+    }
+
+    const ssize_t sent =
+        sendto(listener->fd, response, response_len, 0,
+               (const struct sockaddr *)&sa->peer, sa->peer_len);
+    const bool ret = sent == (ssize_t)response_len
+                     && ikev2_helper_cache_protected_response(
+                         sa, sa->message_id, response, response_len);
+    ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+    ikev2_helper_secure_zero(response, sizeof(response));
+    return ret;
+}
+
 static bool
 ikev2_helper_queue_server_sign_request(
     int ipc_fd,
@@ -5555,14 +5742,15 @@ ikev2_helper_apply_server_sign_response(
     struct ikev2_helper_ike_sa_table *table,
     const struct ikev2_helper_listener *listeners,
     size_t listener_count,
+    const struct provider_helper_server_auth_config *server_auth_config,
     const struct provider_helper_server_sign_response *response,
     int ipc_fd,
     uint64_t *tx_sequence,
     uint64_t *next_auth_request_id,
     struct provider_helper_runtime_stats *counters)
 {
-    if (!table || !listeners || !response || ipc_fd < 0 || !tx_sequence
-        || !next_auth_request_id || !counters)
+    if (!table || !listeners || !server_auth_config || !response
+        || ipc_fd < 0 || !tx_sequence || !next_auth_request_id || !counters)
     {
         return false;
     }
@@ -5597,6 +5785,13 @@ ikev2_helper_apply_server_sign_response(
         sa->pending_server_sign_request_id = 0;
         sa->server_sign_config_revision = 0;
         sa->server_sign_sigalg = 0;
+        if (!ikev2_helper_send_cached_server_auth_response(
+                listener, sa, server_auth_config, response))
+        {
+            ++counters->ike_auth_request_failed;
+            return ikev2_helper_send_sign_failure_response_and_clear(
+                table, listener, sa, counters);
+        }
         if (ikev2_helper_queue_auth_request(ipc_fd, tx_sequence,
                                             next_auth_request_id, listener, sa))
         {
@@ -7558,8 +7753,9 @@ ikev2_helper_loop(int fd)
                     || !ikev2_helper_read_server_sign_response(fd, &header,
                                                                &response)
                     || !ikev2_helper_apply_server_sign_response(
-                        sa_table, listeners, listener_count, &response, fd,
-                        &tx_sequence, &next_auth_request_id, &counters))
+                        sa_table, listeners, listener_count,
+                        &server_auth_config, &response, fd, &tx_sequence,
+                        &next_auth_request_id, &counters))
                 {
                     ret = 6;
                     goto done;
