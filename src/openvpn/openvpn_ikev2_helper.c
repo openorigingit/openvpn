@@ -3790,13 +3790,10 @@ ikev2_helper_delete_child_sa_xfrm(
         return true;
     }
 
-    struct provider_xfrm_linux_message_plan messages;
     struct provider_xfrm_result result;
     const bool ret =
-        provider_xfrm_linux_child_sa_delete_messages_build(
-            &messages, &child->xfrm_plan, &result)
-        && provider_xfrm_linux_message_plan_apply(&messages, &result);
-    provider_xfrm_linux_message_plan_clear(&messages);
+        provider_xfrm_linux_child_sa_reconcile_delete(&child->xfrm_plan,
+                                                      &result);
     if (ret)
     {
         child->xfrm_applied = false;
