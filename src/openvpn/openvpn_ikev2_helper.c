@@ -5792,6 +5792,11 @@ ikev2_helper_apply_server_sign_response(
             return ikev2_helper_send_sign_failure_response_and_clear(
                 table, listener, sa, counters);
         }
+        if (!sa->credential_fingerprint_len)
+        {
+            counters->ike_sa_active = table->active;
+            return true;
+        }
         if (ikev2_helper_queue_auth_request(ipc_fd, tx_sequence,
                                             next_auth_request_id, listener, sa))
         {
@@ -6692,26 +6697,6 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 return;
             }
             ++counters->ike_auth_inner_parsed;
-            if (!inner_summary.saw_eap || inner_summary.eap_count != 1)
-            {
-                ++counters->ike_auth_unsupported;
-                if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
-                        listener, sa, PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
-                        header.message_id,
-                        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
-                {
-                    ++counters->ike_auth_unsupported_response_tx;
-                }
-                else
-                {
-                    ++counters->ike_auth_unsupported_response_failed;
-                }
-                ikev2_helper_clear_ike_sa(sa_table, sa, counters);
-                ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
-                counters->ike_sa_active = sa_table->active;
-                return;
-            }
-            ++counters->ike_auth_eap_tls_rx;
             if (!ikev2_helper_extract_claimed_idi(sa, plaintext, plaintext_len,
                                                   &inner_summary))
             {
@@ -6721,22 +6706,6 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 return;
             }
             ++counters->ike_auth_idi_extracted;
-            if (!ikev2_helper_extract_credential_metadata(
-                    sa, plaintext, plaintext_len, &inner_summary))
-            {
-                if (inner_summary.saw_cert)
-                {
-                    ++counters->ike_auth_cert_invalid;
-                }
-                ++counters->ike_auth_inner_malformed;
-                ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
-                counters->ike_sa_active = sa_table->active;
-                return;
-            }
-            if (sa->credential_fingerprint_len)
-            {
-                ++counters->ike_auth_cert_extracted;
-            }
 
             if (!server_auth_configured
                 || !provider_helper_server_auth_config_valid(
@@ -6756,6 +6725,47 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     ++counters->ike_auth_unsupported_response_failed;
                 }
                 ikev2_helper_clear_ike_sa(sa_table, sa, counters);
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
+
+            if (inner_summary.saw_eap && inner_summary.eap_count == 1)
+            {
+                ++counters->ike_auth_eap_tls_rx;
+                if (!ikev2_helper_extract_credential_metadata(
+                        sa, plaintext, plaintext_len, &inner_summary))
+                {
+                    if (inner_summary.saw_cert)
+                    {
+                        ++counters->ike_auth_cert_invalid;
+                    }
+                    ++counters->ike_auth_inner_malformed;
+                    ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+                if (sa->credential_fingerprint_len)
+                {
+                    ++counters->ike_auth_cert_extracted;
+                }
+            }
+            else if (inner_summary.saw_eap || inner_summary.saw_cert
+                     || inner_summary.saw_auth)
+            {
+                ++counters->ike_auth_unsupported;
+                if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
+                        listener, sa, PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+                        header.message_id,
+                        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
+                {
+                    ++counters->ike_auth_unsupported_response_tx;
+                }
+                else
+                {
+                    ++counters->ike_auth_unsupported_response_failed;
+                }
+                ikev2_helper_clear_ike_sa(sa_table, sa, counters);
+                ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                 counters->ike_sa_active = sa_table->active;
                 return;
             }
