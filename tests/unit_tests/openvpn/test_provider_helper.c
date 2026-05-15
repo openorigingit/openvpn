@@ -1431,6 +1431,7 @@ test_provider_helper_server_sign_request_roundtrip(void **state)
         .auth_method = PROVIDER_HELPER_SERVER_AUTH_METHOD_DIGITAL_SIGNATURE,
         .sigalg = PROVIDER_HELPER_SERVER_AUTH_SIGALG_ECDSA_P256_SHA256,
         .transcript_len = 384,
+        .purpose = PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH,
     };
     for (uint32_t i = 0; i < input.transcript_len; ++i)
     {
@@ -1455,6 +1456,7 @@ test_provider_helper_server_sign_request_roundtrip(void **state)
     assert_int_equal(output.auth_method, input.auth_method);
     assert_int_equal(output.sigalg, input.sigalg);
     assert_int_equal(output.transcript_len, input.transcript_len);
+    assert_int_equal(output.purpose, input.purpose);
     assert_memory_equal(output.transcript, input.transcript,
                         input.transcript_len);
 
@@ -1478,6 +1480,11 @@ test_provider_helper_server_sign_request_roundtrip(void **state)
                                                            sizeof(reason)));
     assert_non_null(strstr(reason, "algorithm"));
     input.sigalg = PROVIDER_HELPER_SERVER_AUTH_SIGALG_ECDSA_P256_SHA256;
+    input.purpose = 0;
+    assert_false(provider_helper_server_sign_request_valid(&input, reason,
+                                                           sizeof(reason)));
+    assert_non_null(strstr(reason, "purpose"));
+    input.purpose = PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH;
     input.transcript_len = 0;
     assert_false(provider_helper_server_sign_request_valid(&input, reason,
                                                            sizeof(reason)));
@@ -6916,6 +6923,7 @@ test_provider_helper_server_sign_request_callback(void **state)
         .auth_method = PROVIDER_HELPER_SERVER_AUTH_METHOD_DIGITAL_SIGNATURE,
         .sigalg = PROVIDER_HELPER_SERVER_AUTH_SIGALG_RSA_PSS_SHA256,
         .transcript_len = 96,
+        .purpose = PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH,
     };
     for (uint32_t i = 0; i < request.transcript_len; ++i)
     {
@@ -6929,6 +6937,7 @@ test_provider_helper_server_sign_request_callback(void **state)
     assert_int_equal(supervisor.last_rx_sequence, 1);
     assert_int_equal(cb_state.calls, 1);
     assert_int_equal(cb_state.request.request_id, request.request_id);
+    assert_int_equal(cb_state.request.purpose, request.purpose);
     assert_memory_equal(cb_state.request.transcript, request.transcript,
                         request.transcript_len);
 
@@ -7529,6 +7538,8 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
     }
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(sign_state.calls, 1);
+    assert_int_equal(sign_state.request.purpose,
+                     PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH);
     assert_int_equal(auth_state.calls, 0);
     test_recv_ikev2_encrypted_server_auth_response(
         response_fd, initiator_spi, &sa_init_material, true);

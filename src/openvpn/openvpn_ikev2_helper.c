@@ -6346,6 +6346,7 @@ ikev2_helper_queue_server_sign_request(
     request.sigalg = ikev2_helper_select_server_sign_sigalg(
         server_auth_config->allowed_sigalgs);
     request.transcript_len = (uint32_t)transcript_len;
+    request.purpose = PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH;
     memcpy(request.transcript, transcript, transcript_len);
     ikev2_helper_secure_zero(transcript, sizeof(transcript));
 

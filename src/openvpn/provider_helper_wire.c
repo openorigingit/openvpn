@@ -840,10 +840,18 @@ provider_helper_server_sign_request_valid(
                                       "server sign request ids must be nonzero");
         return false;
     }
-    if (request->flags || request->reserved)
+    if (request->flags)
     {
         provider_helper_config_reason(reason, reason_size,
                                       "server sign request reserved fields must be zero");
+        return false;
+    }
+    if (request->purpose != PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH
+        && request->purpose
+               != PROVIDER_HELPER_SERVER_SIGN_PURPOSE_EAP_TLS_CERTIFICATE_VERIFY)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "unsupported server sign request purpose");
         return false;
     }
     if (request->auth_method
@@ -1892,7 +1900,7 @@ provider_helper_ipc_encode_server_sign_request(
     provider_helper_wire_write_u32(&pos, request->sigalg);
     provider_helper_wire_write_u32(&pos, request->transcript_len);
     provider_helper_wire_write_u32(&pos, request->flags);
-    provider_helper_wire_write_u32(&pos, request->reserved);
+    provider_helper_wire_write_u32(&pos, request->purpose);
     memcpy(pos, request->transcript, sizeof(request->transcript));
     pos += sizeof(request->transcript);
 
@@ -1922,7 +1930,7 @@ provider_helper_ipc_decode_server_sign_request(
     request->sigalg = provider_helper_wire_read_u32(&pos);
     request->transcript_len = provider_helper_wire_read_u32(&pos);
     request->flags = provider_helper_wire_read_u32(&pos);
-    request->reserved = provider_helper_wire_read_u32(&pos);
+    request->purpose = provider_helper_wire_read_u32(&pos);
     memcpy(request->transcript, pos, sizeof(request->transcript));
     pos += sizeof(request->transcript);
 

@@ -283,6 +283,11 @@ enum provider_helper_server_auth_method {
     PROVIDER_HELPER_SERVER_AUTH_METHOD_DIGITAL_SIGNATURE = 14,
 };
 
+enum provider_helper_server_sign_purpose {
+    PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH = 1,
+    PROVIDER_HELPER_SERVER_SIGN_PURPOSE_EAP_TLS_CERTIFICATE_VERIFY = 2,
+};
+
 enum provider_helper_server_sign_status {
     PROVIDER_HELPER_SERVER_SIGN_OK = 1,
     PROVIDER_HELPER_SERVER_SIGN_FAILED = 2,
@@ -381,7 +386,7 @@ struct provider_helper_server_sign_request {
     uint32_t sigalg;
     uint32_t transcript_len;
     uint32_t flags;
-    uint32_t reserved;
+    uint32_t purpose;
     uint8_t transcript[PROVIDER_HELPER_SERVER_AUTH_TRANSCRIPT_SIZE];
 };
 
