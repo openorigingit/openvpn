@@ -123,6 +123,8 @@
 #define PROVIDER_HELPER_DEFAULT_MAX_SA_INIT_PER_SOURCE_SECOND 32
 #define PROVIDER_HELPER_START_TIMEOUT_SECONDS     10
 #define PROVIDER_HELPER_PREFLIGHT_TIMEOUT_SECONDS 10
+#define PROVIDER_HELPER_RESTART_BACKOFF_INITIAL_SECONDS 1
+#define PROVIDER_HELPER_RESTART_BACKOFF_MAX_SECONDS     60
 
 enum provider_helper_state {
     PROVIDER_HELPER_STATE_DISABLED = 0,
@@ -561,6 +563,8 @@ struct provider_helper_supervisor {
     struct provider_helper_runtime_stats runtime_stats;
     unsigned int restart_count;
     bool has_spawned;
+    unsigned int restart_backoff_seconds;
+    time_t next_restart_time;
     time_t last_state_change;
     uint8_t header_buf[PROVIDER_HELPER_IPC_HEADER_SIZE];
     size_t header_len;
@@ -791,6 +795,10 @@ bool provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervi
                                       const char *path,
                                       char *const argv[]);
 bool provider_helper_supervisor_reap(struct provider_helper_supervisor *supervisor);
+bool provider_helper_supervisor_restart_ready(
+    const struct provider_helper_supervisor *supervisor);
+unsigned int provider_helper_supervisor_restart_delay(
+    const struct provider_helper_supervisor *supervisor);
 bool provider_helper_supervisor_send_listener_fd(
     struct provider_helper_supervisor *supervisor,
     int fd,

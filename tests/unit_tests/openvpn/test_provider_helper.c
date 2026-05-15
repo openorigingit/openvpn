@@ -31,6 +31,7 @@
 #endif
 
 #include "provider_helper.h"
+#include "otime.h"
 #include "status.h"
 #include "test_common.h"
 
@@ -790,6 +791,62 @@ test_provider_helper_disconnected_ipc_send_fails_closed(void **state)
 }
 
 static void
+test_provider_helper_restart_backoff_after_ipc_failure(void **state)
+{
+    (void)state;
+
+#ifdef _WIN32
+    skip();
+#else
+    const time_t saved_now = now;
+    now = 1000;
+
+    int fds[2] = { -1, -1 };
+    assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.ipc_fd = fds[0];
+    provider_helper_supervisor_set_state(&supervisor,
+                                         PROVIDER_HELPER_STATE_READY);
+    close(fds[1]);
+
+    assert_false(provider_helper_supervisor_send_stats_request(&supervisor, 88));
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_DEGRADED);
+    assert_int_equal(supervisor.restart_backoff_seconds,
+                     PROVIDER_HELPER_RESTART_BACKOFF_INITIAL_SECONDS);
+    assert_int_equal(supervisor.next_restart_time, 1001);
+    assert_false(provider_helper_supervisor_restart_ready(&supervisor));
+    assert_int_equal(provider_helper_supervisor_restart_delay(&supervisor), 1);
+
+    char *const argv[] = { (char *)"/bin/false", NULL };
+    assert_false(provider_helper_supervisor_spawn(&supervisor, "/bin/false",
+                                                  argv));
+    assert_int_equal(supervisor.pid, 0);
+
+    now = 1001;
+    assert_true(provider_helper_supervisor_restart_ready(&supervisor));
+    assert_int_equal(provider_helper_supervisor_restart_delay(&supervisor), 0);
+
+    fds[0] = -1;
+    fds[1] = -1;
+    assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    supervisor.ipc_fd = fds[0];
+    provider_helper_supervisor_set_state(&supervisor,
+                                         PROVIDER_HELPER_STATE_READY);
+    close(fds[1]);
+
+    assert_false(provider_helper_supervisor_send_stats_request(&supervisor, 89));
+    assert_int_equal(supervisor.restart_backoff_seconds,
+                     PROVIDER_HELPER_RESTART_BACKOFF_INITIAL_SECONDS * 2);
+    assert_int_equal(supervisor.next_restart_time, 1003);
+
+    provider_helper_supervisor_free(&supervisor);
+    now = saved_now;
+#endif
+}
+
+static void
 test_provider_helper_status_output(void **state)
 {
     (void)state;
@@ -813,6 +870,8 @@ test_provider_helper_status_output(void **state)
     supervisor.negotiated_features = PROVIDER_HELPER_FEATURE_IKEV2_BASE;
     supervisor.runtime_config.flags = PROVIDER_HELPER_CONFIG_APPLY_XFRM;
     supervisor.restart_count = 2;
+    supervisor.restart_backoff_seconds = 4;
+    supervisor.next_restart_time = time(NULL) + 3;
 #ifndef _WIN32
     supervisor.pid = 1234;
 #endif
@@ -835,11 +894,12 @@ test_provider_helper_status_output(void **state)
     assert_non_null(strstr(capture.data, "HEADER,PROVIDER_HELPER"));
 #ifndef _WIN32
     assert_non_null(strstr(capture.data,
-                           "PROVIDER_HELPER,ready,1234,2,0x1,0x4,1"));
+                           "PROVIDER_HELPER,ready,1234,2,4,"));
 #else
     assert_non_null(strstr(capture.data,
-                           "PROVIDER_HELPER,ready,0,2,0x1,0x4,1"));
+                           "PROVIDER_HELPER,ready,0,2,4,"));
 #endif
+    assert_non_null(strstr(capture.data, ",0x1,0x4,1"));
     assert_non_null(strstr(capture.data,
                            "PROVIDER_HELPER_STAT,datagrams_rx,11"));
     assert_non_null(strstr(capture.data,
@@ -7226,6 +7286,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_runtime_stats_roundtrip),
         cmocka_unit_test(test_provider_helper_stats_request_message),
         cmocka_unit_test(test_provider_helper_disconnected_ipc_send_fails_closed),
+        cmocka_unit_test(test_provider_helper_restart_backoff_after_ipc_failure),
         cmocka_unit_test(test_provider_helper_status_output),
         cmocka_unit_test(test_provider_helper_xfrm_lease_roundtrip),
         cmocka_unit_test(test_provider_helper_auth_request_roundtrip),

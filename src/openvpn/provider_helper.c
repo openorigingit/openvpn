@@ -142,6 +142,64 @@ provider_helper_supervisor_set_state(struct provider_helper_supervisor *supervis
     }
 }
 
+static unsigned int
+provider_helper_restart_backoff_next(unsigned int current)
+{
+    if (!current)
+    {
+        return PROVIDER_HELPER_RESTART_BACKOFF_INITIAL_SECONDS;
+    }
+    if (current >= PROVIDER_HELPER_RESTART_BACKOFF_MAX_SECONDS / 2)
+    {
+        return PROVIDER_HELPER_RESTART_BACKOFF_MAX_SECONDS;
+    }
+    return current * 2;
+}
+
+static void
+provider_helper_supervisor_schedule_restart(
+    struct provider_helper_supervisor *supervisor)
+{
+    if (!supervisor)
+    {
+        return;
+    }
+
+    supervisor->restart_backoff_seconds =
+        provider_helper_restart_backoff_next(supervisor->restart_backoff_seconds);
+    supervisor->next_restart_time = provider_helper_supervisor_now()
+                                    + supervisor->restart_backoff_seconds;
+}
+
+bool
+provider_helper_supervisor_restart_ready(
+    const struct provider_helper_supervisor *supervisor)
+{
+    if (!supervisor || !supervisor->next_restart_time)
+    {
+        return true;
+    }
+    return provider_helper_supervisor_now() >= supervisor->next_restart_time;
+}
+
+unsigned int
+provider_helper_supervisor_restart_delay(
+    const struct provider_helper_supervisor *supervisor)
+{
+    if (!supervisor || !supervisor->next_restart_time)
+    {
+        return 0;
+    }
+
+    const time_t current = provider_helper_supervisor_now();
+    if (current >= supervisor->next_restart_time)
+    {
+        return 0;
+    }
+    const time_t delay = supervisor->next_restart_time - current;
+    return delay > (time_t)UINT_MAX ? UINT_MAX : (unsigned int)delay;
+}
+
 #ifndef _WIN32
 static void
 provider_helper_supervisor_try_reap_child(struct provider_helper_supervisor *supervisor)
@@ -204,6 +262,7 @@ provider_helper_supervisor_fail_ipc(struct provider_helper_supervisor *superviso
 {
     provider_helper_supervisor_set_state(supervisor, state);
     provider_helper_close_ipc(supervisor);
+    provider_helper_supervisor_schedule_restart(supervisor);
 #ifndef _WIN32
     if (supervisor->pid > 0)
     {
@@ -330,6 +389,8 @@ provider_helper_print_status(const struct provider_helper_supervisor *supervisor
 #endif
     const bool apply_xfrm =
         (supervisor->runtime_config.flags & PROVIDER_HELPER_CONFIG_APPLY_XFRM) != 0;
+    const unsigned int restart_delay =
+        provider_helper_supervisor_restart_delay(supervisor);
 
     if (version == 1)
     {
@@ -337,6 +398,9 @@ provider_helper_print_status(const struct provider_helper_supervisor *supervisor
         status_printf(so, "State,%s", provider_helper_state_name(supervisor->state));
         status_printf(so, "PID,%ld", pid);
         status_printf(so, "Restart Count,%u", supervisor->restart_count);
+        status_printf(so, "Restart Backoff,%u",
+                      supervisor->restart_backoff_seconds);
+        status_printf(so, "Restart Delay,%u", restart_delay);
         status_printf(so, "Negotiated Features,0x%" PRIx64,
                       supervisor->negotiated_features);
         status_printf(so, "Runtime Flags,0x%" PRIx32,
@@ -349,13 +413,16 @@ provider_helper_print_status(const struct provider_helper_supervisor *supervisor
         const char sep = (version == 3) ? '\t' : ',';
         status_printf(so,
                       "HEADER%cPROVIDER_HELPER%cState%cPID%cRestart Count%c"
-                      "Negotiated Features%cRuntime Flags%cApply XFRM",
-                      sep, sep, sep, sep, sep, sep, sep);
-        status_printf(so, "PROVIDER_HELPER%c%s%c%ld%c%u%c0x%" PRIx64
+                      "Restart Backoff%cRestart Delay%cNegotiated Features%c"
+                      "Runtime Flags%cApply XFRM",
+                      sep, sep, sep, sep, sep, sep, sep, sep, sep);
+        status_printf(so, "PROVIDER_HELPER%c%s%c%ld%c%u%c%u%c%u%c0x%" PRIx64
                       "%c0x%" PRIx32 "%c%d",
                       sep, provider_helper_state_name(supervisor->state),
                       sep, pid,
                       sep, supervisor->restart_count,
+                      sep, supervisor->restart_backoff_seconds,
+                      sep, restart_delay,
                       sep, supervisor->negotiated_features,
                       sep, supervisor->runtime_config.flags,
                       sep, apply_xfrm ? 1 : 0);
@@ -787,6 +854,10 @@ provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
     {
         return false;
     }
+    if (!provider_helper_supervisor_restart_ready(supervisor))
+    {
+        return false;
+    }
 #ifndef _WIN32
     if (supervisor->pid > 0)
     {
@@ -873,6 +944,7 @@ provider_helper_supervisor_reap(struct provider_helper_supervisor *supervisor)
     if (ret < 0)
     {
         provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_FAILED);
+        provider_helper_supervisor_schedule_restart(supervisor);
     }
     else if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
     {
@@ -881,6 +953,7 @@ provider_helper_supervisor_reap(struct provider_helper_supervisor *supervisor)
     else
     {
         provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_DEGRADED);
+        provider_helper_supervisor_schedule_restart(supervisor);
     }
 
     supervisor->pid = 0;
@@ -968,6 +1041,7 @@ provider_helper_supervisor_timeout(struct provider_helper_supervisor *supervisor
 
     provider_helper_supervisor_set_state(supervisor,
                                          PROVIDER_HELPER_STATE_DEGRADED);
+    provider_helper_supervisor_schedule_restart(supervisor);
 #ifndef _WIN32
     if (supervisor->pid > 0)
     {
