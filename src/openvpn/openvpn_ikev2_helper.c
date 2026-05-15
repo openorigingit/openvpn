@@ -291,9 +291,25 @@ ikev2_helper_install_signals(void)
     sa.sa_handler = ikev2_helper_signal_handler;
     sigemptyset(&sa.sa_mask);
 
-    return sigaction(SIGTERM, &sa, NULL) == 0
-           && sigaction(SIGINT, &sa, NULL) == 0
-           && sigaction(SIGHUP, &sa, NULL) == 0;
+    if (sigaction(SIGTERM, &sa, NULL) != 0
+        || sigaction(SIGINT, &sa, NULL) != 0
+        || sigaction(SIGHUP, &sa, NULL) != 0)
+    {
+        return false;
+    }
+
+#ifdef SIGPIPE
+    struct sigaction pipe_sa;
+    CLEAR(pipe_sa);
+    pipe_sa.sa_handler = SIG_IGN;
+    sigemptyset(&pipe_sa.sa_mask);
+    if (sigaction(SIGPIPE, &pipe_sa, NULL) != 0)
+    {
+        return false;
+    }
+#endif
+
+    return true;
 }
 
 static void

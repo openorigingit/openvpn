@@ -4818,6 +4818,48 @@ test_provider_helper_reaps_early_helper_exit(void **state)
 }
 
 static void
+test_provider_helper_ikev2_helper_ignores_sigpipe(void **state)
+{
+    (void)state;
+
+#if !defined(TARGET_LINUX)
+    skip();
+#else
+    if (!ikev2_helper_path)
+    {
+        skip();
+    }
+
+    int fds[2] = { -1, -1 };
+    assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    const pid_t pid = fork();
+    assert_true(pid >= 0);
+    if (pid == 0)
+    {
+        close(fds[0]);
+        char fd_env[16];
+        snprintf(fd_env, sizeof(fd_env), "%d", fds[1]);
+        if (setenv(PROVIDER_HELPER_FD_ENV, fd_env, 1) != 0)
+        {
+            _exit(126);
+        }
+        char *const argv[] = { (char *)ikev2_helper_path, NULL };
+        execv(ikev2_helper_path, argv);
+        _exit(127);
+    }
+
+    close(fds[0]);
+    close(fds[1]);
+
+    int status = 0;
+    assert_int_equal(waitpid(pid, &status, 0), pid);
+    assert_true(WIFEXITED(status));
+    assert_int_equal(WEXITSTATUS(status), 2);
+#endif
+}
+
+static void
 test_provider_helper_reaps_after_bad_ipc_header(void **state)
 {
     (void)state;
@@ -8554,6 +8596,7 @@ main(void)
             test_provider_helper_spawn_drops_root_supplementary_groups),
         cmocka_unit_test(test_provider_helper_spawn_rejects_invalid_runtime_config),
         cmocka_unit_test(test_provider_helper_reaps_early_helper_exit),
+        cmocka_unit_test(test_provider_helper_ikev2_helper_ignores_sigpipe),
         cmocka_unit_test(test_provider_helper_reaps_after_bad_ipc_header),
         cmocka_unit_test(test_provider_helper_bad_ipc_header_terminates_helper),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_natt_listener),
