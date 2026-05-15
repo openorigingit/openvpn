@@ -81,7 +81,8 @@ provider_helper_runtime_config_valid(const struct provider_helper_runtime_config
 {
     const uint32_t allowed_flags = PROVIDER_HELPER_CONFIG_FORCE_NATT
                                    | PROVIDER_HELPER_CONFIG_IPV4_ONLY
-                                   | PROVIDER_HELPER_CONFIG_APPLY_XFRM;
+                                   | PROVIDER_HELPER_CONFIG_APPLY_XFRM
+                                   | PROVIDER_HELPER_CONFIG_TEST_AUTH_CONTINUATION;
 
     if (!config)
     {

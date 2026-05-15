@@ -5013,10 +5013,11 @@ ikev2_helper_apply_auth_response(
     size_t listener_count,
     const struct provider_helper_xfrm_lease *xfrm_leases,
     size_t xfrm_lease_count,
+    const struct provider_helper_runtime_config *config,
     const struct provider_helper_auth_response *response,
     struct provider_helper_runtime_stats *counters)
 {
-    if (!table || !listeners || !response || !counters)
+    if (!table || !listeners || !config || !response || !counters)
     {
         return false;
     }
@@ -5080,8 +5081,16 @@ ikev2_helper_apply_auth_response(
                     sa->message_id,
                     PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
             {
-                ikev2_helper_authorize_ike_sa(sa, response, lease);
                 ++counters->ike_auth_allow_temp_failure_tx;
+                if (config->flags
+                    & PROVIDER_HELPER_CONFIG_TEST_AUTH_CONTINUATION)
+                {
+                    ikev2_helper_authorize_ike_sa(sa, response, lease);
+                }
+                else
+                {
+                    ikev2_helper_clear_ike_sa(table, sa, counters);
+                }
             }
             else
             {
@@ -6841,6 +6850,7 @@ ikev2_helper_loop(int fd)
                                                          listener_count,
                                                          xfrm_leases,
                                                          xfrm_lease_count,
+                                                         &config,
                                                          &response,
                                                          &counters))
                 {

@@ -80,6 +80,8 @@
 #define PROVIDER_HELPER_CONFIG_FORCE_NATT (1u << 0)
 #define PROVIDER_HELPER_CONFIG_IPV4_ONLY  (1u << 1)
 #define PROVIDER_HELPER_CONFIG_APPLY_XFRM (1u << 2)
+/* Internal test scaffold only; do not expose as an OpenVPN option. */
+#define PROVIDER_HELPER_CONFIG_TEST_AUTH_CONTINUATION (1u << 3)
 
 #define PROVIDER_HELPER_LISTENER_FD_IKE   (1u << 0)
 #define PROVIDER_HELPER_LISTENER_FD_NATT  (1u << 1)
