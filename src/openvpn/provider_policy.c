@@ -81,6 +81,25 @@ provider_policy_parse_ipv4(const char *str, struct in_addr *addr)
     return str && addr && inet_pton(AF_INET, str, addr) == 1;
 }
 
+static bool
+provider_policy_push_option_noop(char *tokens[], int n_tokens)
+{
+    if (n_tokens == 2 && strcmp(tokens[0], "route-gateway") == 0)
+    {
+        struct in_addr gateway;
+        return provider_policy_parse_ipv4(tokens[1], &gateway);
+    }
+
+    if (n_tokens == 2 && strcmp(tokens[0], "topology") == 0)
+    {
+        return strcmp(tokens[1], "subnet") == 0
+               || strcmp(tokens[1], "net30") == 0
+               || strcmp(tokens[1], "p2p") == 0;
+    }
+
+    return false;
+}
+
 static int
 provider_policy_netmask_bits(struct in_addr netmask)
 {
@@ -250,6 +269,11 @@ provider_policy_push_option_supported(const char *option)
                && provider_policy_parse_ipv4(tokens[2], &dns);
     }
 
+    if (provider_policy_push_option_noop(tokens, n_tokens))
+    {
+        return true;
+    }
+
     return false;
 }
 
@@ -410,6 +434,10 @@ provider_policy_build_artifacts(const struct push_list *push_list,
             {
                 return false;
             }
+        }
+        else if (provider_policy_push_option_noop(tokens, n_tokens))
+        {
+            continue;
         }
         else
         {

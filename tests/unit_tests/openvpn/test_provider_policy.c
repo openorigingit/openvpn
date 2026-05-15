@@ -137,11 +137,15 @@ test_provider_policy_validates_push_options(void **state)
     struct provider_policy_preflight result;
     struct push_entry route = push_entry("route 10.0.0.0 255.255.255.0");
     struct push_entry dns = push_entry("dhcp-option DNS 10.0.0.53");
+    struct push_entry route_gateway = push_entry("route-gateway 10.0.0.1");
+    struct push_entry topology = push_entry("topology subnet");
     route.next = &dns;
+    dns.next = &route_gateway;
+    route_gateway.next = &topology;
 
     struct push_list allowed = {
         .head = &route,
-        .tail = &dns,
+        .tail = &topology,
     };
 
     assert_true(provider_policy_validate_push_list(&allowed, &result));
@@ -157,6 +161,31 @@ test_provider_policy_validates_push_options(void **state)
     assert_int_equal(result.status,
                      PROVIDER_POLICY_PREFLIGHT_UNSUPPORTED_PUSH_OPTION);
     assert_non_null(strstr(result.reason, "compress stub-v2"));
+}
+
+static void
+test_provider_policy_builds_no_artifacts_for_openvpn_client_hints(void **state)
+{
+    (void)state;
+
+    struct provider_policy_artifacts artifacts;
+    struct provider_policy_preflight result;
+
+    struct push_entry route_gateway = push_entry("route-gateway 10.0.0.1");
+    struct push_entry topology = push_entry("topology subnet");
+    route_gateway.next = &topology;
+
+    struct push_list list = {
+        .head = &route_gateway,
+        .tail = &topology,
+    };
+
+    assert_true(provider_policy_push_option_supported(route_gateway.option));
+    assert_true(provider_policy_push_option_supported(topology.option));
+    assert_true(provider_policy_build_artifacts(&list, &artifacts, &result));
+    assert_int_equal(result.status, PROVIDER_POLICY_PREFLIGHT_OK);
+    assert_int_equal(artifacts.selector_count, 0);
+    assert_int_equal(artifacts.dns_server_count, 0);
 }
 
 static void
@@ -265,6 +294,8 @@ main(void)
         cmocka_unit_test(test_provider_policy_rejects_tls_coupled_auth_hooks),
         cmocka_unit_test(test_provider_policy_rejects_unsupported_ccd),
         cmocka_unit_test(test_provider_policy_validates_push_options),
+        cmocka_unit_test(
+            test_provider_policy_builds_no_artifacts_for_openvpn_client_hints),
         cmocka_unit_test(test_provider_policy_builds_route_dns_artifacts),
         cmocka_unit_test(test_provider_policy_rejects_ambiguous_route_artifact),
         cmocka_unit_test(test_provider_policy_ignores_disabled_push_entry),
