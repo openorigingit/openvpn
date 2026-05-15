@@ -194,6 +194,10 @@ provider_helper_child_close_fds_except(int keep)
 }
 #endif
 
+#ifndef _WIN32
+static void provider_helper_wait_or_kill(pid_t pid);
+#endif
+
 static void
 provider_helper_supervisor_fail_ipc(struct provider_helper_supervisor *supervisor,
                                     enum provider_helper_state state)
@@ -201,7 +205,12 @@ provider_helper_supervisor_fail_ipc(struct provider_helper_supervisor *superviso
     provider_helper_supervisor_set_state(supervisor, state);
     provider_helper_close_ipc(supervisor);
 #ifndef _WIN32
-    provider_helper_supervisor_try_reap_child(supervisor);
+    if (supervisor->pid > 0)
+    {
+        kill(supervisor->pid, SIGTERM);
+        provider_helper_wait_or_kill(supervisor->pid);
+        supervisor->pid = 0;
+    }
 #endif
 }
 

@@ -4640,6 +4640,68 @@ test_provider_helper_reaps_after_bad_ipc_header(void **state)
 #endif
 }
 
+static void
+test_provider_helper_bad_ipc_header_terminates_helper(void **state)
+{
+    (void)state;
+
+#ifdef _WIN32
+    skip();
+#else
+    int fds[2] = { -1, -1 };
+    assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    const pid_t pid = fork();
+    assert_true(pid >= 0);
+    if (pid == 0)
+    {
+        close(fds[0]);
+
+        uint8_t bad_header[PROVIDER_HELPER_IPC_HEADER_SIZE];
+        CLEAR(bad_header);
+        const ssize_t written = write(fds[1], bad_header, sizeof(bad_header));
+        if (written != (ssize_t)sizeof(bad_header))
+        {
+            _exit(1);
+        }
+        sleep(30);
+        _exit(2);
+    }
+
+    close(fds[1]);
+    const int flags = fcntl(fds[0], F_GETFL, 0);
+    assert_true(flags >= 0);
+    assert_int_equal(fcntl(fds[0], F_SETFL, flags | O_NONBLOCK), 0);
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.ipc_fd = fds[0];
+    supervisor.pid = pid;
+    provider_helper_supervisor_set_state(&supervisor,
+                                         PROVIDER_HELPER_STATE_STARTING);
+
+    for (int i = 0; i < 100 && (supervisor.pid > 0 || supervisor.ipc_fd >= 0);
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    const bool terminated = supervisor.pid == 0;
+    if (!terminated && supervisor.pid > 0)
+    {
+        kill(supervisor.pid, SIGKILL);
+        waitpid(supervisor.pid, NULL, 0);
+        supervisor.pid = 0;
+    }
+
+    assert_true(terminated);
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_FAILED);
+    assert_int_equal(supervisor.ipc_fd, -1);
+    provider_helper_supervisor_free(&supervisor);
+#endif
+}
+
 static int
 test_create_udp_listener(uint16_t *port)
 {
@@ -7189,6 +7251,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_spawn_rejects_invalid_runtime_config),
         cmocka_unit_test(test_provider_helper_reaps_early_helper_exit),
         cmocka_unit_test(test_provider_helper_reaps_after_bad_ipc_header),
+        cmocka_unit_test(test_provider_helper_bad_ipc_header_terminates_helper),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_natt_listener),
         cmocka_unit_test(
             test_provider_helper_spawn_rejects_duplicate_listener_id),
