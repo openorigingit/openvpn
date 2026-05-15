@@ -82,6 +82,12 @@ provider_helper_state_name(enum provider_helper_state state)
     }
 }
 
+static time_t
+provider_helper_supervisor_now(void)
+{
+    return now ? now : time(NULL);
+}
+
 void
 provider_helper_supervisor_init(struct provider_helper_supervisor *supervisor)
 {
@@ -92,7 +98,7 @@ provider_helper_supervisor_init(struct provider_helper_supervisor *supervisor)
     supervisor->next_tx_sequence = 1;
     supervisor->max_message_size = PROVIDER_HELPER_IPC_MAX_MESSAGE;
     supervisor->supported_features = PROVIDER_HELPER_FEATURE_IKEV2_BASE;
-    supervisor->last_state_change = now;
+    supervisor->last_state_change = provider_helper_supervisor_now();
     provider_helper_runtime_config_default(&supervisor->runtime_config);
 }
 
@@ -117,7 +123,7 @@ provider_helper_supervisor_set_state(struct provider_helper_supervisor *supervis
     if (supervisor)
     {
         supervisor->state = state;
-        supervisor->last_state_change = now;
+        supervisor->last_state_change = provider_helper_supervisor_now();
     }
 }
 
@@ -847,6 +853,42 @@ provider_helper_wait_or_kill(pid_t pid)
 }
 #endif
 
+static bool
+provider_helper_state_timeout_elapsed(const struct provider_helper_supervisor *supervisor,
+                                      unsigned int timeout_seconds)
+{
+    if (!supervisor || !timeout_seconds || !supervisor->last_state_change)
+    {
+        return false;
+    }
+
+    const time_t current = provider_helper_supervisor_now();
+    return current >= supervisor->last_state_change
+           && (unsigned int)(current - supervisor->last_state_change)
+              > timeout_seconds;
+}
+
+static void
+provider_helper_supervisor_timeout(struct provider_helper_supervisor *supervisor)
+{
+    if (!supervisor)
+    {
+        return;
+    }
+
+    provider_helper_supervisor_set_state(supervisor,
+                                         PROVIDER_HELPER_STATE_DEGRADED);
+#ifndef _WIN32
+    if (supervisor->pid > 0)
+    {
+        kill(supervisor->pid, SIGTERM);
+        provider_helper_wait_or_kill(supervisor->pid);
+        supervisor->pid = 0;
+    }
+#endif
+    provider_helper_close_ipc(supervisor);
+}
+
 void
 provider_helper_supervisor_stop(struct provider_helper_supervisor *supervisor)
 {
@@ -884,6 +926,17 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
 {
     if (!supervisor)
     {
+        return;
+    }
+
+    if ((supervisor->state == PROVIDER_HELPER_STATE_STARTING
+         && provider_helper_state_timeout_elapsed(
+             supervisor, PROVIDER_HELPER_START_TIMEOUT_SECONDS))
+        || (supervisor->state == PROVIDER_HELPER_STATE_PREFLIGHT
+            && provider_helper_state_timeout_elapsed(
+                supervisor, PROVIDER_HELPER_PREFLIGHT_TIMEOUT_SECONDS)))
+    {
+        provider_helper_supervisor_timeout(supervisor);
         return;
     }
 
