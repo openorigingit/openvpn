@@ -6589,6 +6589,13 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         else if (install_failed)
                         {
                             ++counters->ike_create_child_temp_failure_tx;
+                            (void)ikev2_helper_send_session_close(
+                                ipc_fd, tx_sequence, sa,
+                                "XFRM CHILD_SA install failed");
+                            sa_closed_fail_closed =
+                                ikev2_helper_clear_ike_sa(sa_table, sa,
+                                                          counters);
+                            child_response_failed = !sa_closed_fail_closed;
                         }
                         else if (no_proposal)
                         {
@@ -6625,6 +6632,13 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         else if (install_failed)
                         {
                             ++counters->ike_create_child_temp_failure_failed;
+                            (void)ikev2_helper_send_session_close(
+                                ipc_fd, tx_sequence, sa,
+                                "XFRM CHILD_SA install failed");
+                            sa_closed_fail_closed =
+                                ikev2_helper_clear_ike_sa(sa_table, sa,
+                                                          counters);
+                            child_response_failed = !sa_closed_fail_closed;
                         }
                         else if (no_proposal)
                         {
