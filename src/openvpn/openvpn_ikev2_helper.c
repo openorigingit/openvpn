@@ -12028,6 +12028,15 @@ ikev2_helper_loop(int fd)
             ret = 0;
             goto done;
         }
+        const time_t pre_event_expire_now = time(NULL);
+        ikev2_helper_expire_ike_sas(sa_table, &counters, pre_event_expire_now,
+                                    config.half_open_timeout_seconds);
+        if (!ikev2_helper_expire_authorized_ike_sas(
+                sa_table, &counters, pre_event_expire_now, fd, &tx_sequence))
+        {
+            ret = 7;
+            goto done;
+        }
         for (nfds_t i = 1; i < nfds; ++i)
         {
             if (pfds[i].revents & (POLLERR | POLLNVAL))
