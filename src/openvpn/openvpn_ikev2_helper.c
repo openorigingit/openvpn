@@ -112,6 +112,7 @@
 #define IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CLIENT_HELLO 1
 #define IKEV2_HELPER_TLS_HANDSHAKE_TYPE_SERVER_HELLO 2
 #define IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CERTIFICATE 11
+#define IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CERTIFICATE_VERIFY 15
 #define IKEV2_HELPER_TLS_HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS 8
 #define IKEV2_HELPER_TLS_CIPHER_TLS_AES_128_GCM_SHA256 0x1301
 #define IKEV2_HELPER_TLS_CIPHER_TLS_AES_256_GCM_SHA384 0x1302
@@ -6429,6 +6430,30 @@ ikev2_helper_select_server_sign_sigalg(uint32_t allowed_sigalgs)
 }
 
 static bool
+ikev2_helper_tls13_signature_scheme(uint32_t sigalg, uint16_t *scheme)
+{
+    if (!scheme)
+    {
+        return false;
+    }
+
+    switch (sigalg)
+    {
+        case PROVIDER_HELPER_SERVER_AUTH_SIGALG_RSA_PSS_SHA256:
+            *scheme = IKEV2_HELPER_TLS_SIGALG_RSA_PSS_RSAE_SHA256;
+            return true;
+
+        case PROVIDER_HELPER_SERVER_AUTH_SIGALG_ECDSA_P256_SHA256:
+            *scheme = IKEV2_HELPER_TLS_SIGALG_ECDSA_SECP256R1_SHA256;
+            return true;
+
+        default:
+            *scheme = 0;
+            return false;
+    }
+}
+
+static bool
 ikev2_helper_build_responder_id_body(
     const struct provider_helper_server_auth_config *server_auth_config,
     uint8_t *id_body,
@@ -6884,6 +6909,72 @@ ikev2_helper_send_cached_eap_tls_tx_fragment(
 }
 
 static bool
+ikev2_helper_cache_eap_tls_message(
+    struct ikev2_helper_ike_sa *sa,
+    const uint8_t *tls_data,
+    size_t tls_data_len,
+    bool terminal,
+    const struct provider_helper_runtime_config *config)
+{
+    if (!sa || !sa->active || !tls_data || !tls_data_len
+        || !config || !config->max_eap_tls_tx_fragment_bytes
+        || tls_data_len > config->max_eap_tls_bytes || tls_data_len > UINT32_MAX)
+    {
+        return false;
+    }
+
+    ikev2_helper_clear_eap_tls_tx_buffer(sa);
+    sa->eap_tls_tx = calloc(1, tls_data_len);
+    if (!sa->eap_tls_tx)
+    {
+        return false;
+    }
+    memcpy(sa->eap_tls_tx, tls_data, tls_data_len);
+    sa->eap_tls_tx_capacity = tls_data_len;
+    sa->eap_tls_tx_len = tls_data_len;
+    sa->eap_tls_tx_fragment_bytes = config->max_eap_tls_tx_fragment_bytes;
+    sa->eap_tls_tx_terminal = terminal;
+    return true;
+}
+
+static bool
+ikev2_helper_append_cached_eap_tls_message(
+    struct ikev2_helper_ike_sa *sa,
+    const uint8_t *tls_data,
+    size_t tls_data_len,
+    bool terminal,
+    const struct provider_helper_runtime_config *config)
+{
+    if (!sa || !sa->active || !sa->eap_tls_tx || sa->eap_tls_tx_sent
+        || !tls_data || !tls_data_len || !config
+        || !config->max_eap_tls_tx_fragment_bytes
+        || tls_data_len > config->max_eap_tls_bytes
+        || sa->eap_tls_tx_len > config->max_eap_tls_bytes - tls_data_len
+        || sa->eap_tls_tx_len + tls_data_len > UINT32_MAX)
+    {
+        return false;
+    }
+
+    const size_t combined_len = sa->eap_tls_tx_len + tls_data_len;
+    uint8_t *combined = calloc(1, combined_len);
+    if (!combined)
+    {
+        return false;
+    }
+    memcpy(combined, sa->eap_tls_tx, sa->eap_tls_tx_len);
+    memcpy(combined + sa->eap_tls_tx_len, tls_data, tls_data_len);
+
+    ikev2_helper_secure_zero(sa->eap_tls_tx, sa->eap_tls_tx_capacity);
+    free(sa->eap_tls_tx);
+    sa->eap_tls_tx = combined;
+    sa->eap_tls_tx_capacity = combined_len;
+    sa->eap_tls_tx_len = combined_len;
+    sa->eap_tls_tx_fragment_bytes = config->max_eap_tls_tx_fragment_bytes;
+    sa->eap_tls_tx_terminal = terminal;
+    return true;
+}
+
+static bool
 ikev2_helper_send_cached_eap_tls_message(
     const struct ikev2_helper_listener *listener,
     struct ikev2_helper_ike_sa *sa,
@@ -6904,26 +6995,12 @@ ikev2_helper_send_cached_eap_tls_message(
     {
         *terminal_complete = false;
     }
-    if (!listener || !sa || !sa->active || !tls_data || !tls_data_len
-        || !config || !config->max_eap_tls_tx_fragment_bytes
-        || tls_data_len > config->max_eap_tls_bytes
-        || tls_data_len > UINT32_MAX || !tx_pending || !terminal_complete)
+    if (!listener || !tx_pending || !terminal_complete
+        || !ikev2_helper_cache_eap_tls_message(sa, tls_data, tls_data_len,
+                                               terminal, config))
     {
         return false;
     }
-
-    ikev2_helper_clear_eap_tls_tx_buffer(sa);
-    sa->eap_tls_tx = calloc(1, tls_data_len);
-    if (!sa->eap_tls_tx)
-    {
-        return false;
-    }
-    memcpy(sa->eap_tls_tx, tls_data, tls_data_len);
-    sa->eap_tls_tx_capacity = tls_data_len;
-    sa->eap_tls_tx_len = tls_data_len;
-    sa->eap_tls_tx_fragment_bytes = config->max_eap_tls_tx_fragment_bytes;
-    sa->eap_tls_tx_terminal = terminal;
-
     return ikev2_helper_send_cached_eap_tls_tx_fragment(
         listener, sa, message_id, eap_identifier, tx_pending,
         terminal_complete);
@@ -7435,15 +7512,10 @@ ikev2_helper_build_tls_server_hello(
 }
 
 static bool
-ikev2_helper_send_cached_eap_tls_server_hello_request(
-    const struct ikev2_helper_listener *listener,
+ikev2_helper_cache_eap_tls_server_auth_flight(
     struct ikev2_helper_ike_sa *sa,
-    uint32_t message_id,
-    uint8_t eap_identifier,
     const struct provider_helper_server_auth_config *server_auth_config,
-    const struct provider_helper_runtime_config *config,
-    bool *tx_pending,
-    bool *terminal_complete)
+    const struct provider_helper_runtime_config *config)
 {
     if (!config || !config->max_eap_tls_bytes
         || config->max_eap_tls_bytes > PROVIDER_HELPER_IPC_MAX_MESSAGE)
@@ -7462,12 +7534,155 @@ ikev2_helper_send_cached_eap_tls_server_hello_request(
         ikev2_helper_build_tls_server_hello(
             sa, server_auth_config, server_hello, config->max_eap_tls_bytes,
             &server_hello_len)
-        && ikev2_helper_send_cached_eap_tls_message(
-               listener, sa, message_id, eap_identifier, server_hello,
-               server_hello_len, false, config, tx_pending,
-               terminal_complete);
+        && ikev2_helper_cache_eap_tls_message(sa, server_hello,
+                                              server_hello_len, false,
+                                              config);
     ikev2_helper_secure_zero(server_hello, config->max_eap_tls_bytes);
     free(server_hello);
+    return ret;
+}
+
+static bool
+ikev2_helper_build_tls13_certificate_verify_sign_input(
+    const struct ikev2_helper_ike_sa *sa,
+    uint8_t *sign_input,
+    size_t sign_input_size,
+    size_t *sign_input_len)
+{
+    static const char context[] = "TLS 1.3, server CertificateVerify";
+    if (sign_input_len)
+    {
+        *sign_input_len = 0;
+    }
+    if (!sa || !sa->active || !sa->eap_tls_server_hello.ready
+        || !sign_input || !sign_input_len)
+    {
+        return false;
+    }
+
+    const size_t needed = 64 + strlen(context) + 1
+                          + IKEV2_HELPER_SHA256_DIGEST_BYTES;
+    if (needed > sign_input_size)
+    {
+        return false;
+    }
+
+    uint8_t *pos = sign_input;
+    memset(pos, 0x20, 64);
+    pos += 64;
+    memcpy(pos, context, strlen(context));
+    pos += strlen(context);
+    *pos++ = 0;
+    memcpy(pos, sa->eap_tls_server_hello.transcript_hash,
+           sizeof(sa->eap_tls_server_hello.transcript_hash));
+    pos += sizeof(sa->eap_tls_server_hello.transcript_hash);
+    *sign_input_len = (size_t)(pos - sign_input);
+    return true;
+}
+
+static bool
+ikev2_helper_build_tls13_certificate_verify(
+    struct ikev2_helper_tls_server_hello *server,
+    const struct provider_helper_server_sign_response *sign_response,
+    uint8_t *record,
+    size_t record_size,
+    size_t *record_len)
+{
+    if (record_len)
+    {
+        *record_len = 0;
+    }
+    if (!server || !server->ready || !sign_response || !record
+        || !record_size || !record_len
+        || !provider_helper_server_sign_response_valid(sign_response, NULL, 0)
+        || sign_response->status != PROVIDER_HELPER_SERVER_SIGN_OK
+        || !sign_response->signature_len)
+    {
+        return false;
+    }
+
+    uint16_t signature_scheme = 0;
+    const size_t body_len = 2 + 2 + sign_response->signature_len;
+    const size_t handshake_len = IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE
+                                 + body_len;
+    if (!ikev2_helper_tls13_signature_scheme(sign_response->sigalg,
+                                             &signature_scheme)
+        || body_len > 0x00ffffffu
+        || handshake_len > PROVIDER_HELPER_SERVER_AUTH_TRANSCRIPT_SIZE)
+    {
+        return false;
+    }
+
+    uint8_t *handshake = calloc(1, handshake_len);
+    if (!handshake)
+    {
+        return false;
+    }
+
+    uint8_t *pos = handshake;
+    *pos++ = IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CERTIFICATE_VERIFY;
+    ikev2_helper_write_be24(&pos, (uint32_t)body_len);
+    ikev2_helper_write_be16(&pos, signature_scheme);
+    ikev2_helper_write_be16(&pos, (uint16_t)sign_response->signature_len);
+    memcpy(pos, sign_response->signature, sign_response->signature_len);
+    pos += sign_response->signature_len;
+
+    const bool ret =
+        (size_t)(pos - handshake) == handshake_len
+        && ikev2_helper_tls13_append_transcript(server, handshake,
+                                                handshake_len)
+        && ikev2_helper_tls13_encrypt_server_handshake_record(
+               server, handshake, handshake_len, record, record_size,
+               record_len);
+    ikev2_helper_secure_zero(handshake, handshake_len);
+    free(handshake);
+    return ret;
+}
+
+static bool
+ikev2_helper_send_cached_eap_tls_certificate_verify_request(
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_ike_sa *sa,
+    uint32_t message_id,
+    uint8_t eap_identifier,
+    const struct provider_helper_server_sign_response *sign_response,
+    const struct provider_helper_runtime_config *config,
+    bool *tx_pending,
+    bool *terminal_complete)
+{
+    if (tx_pending)
+    {
+        *tx_pending = false;
+    }
+    if (terminal_complete)
+    {
+        *terminal_complete = false;
+    }
+    if (!listener || !sa || !sa->active || !sign_response || !tx_pending
+        || !terminal_complete || !config || !config->max_eap_tls_bytes
+        || config->max_eap_tls_bytes > PROVIDER_HELPER_IPC_MAX_MESSAGE)
+    {
+        return false;
+    }
+
+    uint8_t *certificate_verify = calloc(1, config->max_eap_tls_bytes);
+    if (!certificate_verify)
+    {
+        return false;
+    }
+
+    size_t certificate_verify_len = 0;
+    const bool ret =
+        ikev2_helper_build_tls13_certificate_verify(
+            &sa->eap_tls_server_hello, sign_response, certificate_verify,
+            config->max_eap_tls_bytes, &certificate_verify_len)
+        && ikev2_helper_append_cached_eap_tls_message(
+               sa, certificate_verify, certificate_verify_len, false, config)
+        && ikev2_helper_send_cached_eap_tls_tx_fragment(
+               listener, sa, message_id, eap_identifier, tx_pending,
+               terminal_complete);
+    ikev2_helper_secure_zero(certificate_verify, config->max_eap_tls_bytes);
+    free(certificate_verify);
     return ret;
 }
 
@@ -7558,6 +7773,33 @@ ikev2_helper_queue_ike_auth_server_sign_request(
 }
 
 static bool
+ikev2_helper_queue_eap_tls_certificate_verify_server_sign_request(
+    int ipc_fd,
+    uint64_t *tx_sequence,
+    uint64_t *next_server_sign_request_id,
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_ike_sa *sa,
+    const struct provider_helper_server_auth_config *server_auth_config)
+{
+    uint8_t sign_input[64 + sizeof("TLS 1.3, server CertificateVerify")
+                       + IKEV2_HELPER_SHA256_DIGEST_BYTES];
+    size_t sign_input_len = 0;
+    const bool ready =
+        ikev2_helper_build_tls13_certificate_verify_sign_input(
+            sa, sign_input, sizeof(sign_input), &sign_input_len);
+
+    const bool ret =
+        ready
+        && ikev2_helper_queue_server_sign_transcript_request(
+               ipc_fd, tx_sequence, next_server_sign_request_id, listener, sa,
+               server_auth_config,
+               PROVIDER_HELPER_SERVER_SIGN_PURPOSE_EAP_TLS_CERTIFICATE_VERIFY,
+               sign_input, sign_input_len);
+    ikev2_helper_secure_zero(sign_input, sizeof(sign_input));
+    return ret;
+}
+
+static bool
 ikev2_helper_send_sign_failure_response_and_clear(
     struct ikev2_helper_ike_sa_table *table,
     const struct ikev2_helper_listener *listener,
@@ -7592,13 +7834,15 @@ ikev2_helper_apply_server_sign_response(
     size_t listener_count,
     const struct provider_helper_server_auth_config *server_auth_config,
     const struct provider_helper_server_sign_response *response,
+    const struct provider_helper_runtime_config *config,
     int ipc_fd,
     uint64_t *tx_sequence,
     uint64_t *next_auth_request_id,
     struct provider_helper_runtime_stats *counters)
 {
     if (!table || !listeners || !server_auth_config || !response
-        || ipc_fd < 0 || !tx_sequence || !next_auth_request_id || !counters)
+        || !config || ipc_fd < 0 || !tx_sequence || !next_auth_request_id
+        || !counters)
     {
         return false;
     }
@@ -7618,9 +7862,7 @@ ikev2_helper_apply_server_sign_response(
         if (!listener || response->status != PROVIDER_HELPER_SERVER_SIGN_OK
             || response->config_revision != sa->server_sign_config_revision
             || response->sigalg != sa->server_sign_sigalg
-            || !response->signature_len
-            || sa->server_sign_purpose
-                   != PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH)
+            || !response->signature_len)
         {
             if (listener)
             {
@@ -7632,10 +7874,38 @@ ikev2_helper_apply_server_sign_response(
             return true;
         }
 
+        const uint32_t purpose = sa->server_sign_purpose;
         sa->pending_server_sign_request_id = 0;
         sa->server_sign_config_revision = 0;
         sa->server_sign_sigalg = 0;
         sa->server_sign_purpose = 0;
+        if (purpose
+            == PROVIDER_HELPER_SERVER_SIGN_PURPOSE_EAP_TLS_CERTIFICATE_VERIFY)
+        {
+            bool tx_pending = false;
+            bool terminal_complete = false;
+            if (!ikev2_helper_send_cached_eap_tls_certificate_verify_request(
+                    listener, sa, sa->message_id, sa->pending_eap_identifier,
+                    response, config, &tx_pending, &terminal_complete))
+            {
+                ++counters->ike_auth_unsupported_response_failed;
+                return ikev2_helper_send_sign_failure_response_and_clear(
+                    table, listener, sa, counters);
+            }
+            sa->updated = time(NULL);
+            if (terminal_complete)
+            {
+                ikev2_helper_clear_ike_sa(table, sa, counters);
+            }
+            counters->ike_sa_active = table->active;
+            return true;
+        }
+        if (purpose != PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH)
+        {
+            return ikev2_helper_send_sign_failure_response_and_clear(
+                table, listener, sa, counters);
+        }
+
         if (!ikev2_helper_send_cached_server_auth_response(
                 listener, sa, server_auth_config, response))
         {
@@ -8628,20 +8898,17 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     (uint8_t)(sa->pending_eap_identifier + 1u);
                 bool tx_pending = false;
                 bool terminal_complete = false;
-                if (ikev2_helper_send_cached_eap_tls_server_hello_request(
-                        listener, sa, header.message_id,
-                        next_eap_identifier,
-                        server_auth_configured ? server_auth_config : NULL,
-                        config, &tx_pending, &terminal_complete))
+                if (ikev2_helper_cache_eap_tls_server_auth_flight(
+                        sa, server_auth_configured ? server_auth_config : NULL,
+                        config)
+                    && ikev2_helper_queue_eap_tls_certificate_verify_server_sign_request(
+                        ipc_fd, tx_sequence, next_server_sign_request_id,
+                        listener, sa, server_auth_config))
                 {
                     sa->message_id = header.message_id;
                     sa->pending_eap_identifier = next_eap_identifier;
                     sa->updated = time(NULL);
                     ikev2_helper_reset_eap_tls_rx_buffer(sa);
-                    if (terminal_complete)
-                    {
-                        ikev2_helper_clear_ike_sa(sa_table, sa, counters);
-                    }
                 }
                 else if (ikev2_helper_send_cached_eap_tls_alert_request(
                              listener, sa, header.message_id,
@@ -9832,8 +10099,8 @@ ikev2_helper_loop(int fd)
                                                                &response)
                     || !ikev2_helper_apply_server_sign_response(
                         sa_table, listeners, listener_count,
-                        &server_auth_config, &response, fd, &tx_sequence,
-                        &next_auth_request_id, &counters))
+                        &server_auth_config, &response, &config, fd,
+                        &tx_sequence, &next_auth_request_id, &counters))
                 {
                     ret = 6;
                     goto done;

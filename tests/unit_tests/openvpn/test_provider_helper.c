@@ -1669,8 +1669,11 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
 #define TEST_IKEV2_TLS_X25519_KEY_SHARE_BYTES 32
 #define TEST_IKEV2_TLS_AES_GCM_TAG_BYTES 16
 #define TEST_IKEV2_SERVER_AUTH_CERT_CHAIN_BYTES 512
+#define TEST_PROVIDER_HELPER_SERVER_SIGN_SIGNATURE_BYTES 64
 #define TEST_IKEV2_TLS_CERTIFICATE_HANDSHAKE_BYTES \
     (4 + 1 + 3 + 3 + TEST_IKEV2_SERVER_AUTH_CERT_CHAIN_BYTES + 2)
+#define TEST_IKEV2_TLS_CERTIFICATE_VERIFY_HANDSHAKE_BYTES \
+    (4 + 2 + 2 + TEST_PROVIDER_HELPER_SERVER_SIGN_SIGNATURE_BYTES)
 #define TEST_IKEV2_TLS_EXTENSION_SUPPORTED_VERSIONS 43
 #define TEST_IKEV2_TLS_EXTENSION_KEY_SHARE 51
 
@@ -4048,8 +4051,24 @@ test_recv_ikev2_encrypted_eap_tls_server_hello_request(
     assert_int_equal(certificate_len,
                      TEST_IKEV2_TLS_CERTIFICATE_HANDSHAKE_BYTES + 1
                      + TEST_IKEV2_TLS_AES_GCM_TAG_BYTES);
+    const size_t certificate_record_len = 5 + certificate_len;
+    assert_true(tls_len > server_hello_record_len
+                          + encrypted_extensions_record_len
+                          + certificate_record_len + 5);
+
+    const uint8_t *certificate_verify =
+        certificate + certificate_record_len;
+    assert_int_equal(certificate_verify[0],
+                     TEST_IKEV2_TLS_CONTENT_TYPE_APPLICATION_DATA);
+    assert_int_equal(test_read_be16(certificate_verify + 1),
+                     TEST_IKEV2_TLS_VERSION_1_2);
+    const uint16_t certificate_verify_len =
+        test_read_be16(certificate_verify + 3);
+    assert_int_equal(certificate_verify_len,
+                     TEST_IKEV2_TLS_CERTIFICATE_VERIFY_HANDSHAKE_BYTES + 1
+                     + TEST_IKEV2_TLS_AES_GCM_TAG_BYTES);
     assert_int_equal(server_hello_record_len + encrypted_extensions_record_len
-                     + 5 + certificate_len,
+                     + certificate_record_len + 5 + certificate_verify_len,
                      tls_len);
 
     secure_memzero(plaintext, sizeof(plaintext));
@@ -6834,7 +6853,7 @@ test_provider_helper_server_sign_cb(
     response->config_revision = request->config_revision;
     response->status = PROVIDER_HELPER_SERVER_SIGN_OK;
     response->sigalg = request->sigalg;
-    response->signature_len = 64;
+    response->signature_len = TEST_PROVIDER_HELPER_SERVER_SIGN_SIGNATURE_BYTES;
     for (uint32_t i = 0; i < response->signature_len; ++i)
     {
         response->signature[i] = (uint8_t)(0x5a ^ i);
@@ -7743,6 +7762,33 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
         response_fd, natt_port, initiator_spi, &sa_init_material, true, 3, 2,
         0, 0, client_hello + first_fragment_len,
         sizeof(client_hello) - first_fragment_len);
+    for (int i = 0; i < 100 && sign_state.calls < 2; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(sign_state.calls, 2);
+    assert_int_equal(
+        sign_state.request.purpose,
+        PROVIDER_HELPER_SERVER_SIGN_PURPOSE_EAP_TLS_CERTIFICATE_VERIFY);
+    static const char certificate_verify_context[] =
+        "TLS 1.3, server CertificateVerify";
+    const size_t certificate_verify_input_len =
+        64 + strlen(certificate_verify_context) + 1
+        + TEST_IKEV2_PRF_SHA256_BYTES;
+    assert_int_equal(sign_state.request.transcript_len,
+                     certificate_verify_input_len);
+    for (size_t i = 0; i < 64; ++i)
+    {
+        assert_int_equal(sign_state.request.transcript[i], 0x20);
+    }
+    assert_memory_equal(sign_state.request.transcript + 64,
+                        certificate_verify_context,
+                        strlen(certificate_verify_context));
+    assert_int_equal(
+        sign_state.request.transcript[64 + strlen(certificate_verify_context)],
+        0);
     usleep(10000);
     test_recv_ikev2_encrypted_eap_tls_server_hello_request(
         response_fd, initiator_spi, &sa_init_material, 3, 3, true);
