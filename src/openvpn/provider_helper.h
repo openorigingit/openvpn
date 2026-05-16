@@ -36,7 +36,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 60
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  856
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  888
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     104
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
 #define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
@@ -544,6 +544,10 @@ struct provider_helper_runtime_stats {
     uint64_t ike_auth_unsupported;
     uint64_t ike_auth_unsupported_response_tx;
     uint64_t ike_auth_unsupported_response_failed;
+    uint64_t ike_auth_final_auth_rx;
+    uint64_t ike_auth_final_auth_bad_shape;
+    uint64_t ike_auth_final_auth_unsupported_tx;
+    uint64_t ike_auth_final_auth_unsupported_failed;
     uint64_t ike_create_child_install_unsupported_tx;
     uint64_t ike_create_child_install_unsupported_failed;
     uint64_t ike_exchange_pre_auth_dropped;
@@ -621,6 +625,7 @@ struct provider_helper_ikev2_payload_summary {
     uint32_t nonce_count;
     uint32_t notify_count;
     uint32_t idi_count;
+    uint32_t auth_count;
     uint32_t cert_count;
     uint32_t eap_count;
     uint32_t delete_count;
@@ -640,6 +645,8 @@ struct provider_helper_ikev2_payload_summary {
     size_t notify_len;
     size_t idi_offset;
     size_t idi_len;
+    size_t auth_offset;
+    size_t auth_len;
     size_t cert_offset;
     size_t cert_len;
     size_t cert_bytes;

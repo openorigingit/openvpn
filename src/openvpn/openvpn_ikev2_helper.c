@@ -146,6 +146,7 @@
 #define IKEV2_HELPER_POLL_TIMEOUT_MS 1000
 #define IKEV2_HELPER_IKE_SA_INIT_MESSAGE_ID 0
 #define IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID 1
+#define IKEV2_HELPER_AUTH_METHOD_SHARED_KEY_MIC 2
 #define IKEV2_HELPER_IKE_SA_INIT_TRANSCRIPT_BYTES \
     PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE
 #define IKEV2_HELPER_PROTECTED_RESPONSE_CACHE_BYTES \
@@ -2840,6 +2841,12 @@ ikev2_helper_record_inner_payload(
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_AUTH:
             summary->saw_auth = true;
+            ++summary->auth_count;
+            if (summary->auth_count == 1)
+            {
+                summary->auth_offset = body_offset;
+                summary->auth_len = body_len;
+            }
             break;
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_EAP:
@@ -2990,6 +2997,29 @@ ikev2_helper_parse_ike_auth_inner_payloads(
 
     return pos == plaintext_len ? PROVIDER_HELPER_IKEV2_PARSE_OK
                                 : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+}
+
+static bool
+ikev2_helper_post_eap_final_auth_shape_valid(
+    const struct ikev2_helper_ike_sa *sa,
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    const struct provider_helper_ikev2_payload_summary *summary)
+{
+    if (!sa || !sa->active || !sa->auth_allowed || sa->auth_authorized
+        || !sa->eap_tls_started || !sa->eap_tls_client_finished
+        || !plaintext || !summary || summary->payload_count != 1
+        || !summary->saw_auth || summary->auth_count != 1
+        || !ikev2_helper_body_inside(plaintext_len, summary->auth_offset,
+                                     summary->auth_len)
+        || summary->auth_len <= 4)
+    {
+        return false;
+    }
+
+    const uint8_t *auth = plaintext + summary->auth_offset;
+    return auth[0] == IKEV2_HELPER_AUTH_METHOD_SHARED_KEY_MIC && !auth[1]
+           && !auth[2] && !auth[3];
 }
 
 static void
@@ -9664,6 +9694,35 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     return;
                 }
                 ++counters->ike_auth_inner_parsed;
+
+                if (sa->auth_allowed && !sa->auth_authorized)
+                {
+                    ++counters->ike_auth_final_auth_rx;
+                    if (!ikev2_helper_post_eap_final_auth_shape_valid(
+                            sa, plaintext, plaintext_len, &inner_summary))
+                    {
+                        ++counters->ike_auth_final_auth_bad_shape;
+                        ikev2_helper_clear_ike_sa(sa_table, sa, counters);
+                    }
+                    else if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
+                                 listener, sa,
+                                 PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+                                 header.message_id,
+                                 PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
+                    {
+                        ++counters->ike_auth_final_auth_unsupported_tx;
+                        ikev2_helper_clear_ike_sa(sa_table, sa, counters);
+                    }
+                    else
+                    {
+                        ++counters->ike_auth_final_auth_unsupported_failed;
+                        ikev2_helper_clear_ike_sa(sa_table, sa, counters);
+                    }
+                    ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+
                 ++counters->ike_auth_eap_tls_rx;
 
                 if (ikev2_helper_is_eap_tls_ack(sa, plaintext, plaintext_len,
