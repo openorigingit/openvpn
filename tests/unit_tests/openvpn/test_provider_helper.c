@@ -534,6 +534,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_auth_allow_temp_failure_tx = 48,
         .ike_auth_allow_temp_failure_failed = 49,
         .ike_auth_allow_missing_xfrm_lease = 50,
+        .ike_auth_allow_eap_success_tx = 101,
+        .ike_auth_allow_eap_success_failed = 102,
         .ike_auth_allow_unsupported = 42,
         .ike_auth_unsupported = 43,
         .ike_auth_unsupported_response_tx = 98,
@@ -710,6 +712,10 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_auth_allow_temp_failure_failed);
     assert_int_equal(output.ike_auth_allow_missing_xfrm_lease,
                      input.ike_auth_allow_missing_xfrm_lease);
+    assert_int_equal(output.ike_auth_allow_eap_success_tx,
+                     input.ike_auth_allow_eap_success_tx);
+    assert_int_equal(output.ike_auth_allow_eap_success_failed,
+                     input.ike_auth_allow_eap_success_failed);
     assert_int_equal(output.ike_auth_allow_unsupported,
                      input.ike_auth_allow_unsupported);
     assert_int_equal(output.ike_auth_unsupported, input.ike_auth_unsupported);
@@ -1663,6 +1669,7 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
     (3 * TEST_IKEV2_PRF_SHA256_BYTES + 2 * TEST_IKEV2_AES_GCM_KEYMAT_BYTES)
 #define TEST_IKEV2_EAP_CODE_REQUEST 1
 #define TEST_IKEV2_EAP_CODE_RESPONSE 2
+#define TEST_IKEV2_EAP_CODE_SUCCESS 3
 #define TEST_IKEV2_EAP_TYPE_TLS 13
 #define TEST_IKEV2_EAP_TLS_FLAG_START 0x20
 #define TEST_IKEV2_EAP_TLS_FLAG_MORE_FRAGMENTS 0x40
@@ -4144,6 +4151,34 @@ test_recv_ikev2_encrypted_server_auth_response(
     assert_int_equal(test_read_be16(plaintext + pos + 6), 6);
     assert_int_equal(plaintext[pos + 8], TEST_IKEV2_EAP_TYPE_TLS);
     assert_int_equal(plaintext[pos + 9], 0x20);
+
+    secure_memzero(plaintext, sizeof(plaintext));
+}
+
+static void
+test_recv_ikev2_encrypted_eap_success_response(
+    int fd,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    uint32_t expected_message_id,
+    uint8_t expected_eap_identifier,
+    bool expect_natt)
+{
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t payload_len = test_recv_ikev2_encrypted_response_payload(
+        fd, initiator_spi, material, PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+        expected_message_id, PROVIDER_HELPER_IKEV2_PAYLOAD_EAP, expect_natt,
+        plaintext, sizeof(plaintext));
+
+    const size_t eap_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4u;
+    assert_int_equal(payload_len, eap_payload_len);
+    assert_int_equal(plaintext[0], PROVIDER_HELPER_IKEV2_PAYLOAD_NONE);
+    assert_int_equal(plaintext[1], 0);
+    assert_int_equal(test_read_be16(plaintext + 2), eap_payload_len);
+    assert_int_equal(plaintext[4], TEST_IKEV2_EAP_CODE_SUCCESS);
+    assert_int_equal(plaintext[5], expected_eap_identifier);
+    assert_int_equal(test_read_be16(plaintext + 6), 4);
 
     secure_memzero(plaintext, sizeof(plaintext));
 }
@@ -8317,7 +8352,7 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
 }
 
 static void
-test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
+test_provider_helper_spawn_ikev2_eap_tls_auth_allow_success(void **state)
 {
     (void)state;
 
@@ -8334,6 +8369,7 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
 
     struct test_provider_helper_auth_cb_state auth_state;
     CLEAR(auth_state);
+    auth_state.allow = true;
     provider_helper_supervisor_set_auth_callback(
         &supervisor, test_provider_helper_auth_cb, &auth_state);
     struct test_provider_helper_server_sign_cb_state sign_state;
@@ -8392,6 +8428,39 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
 
     test_provider_helper_send_server_auth_config(&supervisor);
+
+    const struct provider_helper_xfrm_lease xfrm_lease = {
+        .lease_id = 202,
+        .provider_session_id = 101,
+        .policy_revision = 303,
+        .mark_value = 0x4200,
+        .mark_mask = 0xffff,
+        .if_id = 12,
+        .reqid = 1100,
+        .address_family = AF_INET,
+        .flags = PROVIDER_HELPER_XFRM_LEASE_IPV4,
+        .local_ts_start_ipv4 = 0x0a580001,
+        .local_ts_end_ipv4 = 0x0a580001,
+        .local_ts_start_port = 0,
+        .local_ts_end_port = 65535,
+        .remote_ts_start_ipv4 = 0x0a580002,
+        .remote_ts_end_ipv4 = 0x0a580002,
+        .remote_ts_start_port = 0,
+        .remote_ts_end_port = 65535,
+        .ip_protocol_id = 0,
+    };
+    uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
+    assert_true(provider_helper_supervisor_send_xfrm_lease(
+                    &supervisor, &xfrm_lease, 99));
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
 
     int response_fd = test_create_udp_sender(0x7f00000fu);
     const uint64_t initiator_spi = 0x1234432112344321ull;
@@ -8539,10 +8608,15 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
                         strlen("1234"));
     assert_true(auth_state.request.cert_issuer_len > 0);
     assert_non_null(strstr(auth_state.request.cert_issuer, "Test IKEv2 CA"));
-    test_recv_ikev2_encrypted_notify_exchange_response(
-        response_fd, initiator_spi, &sa_init_material,
-        PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH, 4,
-        PROVIDER_HELPER_IKEV2_NOTIFY_AUTHENTICATION_FAILED, true);
+    test_recv_ikev2_encrypted_eap_success_response(
+        response_fd, initiator_spi, &sa_init_material, 4, 3, true);
+    test_send_ikev2_encrypted_create_child_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, 5);
+    for (int i = 0; i < 20; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
     secure_memzero(client_private_key, sizeof(client_private_key));
     secure_memzero(client_public_key, sizeof(client_public_key));
     EVP_PKEY_free(cert_key);
@@ -8550,7 +8624,7 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
     secure_memzero(server_flight, sizeof(server_flight));
     secure_memzero(client_finished, sizeof(client_finished));
 
-    uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
+    target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd,
                            PROVIDER_HELPER_MSG_STATS_REQUEST,
                            supervisor.next_tx_sequence++, 90);
@@ -8568,12 +8642,19 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
         supervisor.runtime_stats.ike_auth_eap_tls_client_hello_rx, 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_cert_extracted, 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_request_tx, 1);
-    assert_int_equal(supervisor.runtime_stats.ike_auth_denied, 1);
-    assert_int_equal(supervisor.runtime_stats.ike_auth_deny_response_tx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_denied, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_deny_response_tx, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_allow_eap_success_tx,
+                     1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_auth_allow_eap_success_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported_response_tx,
                      0);
-    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_exchange_pre_auth_dropped,
+                     1);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_response_tx, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
 
     close(response_fd);
     close(listener_fd);
@@ -10661,7 +10742,7 @@ main(void)
             test_provider_helper_spawn_ikev2_rejects_inner_aggregate_limits),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_scaffold),
         cmocka_unit_test(
-            test_provider_helper_spawn_ikev2_initial_eap_start),
+            test_provider_helper_spawn_ikev2_eap_tls_auth_allow_success),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_prefix_limit),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_sa_init_rate_limit),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_auth_allow_unsupported),

@@ -287,6 +287,8 @@ struct ikev2_helper_ike_sa {
     char cert_issuer[PROVIDER_HELPER_AUTH_ISSUER_SIZE];
     bool eap_tls_started;
     uint8_t pending_eap_identifier;
+    bool eap_tls_last_response_identifier_ready;
+    uint8_t eap_tls_last_response_identifier;
     bool eap_tls_message_len_ready;
     uint32_t eap_tls_message_len;
     uint32_t eap_tls_received;
@@ -309,6 +311,7 @@ struct ikev2_helper_ike_sa {
     uint32_t server_sign_sigalg;
     uint32_t server_sign_purpose;
     uint64_t pending_auth_request_id;
+    bool auth_allowed;
     bool auth_authorized;
     uint64_t provider_session_id;
     uint64_t xfrm_lease_id;
@@ -4268,6 +4271,8 @@ ikev2_helper_process_followup_eap_tls_response(
         ikev2_helper_clear_eap_tls_buffer(sa);
         return false;
     }
+    sa->eap_tls_last_response_identifier = eap[1];
+    sa->eap_tls_last_response_identifier_ready = true;
     *more_fragments = fragment.more_fragments;
     return true;
 }
@@ -6210,7 +6215,7 @@ ikev2_helper_xfrm_lease_equal(const struct provider_helper_xfrm_lease *a,
 }
 
 static void
-ikev2_helper_authorize_ike_sa(
+ikev2_helper_stage_ike_sa_auth_allow(
     struct ikev2_helper_ike_sa *sa,
     const struct provider_helper_auth_response *response,
     const struct provider_helper_xfrm_lease *lease)
@@ -6221,11 +6226,22 @@ ikev2_helper_authorize_ike_sa(
     }
 
     sa->pending_auth_request_id = 0;
-    sa->auth_authorized = true;
+    sa->auth_allowed = true;
     sa->provider_session_id = response->provider_session_id;
     sa->xfrm_lease_id = response->xfrm_lease_id;
     sa->policy_revision = response->policy_revision;
     sa->authorized_xfrm_lease = *lease;
+}
+
+static void
+ikev2_helper_authorize_ike_sa(
+    struct ikev2_helper_ike_sa *sa,
+    const struct provider_helper_auth_response *response,
+    const struct provider_helper_xfrm_lease *lease)
+{
+    ikev2_helper_stage_ike_sa_auth_allow(sa, response, lease);
+    sa->auth_allowed = false;
+    sa->auth_authorized = true;
 }
 
 static uint32_t
@@ -6922,6 +6938,84 @@ ikev2_helper_send_cached_encrypted_child_sa_response(
 }
 
 static bool
+ikev2_helper_build_eap_success_plaintext(uint8_t eap_identifier,
+                                         uint8_t *plaintext,
+                                         size_t plaintext_size,
+                                         size_t *plaintext_len)
+{
+    if (plaintext_len)
+    {
+        *plaintext_len = 0;
+    }
+    if (!plaintext || !plaintext_len)
+    {
+        return false;
+    }
+
+    const size_t eap_body_len = 4u;
+    const size_t eap_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + eap_body_len;
+    const size_t total_len = eap_payload_len + 1u;
+    if (eap_payload_len > UINT16_MAX || total_len > plaintext_size)
+    {
+        return false;
+    }
+
+    memset(plaintext, 0, total_len);
+    uint8_t *pos = plaintext;
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+    *pos++ = 0;
+    ikev2_helper_write_be16(&pos, (uint16_t)eap_payload_len);
+    *pos++ = IKEV2_HELPER_EAP_CODE_SUCCESS;
+    *pos++ = eap_identifier;
+    ikev2_helper_write_be16(&pos, (uint16_t)eap_body_len);
+    *pos++ = 0; /* Pad Length: no padding bytes for AEAD. */
+
+    if ((size_t)(pos - plaintext) != total_len)
+    {
+        ikev2_helper_secure_zero(plaintext, plaintext_size);
+        return false;
+    }
+    *plaintext_len = total_len;
+    return true;
+}
+
+static bool
+ikev2_helper_send_cached_eap_success_response(
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_ike_sa *sa,
+    uint32_t message_id,
+    uint8_t eap_identifier)
+{
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    uint8_t response[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    size_t plaintext_len = 0;
+    size_t response_len = 0;
+    if (!listener || !sa || !sa->active
+        || !ikev2_helper_build_eap_success_plaintext(
+            eap_identifier, plaintext, sizeof(plaintext), &plaintext_len)
+        || !ikev2_helper_build_encrypted_payload_response(
+            response, sizeof(response), &response_len, listener, sa,
+            PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH, message_id,
+            PROVIDER_HELPER_IKEV2_PAYLOAD_EAP, plaintext, plaintext_len))
+    {
+        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+        ikev2_helper_secure_zero(response, sizeof(response));
+        return false;
+    }
+
+    const ssize_t sent =
+        sendto(listener->fd, response, response_len, 0,
+               (const struct sockaddr *)&sa->peer, sa->peer_len);
+    const bool ret = sent == (ssize_t)response_len
+                     && ikev2_helper_cache_protected_response(
+                         sa, message_id, response, response_len);
+    ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+    ikev2_helper_secure_zero(response, sizeof(response));
+    return ret;
+}
+
+static bool
 ikev2_helper_apply_auth_response(
     struct ikev2_helper_ike_sa_table *table,
     const struct ikev2_helper_listener *listeners,
@@ -6987,6 +7081,27 @@ ikev2_helper_apply_auth_response(
                     ++counters->ike_auth_allow_temp_failure_failed;
                 }
                 ikev2_helper_clear_ike_sa(table, sa, counters);
+                counters->ike_sa_active = table->active;
+                return true;
+            }
+            if (sa->eap_tls_client_finished
+                && sa->eap_tls_last_response_identifier_ready)
+            {
+                if (listener
+                    && ikev2_helper_send_cached_eap_success_response(
+                        listener, sa, sa->message_id,
+                        sa->eap_tls_last_response_identifier))
+                {
+                    ikev2_helper_stage_ike_sa_auth_allow(sa, response,
+                                                         lease);
+                    sa->updated = time(NULL);
+                    ++counters->ike_auth_allow_eap_success_tx;
+                }
+                else
+                {
+                    ++counters->ike_auth_allow_eap_success_failed;
+                    ikev2_helper_clear_ike_sa(table, sa, counters);
+                }
                 counters->ike_sa_active = table->active;
                 return true;
             }
