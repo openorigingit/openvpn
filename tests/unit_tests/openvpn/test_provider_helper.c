@@ -10307,6 +10307,7 @@ test_provider_helper_spawn_ikev2_tls12_client_hello_server_flight(void **state)
         test_recv_ikev2_encrypted_final_auth_child_sa_response(
             response_fd, initiator_spi, &sa_init_material, 5, &xfrm_lease,
             true);
+    assert_true(initial_child_spi != 0);
 
     target_rx_sequence = supervisor.last_rx_sequence + 2;
     write_helper_header_fd(supervisor.ipc_fd,
@@ -10368,18 +10369,46 @@ test_provider_helper_spawn_ikev2_tls12_client_hello_server_flight(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
 
-    test_send_ikev2_encrypted_child_delete_from(
-        response_fd, natt_port, initiator_spi, &sa_init_material, true, 7,
-        initial_child_spi);
+    test_send_ikev2_encrypted_create_child_rekey_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, 7);
     usleep(10000);
-    test_recv_ikev2_encrypted_empty_exchange_response(
-        response_fd, initiator_spi, &sa_init_material,
-        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 7, true);
+    const uint32_t rekeyed_child_spi =
+        test_recv_ikev2_encrypted_child_sa_response(
+            response_fd, initiator_spi, &sa_init_material, 7, &xfrm_lease,
+            true);
+    assert_true(rekeyed_child_spi != 0);
 
     target_rx_sequence = supervisor.last_rx_sequence + 2;
     write_helper_header_fd(supervisor.ipc_fd,
                            PROVIDER_HELPER_MSG_STATS_REQUEST,
                            supervisor.next_tx_sequence++, 93);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_rekey_rx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_response_tx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_scaffolded, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_keymat_ready, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
+
+    test_send_ikev2_encrypted_child_delete_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, 8,
+        rekeyed_child_spi);
+    usleep(10000);
+    test_recv_ikev2_encrypted_empty_exchange_response(
+        response_fd, initiator_spi, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 8, true);
+
+    target_rx_sequence = supervisor.last_rx_sequence + 2;
+    write_helper_header_fd(supervisor.ipc_fd,
+                           PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 94);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -10398,16 +10427,16 @@ test_provider_helper_spawn_ikev2_tls12_client_hello_server_flight(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
 
     test_send_ikev2_encrypted_ike_delete_from(
-        response_fd, natt_port, initiator_spi, &sa_init_material, true, 8);
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, 9);
     usleep(10000);
     test_recv_ikev2_encrypted_empty_exchange_response(
         response_fd, initiator_spi, &sa_init_material,
-        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 8, true);
+        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 9, true);
 
     target_rx_sequence = supervisor.last_rx_sequence + 2;
     write_helper_header_fd(supervisor.ipc_fd,
                            PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           supervisor.next_tx_sequence++, 94);
+                           supervisor.next_tx_sequence++, 95);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
