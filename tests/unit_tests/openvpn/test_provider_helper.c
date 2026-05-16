@@ -1660,12 +1660,14 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
 #define TEST_IKEV2_EAP_TLS_FLAG_MORE_FRAGMENTS 0x40
 #define TEST_IKEV2_EAP_TLS_FLAG_LENGTH_INCLUDED 0x80
 #define TEST_IKEV2_TLS_CONTENT_TYPE_HANDSHAKE 22
+#define TEST_IKEV2_TLS_CONTENT_TYPE_APPLICATION_DATA 23
 #define TEST_IKEV2_TLS_VERSION_1_2 0x0303
 #define TEST_IKEV2_TLS_VERSION_1_3 0x0304
 #define TEST_IKEV2_TLS_HANDSHAKE_TYPE_SERVER_HELLO 2
 #define TEST_IKEV2_TLS_CIPHER_TLS_AES_128_GCM_SHA256 0x1301
 #define TEST_IKEV2_TLS_GROUP_X25519 29
 #define TEST_IKEV2_TLS_X25519_KEY_SHARE_BYTES 32
+#define TEST_IKEV2_TLS_AES_GCM_TAG_BYTES 16
 #define TEST_IKEV2_TLS_EXTENSION_SUPPORTED_VERSIONS 43
 #define TEST_IKEV2_TLS_EXTENSION_KEY_SHARE 51
 
@@ -3949,7 +3951,8 @@ test_recv_ikev2_encrypted_eap_tls_server_hello_request(
     assert_int_equal(test_read_be16(record + 1),
                      TEST_IKEV2_TLS_VERSION_1_2);
     const uint16_t record_len = test_read_be16(record + 3);
-    assert_int_equal((size_t)record_len + 5, tls_len);
+    const size_t server_hello_record_len = (size_t)record_len + 5;
+    assert_true(server_hello_record_len < tls_len);
 
     const uint8_t *handshake = record + 5;
     assert_int_equal(handshake[0],
@@ -4017,6 +4020,18 @@ test_recv_ikev2_encrypted_eap_tls_server_hello_request(
     }
     assert_true(saw_supported_versions);
     assert_true(saw_key_share);
+
+    const uint8_t *encrypted_extensions = record + server_hello_record_len;
+    assert_int_equal(encrypted_extensions[0],
+                     TEST_IKEV2_TLS_CONTENT_TYPE_APPLICATION_DATA);
+    assert_int_equal(test_read_be16(encrypted_extensions + 1),
+                     TEST_IKEV2_TLS_VERSION_1_2);
+    const uint16_t encrypted_extensions_len =
+        test_read_be16(encrypted_extensions + 3);
+    assert_int_equal(server_hello_record_len + 5 + encrypted_extensions_len,
+                     tls_len);
+    assert_int_equal(encrypted_extensions_len,
+                     6 + 1 + TEST_IKEV2_TLS_AES_GCM_TAG_BYTES);
 
     secure_memzero(plaintext, sizeof(plaintext));
 }
