@@ -24,6 +24,8 @@
 #include <cmocka.h>
 
 #if defined(ENABLE_CRYPTO_OPENSSL)
+#include <openssl/bn.h>
+#include <openssl/core_names.h>
 #include <openssl/ec.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -1709,6 +1711,7 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
 #define TEST_IKEV2_EAP_TLS_FLAG_START 0x20
 #define TEST_IKEV2_EAP_TLS_FLAG_MORE_FRAGMENTS 0x40
 #define TEST_IKEV2_EAP_TLS_FLAG_LENGTH_INCLUDED 0x80
+#define TEST_IKEV2_TLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC 20
 #define TEST_IKEV2_TLS_CONTENT_TYPE_ALERT 21
 #define TEST_IKEV2_TLS_CONTENT_TYPE_HANDSHAKE 22
 #define TEST_IKEV2_TLS_CONTENT_TYPE_APPLICATION_DATA 23
@@ -1723,6 +1726,7 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
 #define TEST_IKEV2_TLS_HANDSHAKE_TYPE_CERTIFICATE_REQUEST 13
 #define TEST_IKEV2_TLS_HANDSHAKE_TYPE_SERVER_HELLO_DONE 14
 #define TEST_IKEV2_TLS_HANDSHAKE_TYPE_CERTIFICATE_VERIFY 15
+#define TEST_IKEV2_TLS_HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE 16
 #define TEST_IKEV2_TLS_HANDSHAKE_TYPE_FINISHED 20
 #define TEST_IKEV2_TLS_CIPHER_TLS_AES_128_GCM_SHA256 0x1301
 #define TEST_IKEV2_TLS_CIPHER_ECDHE_ECDSA_AES_128_GCM_SHA256 0xc02b
@@ -1731,10 +1735,16 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
 #define TEST_IKEV2_TLS_GROUP_X25519 29
 #define TEST_IKEV2_TLS_EC_CURVE_TYPE_NAMED_CURVE 3
 #define TEST_IKEV2_TLS_CLIENT_CERT_TYPE_ECDSA_SIGN 64
+#define TEST_IKEV2_ECP_256_PRIVATE_BYTES 32
 #define TEST_IKEV2_TLS_SECP256R1_KEY_SHARE_BYTES 65
 #define TEST_IKEV2_TLS_X25519_KEY_SHARE_BYTES 32
 #define TEST_IKEV2_TLS_AES_128_GCM_KEY_BYTES 16
 #define TEST_IKEV2_TLS_AEAD_IV_BYTES 12
+#define TEST_IKEV2_TLS12_MASTER_SECRET_BYTES 48
+#define TEST_IKEV2_TLS12_VERIFY_DATA_BYTES 12
+#define TEST_IKEV2_TLS12_KEY_BLOCK_BYTES \
+    (2 * TEST_IKEV2_TLS_AES_128_GCM_KEY_BYTES \
+     + 2 * TEST_IKEV2_AES_GCM_SALT_BYTES)
 #define TEST_IKEV2_TLS_AES_GCM_TAG_BYTES 16
 #define TEST_IKEV2_SERVER_AUTH_CERT_CHAIN_BYTES 512
 #define TEST_PROVIDER_HELPER_SERVER_SIGN_SIGNATURE_BYTES 64
@@ -2485,6 +2495,138 @@ test_x25519_shared_secret(const uint8_t *private_key, size_t private_key_len,
 }
 
 static void
+test_generate_ecp256_keypair(uint8_t *public_key, size_t public_key_len,
+                             uint8_t *private_key, size_t private_key_len)
+{
+    assert_non_null(public_key);
+    assert_non_null(private_key);
+    assert_int_equal(public_key_len, PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES);
+    assert_int_equal(private_key_len, TEST_IKEV2_ECP_256_PRIVATE_BYTES);
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L && !defined(LIBRESSL_VERSION_NUMBER)
+    EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
+    EVP_PKEY *pkey = NULL;
+    BIGNUM *priv = NULL;
+    BIGNUM *x = NULL;
+    BIGNUM *y = NULL;
+    OSSL_PARAM params[] = {
+        OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_GROUP_NAME,
+                               SN_X9_62_prime256v1, 0),
+        OSSL_PARAM_END,
+    };
+
+    assert_non_null(ctx);
+    assert_int_equal(EVP_PKEY_keygen_init(ctx), 1);
+    assert_int_equal(EVP_PKEY_CTX_set_params(ctx, params), 1);
+    assert_int_equal(EVP_PKEY_generate(ctx, &pkey), 1);
+    assert_non_null(pkey);
+    assert_int_equal(EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_PRIV_KEY,
+                                           &priv), 1);
+    assert_int_equal(EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_EC_PUB_X,
+                                           &x), 1);
+    assert_int_equal(EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_EC_PUB_Y,
+                                           &y), 1);
+    assert_int_equal(BN_bn2binpad(x, public_key,
+                                  PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES
+                                  / 2),
+                     PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES / 2);
+    assert_int_equal(
+        BN_bn2binpad(y, public_key + PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES / 2,
+                     PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES / 2),
+        PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES / 2);
+    assert_int_equal(BN_bn2binpad(priv, private_key, (int)private_key_len),
+                     (int)private_key_len);
+
+    BN_clear_free(priv);
+    BN_free(x);
+    BN_free(y);
+    EVP_PKEY_free(pkey);
+    EVP_PKEY_CTX_free(ctx);
+#else
+    EC_KEY *ec = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+    BIGNUM *x = BN_new();
+    BIGNUM *y = BN_new();
+    assert_non_null(ec);
+    assert_non_null(x);
+    assert_non_null(y);
+    assert_int_equal(EC_KEY_generate_key(ec), 1);
+
+    const EC_GROUP *group = EC_KEY_get0_group(ec);
+    const EC_POINT *pub = EC_KEY_get0_public_key(ec);
+    const BIGNUM *priv = EC_KEY_get0_private_key(ec);
+    assert_non_null(group);
+    assert_non_null(pub);
+    assert_non_null(priv);
+    assert_int_equal(EC_POINT_get_affine_coordinates(group, pub, x, y, NULL),
+                     1);
+    assert_int_equal(BN_bn2binpad(x, public_key,
+                                  PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES
+                                  / 2),
+                     PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES / 2);
+    assert_int_equal(
+        BN_bn2binpad(y, public_key + PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES / 2,
+                     PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES / 2),
+        PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES / 2);
+    assert_int_equal(BN_bn2binpad(priv, private_key, (int)private_key_len),
+                     (int)private_key_len);
+
+    BN_free(x);
+    BN_free(y);
+    EC_KEY_free(ec);
+#endif
+}
+
+static bool
+test_ecp256_shared_secret(const uint8_t *private_key, size_t private_key_len,
+                          const uint8_t *peer_public_key,
+                          size_t peer_public_key_len,
+                          uint8_t *shared_secret,
+                          size_t shared_secret_len)
+{
+    if (!private_key || private_key_len != TEST_IKEV2_ECP_256_PRIVATE_BYTES
+        || !peer_public_key
+        || peer_public_key_len != PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES
+        || !shared_secret
+        || shared_secret_len != TEST_IKEV2_ECP_256_PRIVATE_BYTES)
+    {
+        return false;
+    }
+
+    bool ret = false;
+    EC_GROUP *group = EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1);
+    EC_POINT *peer = group ? EC_POINT_new(group) : NULL;
+    EC_POINT *shared = group ? EC_POINT_new(group) : NULL;
+    BIGNUM *priv = BN_bin2bn(private_key, (int)private_key_len, NULL);
+    BIGNUM *x = BN_bin2bn(peer_public_key,
+                          PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES / 2,
+                          NULL);
+    BIGNUM *y =
+        BN_bin2bn(peer_public_key + PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES / 2,
+                  PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES / 2, NULL);
+    BIGNUM *shared_x = BN_new();
+    BIGNUM *shared_y = BN_new();
+
+    ret = group && peer && shared && priv && x && y && shared_x && shared_y
+          && EC_POINT_set_affine_coordinates(group, peer, x, y, NULL) == 1
+          && EC_POINT_mul(group, shared, NULL, peer, priv, NULL) == 1
+          && !EC_POINT_is_at_infinity(group, shared)
+          && EC_POINT_get_affine_coordinates(group, shared, shared_x, shared_y,
+                                             NULL) == 1
+          && BN_bn2binpad(shared_x, shared_secret, (int)shared_secret_len)
+             == (int)shared_secret_len;
+
+    BN_clear_free(priv);
+    BN_free(x);
+    BN_free(y);
+    BN_clear_free(shared_x);
+    BN_clear_free(shared_y);
+    EC_POINT_free(shared);
+    EC_POINT_free(peer);
+    EC_GROUP_free(group);
+    return ret;
+}
+
+static void
 test_make_der_certificate_with_key(uint8_t *der, size_t der_size,
                                    size_t *der_len, EVP_PKEY **out_pkey)
 {
@@ -2590,6 +2732,112 @@ test_sign_tls13_client_certificate_verify(
     *signature_len = needed;
     EVP_MD_CTX_free(ctx);
     secure_memzero(sign_input, sizeof(sign_input));
+}
+
+static void
+test_sign_tls12_client_certificate_verify(
+    EVP_PKEY *pkey,
+    const uint8_t *transcript,
+    size_t transcript_len,
+    uint8_t *signature,
+    size_t signature_size,
+    size_t *signature_len)
+{
+    assert_non_null(pkey);
+    assert_non_null(transcript);
+    assert_non_null(signature);
+    assert_non_null(signature_len);
+    assert_true(transcript_len > 0);
+    *signature_len = 0;
+
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    assert_non_null(ctx);
+    size_t needed = 0;
+    assert_int_equal(EVP_DigestSignInit(ctx, NULL, EVP_sha256(), NULL, pkey),
+                     1);
+    assert_int_equal(EVP_DigestSign(ctx, NULL, &needed, transcript,
+                                    transcript_len),
+                     1);
+    assert_true(needed <= signature_size);
+    assert_int_equal(EVP_DigestSign(ctx, signature, &needed, transcript,
+                                    transcript_len),
+                     1);
+    *signature_len = needed;
+    EVP_MD_CTX_free(ctx);
+}
+
+static void
+test_tls12_prf_sha256(const uint8_t *secret, size_t secret_len,
+                      const char *label,
+                      const uint8_t *seed1, size_t seed1_len,
+                      const uint8_t *seed2, size_t seed2_len,
+                      uint8_t *output, size_t output_len)
+{
+    assert_non_null(secret);
+    assert_non_null(label);
+    assert_non_null(output);
+    assert_true(secret_len > 0);
+    assert_true(output_len > 0);
+    assert_true(seed1 || seed1_len == 0);
+    assert_true(seed2 || seed2_len == 0);
+
+    const size_t label_len = strlen(label);
+    uint8_t seed[160];
+    uint8_t a[TEST_IKEV2_PRF_SHA256_BYTES];
+    uint8_t next_a[TEST_IKEV2_PRF_SHA256_BYTES];
+    uint8_t block_input[TEST_IKEV2_PRF_SHA256_BYTES + sizeof(seed)];
+    uint8_t block[TEST_IKEV2_PRF_SHA256_BYTES];
+    CLEAR(seed);
+    CLEAR(a);
+    CLEAR(next_a);
+    CLEAR(block_input);
+    CLEAR(block);
+
+    assert_true(label_len + seed1_len + seed2_len <= sizeof(seed));
+    uint8_t *pos = seed;
+    memcpy(pos, label, label_len);
+    pos += label_len;
+    if (seed1_len)
+    {
+        memcpy(pos, seed1, seed1_len);
+        pos += seed1_len;
+    }
+    if (seed2_len)
+    {
+        memcpy(pos, seed2, seed2_len);
+        pos += seed2_len;
+    }
+    const size_t seed_len = (size_t)(pos - seed);
+
+    assert_true(test_hmac_sha256(secret, secret_len, seed, seed_len, a,
+                                 sizeof(a)));
+    size_t generated = 0;
+    while (generated < output_len)
+    {
+        memcpy(block_input, a, sizeof(a));
+        memcpy(block_input + sizeof(a), seed, seed_len);
+        assert_true(test_hmac_sha256(secret, secret_len, block_input,
+                                     sizeof(a) + seed_len, block,
+                                     sizeof(block)));
+        const size_t remaining = output_len - generated;
+        const size_t copy_len = min_size(remaining, sizeof(block));
+        memcpy(output + generated, block, copy_len);
+        generated += copy_len;
+
+        if (generated < output_len)
+        {
+            assert_true(test_hmac_sha256(secret, secret_len, a, sizeof(a),
+                                         next_a, sizeof(next_a)));
+            memcpy(a, next_a, sizeof(a));
+            secure_memzero(next_a, sizeof(next_a));
+        }
+    }
+
+    secure_memzero(seed, sizeof(seed));
+    secure_memzero(a, sizeof(a));
+    secure_memzero(next_a, sizeof(next_a));
+    secure_memzero(block_input, sizeof(block_input));
+    secure_memzero(block, sizeof(block));
 }
 
 static size_t
@@ -5300,6 +5548,342 @@ test_build_eap_tls_client_finished(
     secure_memzero(client_flight_handshake, sizeof(client_flight_handshake));
     secure_memzero(inner, sizeof(inner));
     secure_memzero(nonce, sizeof(nonce));
+}
+
+static void
+test_append_tls12_handshake_record(uint8_t *out, size_t out_size,
+                                   size_t *out_len,
+                                   const uint8_t *handshake,
+                                   size_t handshake_len)
+{
+    assert_non_null(out);
+    assert_non_null(out_len);
+    assert_non_null(handshake);
+    assert_true(handshake_len <= UINT16_MAX);
+    assert_true(*out_len <= out_size);
+    assert_true(out_size - *out_len
+                >= TEST_IKEV2_TLS_RECORD_HEADER_BYTES + handshake_len);
+
+    uint8_t *pos = out + *out_len;
+    *pos++ = TEST_IKEV2_TLS_CONTENT_TYPE_HANDSHAKE;
+    test_write_be16(pos, TEST_IKEV2_TLS_VERSION_1_2);
+    pos += 2;
+    test_write_be16(pos, (uint16_t)handshake_len);
+    pos += 2;
+    memcpy(pos, handshake, handshake_len);
+    pos += handshake_len;
+    *out_len = (size_t)(pos - out);
+}
+
+static void
+test_build_eap_tls12_client_finished(
+    const uint8_t *client_hello, size_t client_hello_len,
+    const uint8_t *cert_der, size_t cert_der_len,
+    EVP_PKEY *cert_key,
+    const uint8_t *server_flight, size_t server_flight_len,
+    uint8_t *client_finished, size_t client_finished_size,
+    size_t *client_finished_len,
+    uint8_t *eap_tls_msk, size_t eap_tls_msk_len)
+{
+    assert_non_null(client_hello);
+    assert_non_null(cert_der);
+    assert_non_null(cert_key);
+    assert_non_null(server_flight);
+    assert_non_null(client_finished);
+    assert_non_null(client_finished_len);
+    assert_non_null(eap_tls_msk);
+    assert_true(client_hello_len > TEST_IKEV2_TLS_RECORD_HEADER_BYTES
+                                   + TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES);
+    assert_true(server_flight_len > TEST_IKEV2_TLS_RECORD_HEADER_BYTES
+                                    + TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES);
+    assert_int_equal(eap_tls_msk_len, TEST_IKEV2_EAP_TLS_MSK_BYTES);
+    *client_finished_len = 0;
+
+    const uint16_t client_record_len = test_read_be16(client_hello + 3);
+    assert_int_equal((size_t)client_record_len
+                     + TEST_IKEV2_TLS_RECORD_HEADER_BYTES,
+                     client_hello_len);
+    const uint8_t *client_hello_handshake =
+        client_hello + TEST_IKEV2_TLS_RECORD_HEADER_BYTES;
+    const size_t client_hello_handshake_len = client_record_len;
+    const uint8_t *client_hello_body =
+        client_hello_handshake + TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES;
+    const uint8_t *client_random = client_hello_body + 2;
+
+    uint8_t transcript[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    uint8_t transcript_hash[TEST_IKEV2_PRF_SHA256_BYTES];
+    uint8_t server_random[TEST_IKEV2_TLS_CLIENT_HELLO_RANDOM_BYTES];
+    uint8_t server_public_key[PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES];
+    uint8_t client_public_key[PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES];
+    uint8_t client_private_key[TEST_IKEV2_ECP_256_PRIVATE_BYTES];
+    uint8_t shared_secret[TEST_IKEV2_ECP_256_PRIVATE_BYTES];
+    uint8_t master_secret[TEST_IKEV2_TLS12_MASTER_SECRET_BYTES];
+    uint8_t key_block[TEST_IKEV2_TLS12_KEY_BLOCK_BYTES];
+    uint8_t eap_tls_key_material[TEST_IKEV2_EAP_TLS_KEY_MATERIAL_BYTES];
+    CLEAR(transcript);
+    CLEAR(transcript_hash);
+    CLEAR(server_random);
+    CLEAR(server_public_key);
+    CLEAR(client_public_key);
+    CLEAR(client_private_key);
+    CLEAR(shared_secret);
+    CLEAR(master_secret);
+    CLEAR(key_block);
+    CLEAR(eap_tls_key_material);
+
+    size_t transcript_len = 0;
+    test_append_tls_transcript(transcript, sizeof(transcript),
+                               &transcript_len, client_hello_handshake,
+                               client_hello_handshake_len);
+
+    bool saw_server_random = false;
+    bool saw_server_key = false;
+    size_t offset = 0;
+    while (offset < server_flight_len)
+    {
+        assert_true(server_flight_len - offset
+                    > TEST_IKEV2_TLS_RECORD_HEADER_BYTES);
+        const uint8_t *record = server_flight + offset;
+        assert_int_equal(record[0], TEST_IKEV2_TLS_CONTENT_TYPE_HANDSHAKE);
+        assert_int_equal(test_read_be16(record + 1),
+                         TEST_IKEV2_TLS_VERSION_1_2);
+        const uint16_t record_len = test_read_be16(record + 3);
+        const size_t record_total =
+            TEST_IKEV2_TLS_RECORD_HEADER_BYTES + (size_t)record_len;
+        assert_true(record_total <= server_flight_len - offset);
+        const uint8_t *handshake =
+            record + TEST_IKEV2_TLS_RECORD_HEADER_BYTES;
+        assert_true(record_len >= TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES);
+        const uint32_t body_len = test_read_be24(handshake + 1);
+        assert_int_equal((size_t)body_len
+                         + TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES,
+                         record_len);
+        test_append_tls_transcript(transcript, sizeof(transcript),
+                                   &transcript_len, handshake, record_len);
+
+        if (handshake[0] == TEST_IKEV2_TLS_HANDSHAKE_TYPE_SERVER_HELLO)
+        {
+            const uint8_t *body =
+                handshake + TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES;
+            assert_true(body_len >= 2 + sizeof(server_random));
+            memcpy(server_random, body + 2, sizeof(server_random));
+            saw_server_random = true;
+        }
+        else if (handshake[0]
+                 == TEST_IKEV2_TLS_HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE)
+        {
+            const uint8_t *body =
+                handshake + TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES;
+            size_t pos = 0;
+            assert_true(body_len >= 1 + 2 + 1
+                                    + TEST_IKEV2_TLS_SECP256R1_KEY_SHARE_BYTES);
+            assert_int_equal(body[pos++],
+                             TEST_IKEV2_TLS_EC_CURVE_TYPE_NAMED_CURVE);
+            assert_int_equal(test_read_be16(body + pos),
+                             TEST_IKEV2_TLS_GROUP_SECP256R1);
+            pos += 2;
+            assert_int_equal(body[pos++],
+                             TEST_IKEV2_TLS_SECP256R1_KEY_SHARE_BYTES);
+            assert_int_equal(body[pos++], 0x04);
+            memcpy(server_public_key, body + pos, sizeof(server_public_key));
+            saw_server_key = true;
+        }
+        offset += record_total;
+    }
+    assert_true(saw_server_random);
+    assert_true(saw_server_key);
+
+    test_generate_ecp256_keypair(client_public_key, sizeof(client_public_key),
+                                 client_private_key,
+                                 sizeof(client_private_key));
+    assert_true(test_ecp256_shared_secret(
+                    client_private_key, sizeof(client_private_key),
+                    server_public_key, sizeof(server_public_key),
+                    shared_secret, sizeof(shared_secret)));
+    test_tls12_prf_sha256(shared_secret, sizeof(shared_secret),
+                          "master secret", client_random,
+                          TEST_IKEV2_TLS_CLIENT_HELLO_RANDOM_BYTES,
+                          server_random, sizeof(server_random),
+                          master_secret, sizeof(master_secret));
+    test_tls12_prf_sha256(master_secret, sizeof(master_secret),
+                          "key expansion", server_random,
+                          sizeof(server_random), client_random,
+                          TEST_IKEV2_TLS_CLIENT_HELLO_RANDOM_BYTES,
+                          key_block, sizeof(key_block));
+    test_tls12_prf_sha256(master_secret, sizeof(master_secret),
+                          "client EAP encryption", client_random,
+                          TEST_IKEV2_TLS_CLIENT_HELLO_RANDOM_BYTES,
+                          server_random, sizeof(server_random),
+                          eap_tls_key_material,
+                          sizeof(eap_tls_key_material));
+    memcpy(eap_tls_msk, eap_tls_key_material, eap_tls_msk_len);
+
+    const uint8_t *client_key = key_block;
+    const uint8_t *client_iv =
+        key_block + 2 * TEST_IKEV2_TLS_AES_128_GCM_KEY_BYTES;
+
+    uint8_t *out = client_finished;
+    size_t out_len = 0;
+    uint8_t handshake[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    uint8_t *pos = handshake;
+
+    const size_t cert_list_len = 3 + cert_der_len;
+    const size_t cert_body_len = 3 + cert_list_len;
+    const size_t cert_handshake_len =
+        TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES + cert_body_len;
+    assert_true(cert_body_len <= 0x00ffffffu);
+    assert_true(cert_list_len <= 0x00ffffffu);
+    assert_true(cert_handshake_len < sizeof(handshake));
+    *pos++ = TEST_IKEV2_TLS_HANDSHAKE_TYPE_CERTIFICATE;
+    test_write_be24(pos, (uint32_t)cert_body_len);
+    pos += 3;
+    test_write_be24(pos, (uint32_t)cert_list_len);
+    pos += 3;
+    test_write_be24(pos, (uint32_t)cert_der_len);
+    pos += 3;
+    memcpy(pos, cert_der, cert_der_len);
+    pos += cert_der_len;
+    assert_int_equal((size_t)(pos - handshake), cert_handshake_len);
+    test_append_tls12_handshake_record(out, client_finished_size, &out_len,
+                                       handshake, cert_handshake_len);
+    test_append_tls_transcript(transcript, sizeof(transcript),
+                               &transcript_len, handshake,
+                               cert_handshake_len);
+
+    pos = handshake;
+    const size_t cke_body_len = 1 + TEST_IKEV2_TLS_SECP256R1_KEY_SHARE_BYTES;
+    const size_t cke_handshake_len =
+        TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES + cke_body_len;
+    *pos++ = TEST_IKEV2_TLS_HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE;
+    test_write_be24(pos, (uint32_t)cke_body_len);
+    pos += 3;
+    *pos++ = TEST_IKEV2_TLS_SECP256R1_KEY_SHARE_BYTES;
+    *pos++ = 0x04;
+    memcpy(pos, client_public_key, sizeof(client_public_key));
+    pos += sizeof(client_public_key);
+    assert_int_equal((size_t)(pos - handshake), cke_handshake_len);
+    test_append_tls12_handshake_record(out, client_finished_size, &out_len,
+                                       handshake, cke_handshake_len);
+    test_append_tls_transcript(transcript, sizeof(transcript),
+                               &transcript_len, handshake,
+                               cke_handshake_len);
+
+    uint8_t certificate_verify_signature[128];
+    size_t cv_signature_len = 0;
+    CLEAR(certificate_verify_signature);
+    test_sign_tls12_client_certificate_verify(
+        cert_key, transcript, transcript_len, certificate_verify_signature,
+        sizeof(certificate_verify_signature), &cv_signature_len);
+    pos = handshake;
+    const size_t cv_body_len = 2 + 2 + cv_signature_len;
+    const size_t cv_handshake_len =
+        TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES + cv_body_len;
+    assert_true(cv_handshake_len < sizeof(handshake));
+    *pos++ = TEST_IKEV2_TLS_HANDSHAKE_TYPE_CERTIFICATE_VERIFY;
+    test_write_be24(pos, (uint32_t)cv_body_len);
+    pos += 3;
+    test_write_be16(pos, TEST_IKEV2_TLS_SIGALG_ECDSA_SECP256R1_SHA256);
+    pos += 2;
+    test_write_be16(pos, (uint16_t)cv_signature_len);
+    pos += 2;
+    memcpy(pos, certificate_verify_signature, cv_signature_len);
+    pos += cv_signature_len;
+    assert_int_equal((size_t)(pos - handshake), cv_handshake_len);
+    test_append_tls12_handshake_record(out, client_finished_size, &out_len,
+                                       handshake, cv_handshake_len);
+    test_append_tls_transcript(transcript, sizeof(transcript),
+                               &transcript_len, handshake,
+                               cv_handshake_len);
+
+    assert_true(client_finished_size - out_len
+                >= TEST_IKEV2_TLS_RECORD_HEADER_BYTES + 1);
+    pos = out + out_len;
+    *pos++ = TEST_IKEV2_TLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC;
+    test_write_be16(pos, TEST_IKEV2_TLS_VERSION_1_2);
+    pos += 2;
+    test_write_be16(pos, 1);
+    pos += 2;
+    *pos++ = 1;
+    out_len = (size_t)(pos - out);
+
+    assert_true(test_sha256(transcript, transcript_len, transcript_hash,
+                            sizeof(transcript_hash)));
+    uint8_t verify_data[TEST_IKEV2_TLS12_VERIFY_DATA_BYTES];
+    CLEAR(verify_data);
+    test_tls12_prf_sha256(master_secret, sizeof(master_secret),
+                          "client finished", transcript_hash,
+                          sizeof(transcript_hash), NULL, 0,
+                          verify_data, sizeof(verify_data));
+
+    pos = handshake;
+    *pos++ = TEST_IKEV2_TLS_HANDSHAKE_TYPE_FINISHED;
+    test_write_be24(pos, TEST_IKEV2_TLS12_VERIFY_DATA_BYTES);
+    pos += 3;
+    memcpy(pos, verify_data, sizeof(verify_data));
+    pos += sizeof(verify_data);
+    const size_t finished_handshake_len = (size_t)(pos - handshake);
+    assert_int_equal(finished_handshake_len,
+                     TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES
+                     + TEST_IKEV2_TLS12_VERIFY_DATA_BYTES);
+
+    uint8_t explicit_nonce[TEST_IKEV2_AES_GCM_IV_BYTES];
+    uint8_t nonce[TEST_IKEV2_TLS_AEAD_IV_BYTES];
+    uint8_t aad[13];
+    CLEAR(explicit_nonce);
+    CLEAR(nonce);
+    CLEAR(aad);
+    for (size_t i = 0; i < sizeof(explicit_nonce); ++i)
+    {
+        explicit_nonce[i] = (uint8_t)(0xa0 + i);
+    }
+    memcpy(nonce, client_iv, TEST_IKEV2_AES_GCM_SALT_BYTES);
+    memcpy(nonce + TEST_IKEV2_AES_GCM_SALT_BYTES, explicit_nonce,
+           sizeof(explicit_nonce));
+    test_write_be64(aad, 0);
+    aad[8] = TEST_IKEV2_TLS_CONTENT_TYPE_HANDSHAKE;
+    test_write_be16(aad + 9, TEST_IKEV2_TLS_VERSION_1_2);
+    test_write_be16(aad + 11, (uint16_t)finished_handshake_len);
+
+    const size_t encrypted_len =
+        sizeof(explicit_nonce) + finished_handshake_len
+        + TEST_IKEV2_TLS_AES_GCM_TAG_BYTES;
+    assert_true(encrypted_len <= UINT16_MAX);
+    assert_true(client_finished_size - out_len
+                >= TEST_IKEV2_TLS_RECORD_HEADER_BYTES + encrypted_len);
+    pos = out + out_len;
+    *pos++ = TEST_IKEV2_TLS_CONTENT_TYPE_HANDSHAKE;
+    test_write_be16(pos, TEST_IKEV2_TLS_VERSION_1_2);
+    pos += 2;
+    test_write_be16(pos, (uint16_t)encrypted_len);
+    pos += 2;
+    memcpy(pos, explicit_nonce, sizeof(explicit_nonce));
+    pos += sizeof(explicit_nonce);
+    assert_true(test_aes_gcm_encrypt(
+                    client_key, TEST_IKEV2_TLS_AES_128_GCM_KEY_BYTES,
+                    nonce, sizeof(nonce), aad, sizeof(aad), handshake,
+                    finished_handshake_len, pos,
+                    pos + finished_handshake_len));
+    pos += finished_handshake_len + TEST_IKEV2_TLS_AES_GCM_TAG_BYTES;
+    out_len = (size_t)(pos - out);
+    *client_finished_len = out_len;
+
+    secure_memzero(transcript, sizeof(transcript));
+    secure_memzero(transcript_hash, sizeof(transcript_hash));
+    secure_memzero(server_random, sizeof(server_random));
+    secure_memzero(server_public_key, sizeof(server_public_key));
+    secure_memzero(client_public_key, sizeof(client_public_key));
+    secure_memzero(client_private_key, sizeof(client_private_key));
+    secure_memzero(shared_secret, sizeof(shared_secret));
+    secure_memzero(master_secret, sizeof(master_secret));
+    secure_memzero(key_block, sizeof(key_block));
+    secure_memzero(eap_tls_key_material, sizeof(eap_tls_key_material));
+    secure_memzero(handshake, sizeof(handshake));
+    secure_memzero(certificate_verify_signature,
+                   sizeof(certificate_verify_signature));
+    secure_memzero(verify_data, sizeof(verify_data));
+    secure_memzero(explicit_nonce, sizeof(explicit_nonce));
+    secure_memzero(nonce, sizeof(nonce));
+    secure_memzero(aad, sizeof(aad));
 }
 
 static void
@@ -9002,6 +9586,8 @@ test_provider_helper_spawn_ikev2_eap_tls_auth_allow_success(void **state)
     supervisor.runtime_config.max_eap_tls_tx_fragment_bytes = 2048;
     supervisor.runtime_config.flags |=
         PROVIDER_HELPER_CONFIG_TEST_AUTH_CONTINUATION;
+    supervisor.runtime_config.flags |=
+        PROVIDER_HELPER_CONFIG_TEST_AUTH_CONTINUATION;
 
     struct test_provider_helper_auth_cb_state auth_state;
     CLEAR(auth_state);
@@ -9406,6 +9992,39 @@ test_provider_helper_spawn_ikev2_tls12_client_hello_server_flight(void **state)
 
     test_provider_helper_send_server_auth_config(&supervisor);
 
+    const struct provider_helper_xfrm_lease xfrm_lease = {
+        .lease_id = 202,
+        .provider_session_id = 101,
+        .policy_revision = 303,
+        .mark_value = 0x4200,
+        .mark_mask = 0xffff,
+        .if_id = 12,
+        .reqid = 1100,
+        .address_family = AF_INET,
+        .flags = PROVIDER_HELPER_XFRM_LEASE_IPV4,
+        .local_ts_start_ipv4 = 0x0a580001,
+        .local_ts_end_ipv4 = 0x0a580001,
+        .local_ts_start_port = 0,
+        .local_ts_end_port = 65535,
+        .remote_ts_start_ipv4 = 0x0a580002,
+        .remote_ts_end_ipv4 = 0x0a580002,
+        .remote_ts_start_port = 0,
+        .remote_ts_end_port = 65535,
+        .ip_protocol_id = 0,
+    };
+    uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
+    assert_true(provider_helper_supervisor_send_xfrm_lease(
+                    &supervisor, &xfrm_lease, 99));
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+
     int response_fd = test_create_udp_sender(0x7f000010u);
     const uint64_t initiator_spi = 0x1234432112344330ull;
     test_send_ikev2_datagram_from(response_fd, port, initiator_spi);
@@ -9476,7 +10095,48 @@ test_provider_helper_spawn_ikev2_tls12_client_hello_server_flight(void **state)
     assert_true(server_flight_len > 0);
     assert_int_equal(auth_state.calls, 0);
 
-    uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
+    uint8_t cert_der[2048];
+    size_t cert_der_len = 0;
+    EVP_PKEY *cert_key = NULL;
+    test_make_der_certificate_with_key(cert_der, sizeof(cert_der),
+                                       &cert_der_len, &cert_key);
+    assert_non_null(cert_key);
+
+    uint8_t client_finished[4096];
+    size_t client_finished_len = 0;
+    uint8_t eap_tls_msk[TEST_IKEV2_EAP_TLS_MSK_BYTES];
+    CLEAR(eap_tls_msk);
+    test_build_eap_tls12_client_finished(
+        tls12_client_hello, sizeof(tls12_client_hello), cert_der,
+        cert_der_len, cert_key, server_flight, server_flight_len,
+        client_finished, sizeof(client_finished), &client_finished_len,
+        eap_tls_msk, sizeof(eap_tls_msk));
+    test_send_ikev2_encrypted_ike_auth_eap_response_fragment_datagram_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, 3, 2,
+        0, 0, client_finished, client_finished_len);
+    for (int i = 0; i < 100 && auth_state.calls < 1; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(auth_state.calls, 1);
+    assert_int_equal(auth_state.request.profile,
+                     PROVIDER_HELPER_AUTH_PROFILE_EAP_TLS);
+    assert_int_equal(auth_state.request.claimed_principal_len, 1);
+    assert_memory_equal(auth_state.request.claimed_principal, "a", 1);
+    assert_int_equal(auth_state.request.credential_fingerprint_len, 71);
+    assert_memory_equal(auth_state.request.credential_fingerprint, "sha256:",
+                        strlen("sha256:"));
+    assert_int_equal(auth_state.request.cert_serial_len, strlen("1234"));
+    assert_memory_equal(auth_state.request.cert_serial, "1234",
+                        strlen("1234"));
+    assert_true(auth_state.request.cert_issuer_len > 0);
+    assert_non_null(strstr(auth_state.request.cert_issuer, "Test IKEv2 CA"));
+    test_recv_ikev2_encrypted_eap_success_response(
+        response_fd, initiator_spi, &sa_init_material, 3, 2, true);
+
+    target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd,
                            PROVIDER_HELPER_MSG_STATS_REQUEST,
                            supervisor.next_tx_sequence++, 91);
@@ -9491,11 +10151,20 @@ test_provider_helper_spawn_ikev2_tls12_client_hello_server_flight(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_auth_inner_malformed, 0);
     assert_int_equal(
         supervisor.runtime_stats.ike_auth_eap_tls_client_hello_rx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_cert_extracted, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_request_tx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_allow_eap_success_tx,
+                     1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported_response_tx,
                      0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
 
+    EVP_PKEY_free(cert_key);
+    secure_memzero(cert_der, sizeof(cert_der));
+    secure_memzero(server_flight, sizeof(server_flight));
+    secure_memzero(client_finished, sizeof(client_finished));
+    secure_memzero(eap_tls_msk, sizeof(eap_tls_msk));
     close(response_fd);
     close(listener_fd);
     close(natt_listener_fd);
