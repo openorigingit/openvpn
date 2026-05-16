@@ -10197,15 +10197,68 @@ ikev2_helper_is_mobike_update_sa_addresses_request(
 }
 
 static bool
-ikev2_helper_is_child_rekey_request(
+ikev2_helper_child_rekey_request_matches(
     const uint8_t *plaintext,
     size_t plaintext_len,
-    uint8_t first_payload)
+    uint8_t first_payload,
+    const struct ikev2_helper_child_sa_scaffold *child,
+    bool *saw_child_rekey)
 {
-    return ikev2_helper_inner_payload_contains_notify(
-        plaintext, plaintext_len, first_payload,
-        PROVIDER_HELPER_IKEV2_PROTOCOL_ESP, 4,
-        PROVIDER_HELPER_IKEV2_NOTIFY_REKEY_SA);
+    if (saw_child_rekey)
+    {
+        *saw_child_rekey = false;
+    }
+    if (!plaintext)
+    {
+        return false;
+    }
+
+    size_t pos = 0;
+    uint8_t payload_type = first_payload;
+    while (payload_type != PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
+    {
+        if (plaintext_len - pos < PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE)
+        {
+            return false;
+        }
+
+        const uint8_t next_payload = plaintext[pos];
+        const uint16_t payload_len = ikev2_helper_read_be16(plaintext + pos + 2);
+        if (payload_len < PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+            || payload_len > plaintext_len - pos)
+        {
+            return false;
+        }
+
+        const size_t body_offset =
+            pos + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+        const size_t body_len =
+            payload_len - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+        if (payload_type == PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY
+            && body_len == PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE)
+        {
+            const uint8_t *body = plaintext + body_offset;
+            const uint16_t notify_type = ikev2_helper_read_be16(body + 2);
+            if (body[0] == PROVIDER_HELPER_IKEV2_PROTOCOL_ESP
+                && body[1] == 4
+                && notify_type == PROVIDER_HELPER_IKEV2_NOTIFY_REKEY_SA)
+            {
+                const uint32_t spi = ikev2_helper_read_be32(body + 4);
+                if (saw_child_rekey)
+                {
+                    *saw_child_rekey = true;
+                }
+                return child && child->ready
+                       && (spi == child->initiator_spi
+                           || spi == child->responder_spi);
+            }
+        }
+
+        pos += payload_len;
+        payload_type = next_payload;
+    }
+
+    return false;
 }
 
 static bool
@@ -11549,12 +11602,18 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         inner_summary = ike_rekey_summary;
                         ike_rekey_request = true;
                     }
-                    const bool rekey_request =
-                        ike_rekey_request
-                        || ikev2_helper_is_child_rekey_request(
+                    bool saw_child_rekey = false;
+                    const bool child_rekey_request =
+                        !ike_rekey_request
+                        && ikev2_helper_child_rekey_request_matches(
                             plaintext, plaintext_len,
-                            protected_summary.sk_next_payload);
-                    if (rekey_request)
+                            protected_summary.sk_next_payload,
+                            &sa->child_sa, &saw_child_rekey);
+                    const bool child_rekey_child_not_found =
+                        saw_child_rekey && !child_rekey_request;
+                    const bool any_rekey_request =
+                        ike_rekey_request || saw_child_rekey;
+                    if (any_rekey_request)
                     {
                         ++counters->ike_create_child_rekey_rx;
                     }
@@ -11563,6 +11622,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     bool install_unsupported = false;
                     bool install_enabled = false;
                     bool install_failed = false;
+                    bool old_child_xfrm_deleted = false;
                     bool child_response_sent = false;
                     bool child_response_failed = false;
                     bool xfrm_apply_failed = false;
@@ -11574,7 +11634,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     CLEAR(child_selection);
                     CLEAR(child_local_ts);
                     CLEAR(child_remote_ts);
-                    if (!rekey_request)
+                    if (!ike_rekey_request && !child_rekey_child_not_found)
                     {
                         const enum provider_helper_ikev2_parse_result
                             select_result =
@@ -11596,7 +11656,9 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         }
                         else
                         {
-                            if (sa->child_sa.ready && sa->child_sa.xfrm_applied)
+                            if (!child_rekey_request
+                                && sa->child_sa.ready
+                                && sa->child_sa.xfrm_applied)
                             {
                                 /* The Linux MVP owns one installed CHILD_SA per IKE_SA. */
                             }
@@ -11605,9 +11667,14 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                                     &sa->authorized_xfrm_lease,
                                     &child_local_ts, &child_remote_ts))
                             {
-                                install_enabled =
+                                const bool apply_xfrm =
                                     (config->flags
                                      & PROVIDER_HELPER_CONFIG_APPLY_XFRM) != 0;
+                                const bool allow_no_xfrm_rekey =
+                                    child_rekey_request && !apply_xfrm
+                                    && (config->flags
+                                        & PROVIDER_HELPER_CONFIG_TEST_AUTH_CONTINUATION);
+                                install_enabled = apply_xfrm || allow_no_xfrm_rekey;
                                 install_unsupported = !install_enabled;
                             }
                             else
@@ -11618,17 +11685,37 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     }
                     if (install_enabled)
                     {
-                        if (ikev2_helper_scaffold_child_sa(
+                        const bool apply_xfrm =
+                            (config->flags
+                             & PROVIDER_HELPER_CONFIG_APPLY_XFRM) != 0;
+                        if (child_rekey_request && sa->child_sa.xfrm_applied)
+                        {
+                            if (ikev2_helper_delete_child_sa_xfrm(
+                                    &sa->child_sa, counters))
+                            {
+                                old_child_xfrm_deleted = true;
+                            }
+                            else
+                            {
+                                install_failed = true;
+                                xfrm_apply_failed = true;
+                            }
+                        }
+                        if (!install_failed
+                            && ikev2_helper_scaffold_child_sa(
                                 sa_table, sa, &child_selection,
                                 &sa->authorized_xfrm_lease, &child_local_ts,
                                 &child_remote_ts,
                                 plaintext + inner_summary.nonce_offset,
                                 inner_summary.nonce_len, header.message_id,
-                                time(NULL), true, &xfrm_apply_failed))
+                                time(NULL), apply_xfrm, &xfrm_apply_failed))
                         {
                             ++counters->ike_create_child_scaffolded;
                             ++counters->ike_create_child_keymat_ready;
-                            ++counters->ike_create_child_xfrm_install_ok;
+                            if (apply_xfrm)
+                            {
+                                ++counters->ike_create_child_xfrm_install_ok;
+                            }
                             if (ikev2_helper_send_cached_encrypted_child_sa_response(
                                     listener, sa, &sa->child_sa,
                                     header.message_id))
@@ -11638,7 +11725,9 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                                 if (!ikev2_helper_send_session_update(
                                         ipc_fd, tx_sequence, sa,
                                         PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE,
-                                        "ike-authorized", "installed"))
+                                        "ike-authorized",
+                                        child_rekey_request ? "rekeyed"
+                                                            : "installed"))
                                 {
                                     ikev2_helper_note_fatal_ipc_failure();
                                 }
@@ -11662,14 +11751,16 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             }
                         }
                     }
-                    if (rekey_request || install_unsupported)
+                    if (ike_rekey_request || install_unsupported)
                     {
                         ++counters->ike_create_child_unsupported_rx;
                         ++counters->ike_exchange_unsupported;
                     }
                     const uint16_t notify_type =
-                        rekey_request || install_unsupported || install_failed
+                        ike_rekey_request || install_unsupported || install_failed
                             ? PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE
+                            : child_rekey_child_not_found
+                                  ? PROVIDER_HELPER_IKEV2_NOTIFY_CHILD_SA_NOT_FOUND
                             : no_proposal
                                   ? PROVIDER_HELPER_IKEV2_NOTIFY_NO_PROPOSAL_CHOSEN
                               : ts_unacceptable
@@ -11687,12 +11778,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             listener, sa, header.exchange_type,
                             header.message_id, notify_type))
                     {
-                        if (rekey_request)
+                        if (ike_rekey_request)
                         {
                             ++counters->ike_create_child_temp_failure_tx;
                             if (!ikev2_helper_send_session_close(
                                     ipc_fd, tx_sequence, sa,
-                                    "IKEv2 rekey unsupported"))
+                                    "IKEv2 IKE SA rekey unsupported"))
                             {
                                 ikev2_helper_note_fatal_ipc_failure();
                             }
@@ -11728,7 +11819,9 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             ++counters->ike_create_child_temp_failure_tx;
                             if (!ikev2_helper_send_session_close(
                                     ipc_fd, tx_sequence, sa,
-                                    "XFRM CHILD_SA install failed"))
+                                    old_child_xfrm_deleted
+                                        ? "XFRM CHILD_SA rekey failed"
+                                        : "XFRM CHILD_SA install failed"))
                             {
                                 ikev2_helper_note_fatal_ipc_failure();
                             }
@@ -11745,6 +11838,10 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         {
                             ++counters->ike_create_child_ts_unacceptable_tx;
                         }
+                        else if (child_rekey_child_not_found)
+                        {
+                            /* The response is cached below without changing state. */
+                        }
                         else
                         {
                             ++counters
@@ -11753,12 +11850,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     }
                     else
                     {
-                        if (rekey_request)
+                        if (ike_rekey_request)
                         {
                             ++counters->ike_create_child_temp_failure_failed;
                             if (!ikev2_helper_send_session_close(
                                     ipc_fd, tx_sequence, sa,
-                                    "IKEv2 rekey unsupported"))
+                                    "IKEv2 IKE SA rekey unsupported"))
                             {
                                 ikev2_helper_note_fatal_ipc_failure();
                             }
@@ -11777,7 +11874,9 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             ++counters->ike_create_child_temp_failure_failed;
                             if (!ikev2_helper_send_session_close(
                                     ipc_fd, tx_sequence, sa,
-                                    "XFRM CHILD_SA install failed"))
+                                    old_child_xfrm_deleted
+                                        ? "XFRM CHILD_SA rekey failed"
+                                        : "XFRM CHILD_SA install failed"))
                             {
                                 ikev2_helper_note_fatal_ipc_failure();
                             }
@@ -11796,6 +11895,10 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             ++counters
                                   ->ike_create_child_ts_unacceptable_failed;
                         }
+                        else if (child_rekey_child_not_found)
+                        {
+                            /* Missing child notifications do not alter local state. */
+                        }
                         else
                         {
                             ++counters
@@ -11810,11 +11913,8 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             ikev2_helper_count_child_sa_scaffolds(sa_table);
                         return;
                     }
-                    if (!child_response_failed)
-                    {
-                        sa->updated = exchange_now;
-                        sa->message_id = header.message_id;
-                    }
+                    sa->updated = exchange_now;
+                    sa->message_id = header.message_id;
                     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                     counters->ike_sa_active = sa_table->active;
                     counters->ike_child_sa_scaffold_active =
