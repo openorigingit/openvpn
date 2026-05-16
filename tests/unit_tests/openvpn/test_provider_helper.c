@@ -4333,10 +4333,11 @@ test_recv_ikev2_encrypted_notify_response(
 }
 
 static void
-test_recv_ikev2_encrypted_server_auth_response(
+test_recv_ikev2_encrypted_server_auth_response_ex(
     int fd,
     uint64_t initiator_spi,
     const struct test_ikev2_sa_init_response_material *material,
+    bool expect_mobike,
     bool expect_natt)
 {
     const char server_id[] = "vpn.example.test";
@@ -4378,7 +4379,9 @@ test_recv_ikev2_encrypted_server_auth_response(
         PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4
         + sizeof(ecdsa_sha256_algid) + 64;
     assert_true(payload_len > pos + auth_len);
-    assert_int_equal(plaintext[pos], PROVIDER_HELPER_IKEV2_PAYLOAD_EAP);
+    assert_int_equal(plaintext[pos],
+                     expect_mobike ? PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY
+                                   : PROVIDER_HELPER_IKEV2_PAYLOAD_EAP);
     assert_int_equal(plaintext[pos + 1], 0);
     assert_int_equal(test_read_be16(plaintext + pos + 2), auth_len);
     assert_int_equal(plaintext[pos + 4],
@@ -4395,6 +4398,20 @@ test_recv_ikev2_encrypted_server_auth_response(
     }
     pos += auth_len;
 
+    if (expect_mobike)
+    {
+        const uint16_t notify_len = PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE;
+        assert_true(payload_len > pos + notify_len);
+        assert_int_equal(plaintext[pos], PROVIDER_HELPER_IKEV2_PAYLOAD_EAP);
+        assert_int_equal(plaintext[pos + 1], 0);
+        assert_int_equal(test_read_be16(plaintext + pos + 2), notify_len);
+        assert_int_equal(plaintext[pos + 4], 0);
+        assert_int_equal(plaintext[pos + 5], 0);
+        assert_int_equal(test_read_be16(plaintext + pos + 6),
+                         PROVIDER_HELPER_IKEV2_NOTIFY_MOBIKE_SUPPORTED);
+        pos += notify_len;
+    }
+
     const uint16_t eap_len =
         PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 6;
     assert_int_equal(payload_len, pos + eap_len);
@@ -4408,6 +4425,17 @@ test_recv_ikev2_encrypted_server_auth_response(
     assert_int_equal(plaintext[pos + 9], 0x20);
 
     secure_memzero(plaintext, sizeof(plaintext));
+}
+
+static void
+test_recv_ikev2_encrypted_server_auth_response(
+    int fd,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool expect_natt)
+{
+    test_recv_ikev2_encrypted_server_auth_response_ex(
+        fd, initiator_spi, material, false, expect_natt);
 }
 
 static void
@@ -8569,8 +8597,8 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
     assert_true(cb_state.request.cert_issuer_len > 0);
     assert_non_null(strstr(cb_state.request.cert_issuer, "Test IKEv2 CA"));
     test_provider_helper_wait_for_server_sign_calls(&supervisor, &sign_state, 1);
-    test_recv_ikev2_encrypted_server_auth_response(
-        response_fd, 0xfeedfacecafebeefull, &sa_init_material, true);
+    test_recv_ikev2_encrypted_server_auth_response_ex(
+        response_fd, 0xfeedfacecafebeefull, &sa_init_material, true, true);
     test_recv_ikev2_encrypted_notify_response(
         response_fd, 0xfeedfacecafebeefull, &sa_init_material,
         PROVIDER_HELPER_IKEV2_NOTIFY_AUTHENTICATION_FAILED, true);
@@ -8927,8 +8955,8 @@ test_provider_helper_spawn_ikev2_eap_tls_auth_allow_success(void **state)
     assert_int_equal(sign_state.request.purpose,
                      PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH);
     assert_int_equal(auth_state.calls, 0);
-    test_recv_ikev2_encrypted_server_auth_response(
-        response_fd, initiator_spi, &sa_init_material, true);
+    test_recv_ikev2_encrypted_server_auth_response_ex(
+        response_fd, initiator_spi, &sa_init_material, true, true);
 
     uint8_t client_private_key[TEST_IKEV2_TLS_X25519_KEY_SHARE_BYTES];
     uint8_t client_public_key[TEST_IKEV2_TLS_X25519_KEY_SHARE_BYTES];
@@ -9460,9 +9488,9 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     assert_int_equal(cb_state.calls, 1);
     assert_int_equal(cb_state.request.credential_fingerprint_len, 71);
     test_provider_helper_wait_for_server_sign_calls(&supervisor, &sign_state, 1);
-    test_recv_ikev2_encrypted_server_auth_response(
+    test_recv_ikev2_encrypted_server_auth_response_ex(
         missing_lease_fd, missing_lease_initiator_spi, &missing_lease_material,
-        true);
+        true, true);
     test_recv_ikev2_encrypted_notify_response(
         missing_lease_fd, missing_lease_initiator_spi, &missing_lease_material,
         PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
@@ -9522,8 +9550,8 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     assert_int_equal(cb_state.calls, 2);
     assert_int_equal(cb_state.request.credential_fingerprint_len, 71);
     test_provider_helper_wait_for_server_sign_calls(&supervisor, &sign_state, 2);
-    test_recv_ikev2_encrypted_server_auth_response(
-        response_fd, initiator_spi, &sa_init_material, true);
+    test_recv_ikev2_encrypted_server_auth_response_ex(
+        response_fd, initiator_spi, &sa_init_material, true, true);
     test_recv_ikev2_encrypted_notify_response(
         response_fd, initiator_spi, &sa_init_material,
         PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
@@ -9819,8 +9847,8 @@ test_provider_helper_spawn_ikev2_auth_allow_fails_closed(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(cb_state.calls, 1);
     test_provider_helper_wait_for_server_sign_calls(&supervisor, &sign_state, 1);
-    test_recv_ikev2_encrypted_server_auth_response(
-        response_fd, initiator_spi, &sa_init_material, true);
+    test_recv_ikev2_encrypted_server_auth_response_ex(
+        response_fd, initiator_spi, &sa_init_material, true, true);
     test_recv_ikev2_encrypted_notify_response(
         response_fd, initiator_spi, &sa_init_material,
         PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
@@ -10127,8 +10155,8 @@ test_provider_helper_spawn_ikev2_lease_deadline_fails_closed(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(cb_state.calls, 1);
     test_provider_helper_wait_for_server_sign_calls(&supervisor, &sign_state, 1);
-    test_recv_ikev2_encrypted_server_auth_response(
-        response_fd, initiator_spi, &sa_init_material, true);
+    test_recv_ikev2_encrypted_server_auth_response_ex(
+        response_fd, initiator_spi, &sa_init_material, true, true);
     test_recv_ikev2_encrypted_notify_response(
         response_fd, initiator_spi, &sa_init_material,
         PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
@@ -10320,8 +10348,8 @@ test_provider_helper_spawn_ikev2_rekey_handling(void **state)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(cb_state.calls, 1);
     test_provider_helper_wait_for_server_sign_calls(&supervisor, &sign_state, 1);
-    test_recv_ikev2_encrypted_server_auth_response(
-        response_fd, initiator_spi, &sa_init_material, true);
+    test_recv_ikev2_encrypted_server_auth_response_ex(
+        response_fd, initiator_spi, &sa_init_material, true, true);
     test_recv_ikev2_encrypted_notify_response(
         response_fd, initiator_spi, &sa_init_material,
         PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);

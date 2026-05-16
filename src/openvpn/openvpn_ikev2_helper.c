@@ -8094,6 +8094,7 @@ static bool
 ikev2_helper_build_server_auth_plaintext(
     const struct provider_helper_server_auth_config *server_auth_config,
     const struct provider_helper_server_sign_response *sign_response,
+    bool advertise_mobike,
     uint8_t *plaintext,
     size_t plaintext_size,
     size_t *plaintext_len)
@@ -8131,10 +8132,14 @@ ikev2_helper_build_server_auth_plaintext(
     const size_t eap_body_len = IKEV2_HELPER_EAP_TLS_HEADER_SIZE;
     const size_t eap_payload_len =
         PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + eap_body_len;
+    const size_t mobike_notify_payload_len =
+        advertise_mobike ? PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE : 0;
     const size_t total_len = id_payload_len + cert_payload_len
-                             + auth_payload_len + eap_payload_len + 1u;
+                             + auth_payload_len + mobike_notify_payload_len
+                             + eap_payload_len + 1u;
     if (id_payload_len > UINT16_MAX || cert_payload_len > UINT16_MAX
         || auth_payload_len > UINT16_MAX || eap_payload_len > UINT16_MAX
+        || mobike_notify_payload_len > UINT16_MAX
         || total_len > plaintext_size)
     {
         return false;
@@ -8162,7 +8167,8 @@ ikev2_helper_build_server_auth_plaintext(
            server_auth_config->cert_chain_len);
     pos += server_auth_config->cert_chain_len;
 
-    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_EAP;
+    *pos++ = advertise_mobike ? PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY
+                              : PROVIDER_HELPER_IKEV2_PAYLOAD_EAP;
     *pos++ = 0;
     ikev2_helper_write_be16(&pos, (uint16_t)auth_payload_len);
     *pos++ = PROVIDER_HELPER_SERVER_AUTH_METHOD_DIGITAL_SIGNATURE;
@@ -8173,6 +8179,18 @@ ikev2_helper_build_server_auth_plaintext(
     pos += algid_len;
     memcpy(pos, sign_response->signature, sign_response->signature_len);
     pos += sign_response->signature_len;
+
+    if (advertise_mobike)
+    {
+        *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_EAP;
+        *pos++ = 0;
+        ikev2_helper_write_be16(&pos,
+                                PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE);
+        *pos++ = 0;
+        *pos++ = 0;
+        ikev2_helper_write_be16(
+            &pos, PROVIDER_HELPER_IKEV2_NOTIFY_MOBIKE_SUPPORTED);
+    }
 
     *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
     *pos++ = 0;
@@ -8197,6 +8215,7 @@ static bool
 ikev2_helper_send_cached_server_auth_response(
     const struct ikev2_helper_listener *listener,
     struct ikev2_helper_ike_sa *sa,
+    const struct provider_helper_runtime_config *config,
     const struct provider_helper_server_auth_config *server_auth_config,
     const struct provider_helper_server_sign_response *sign_response)
 {
@@ -8205,9 +8224,11 @@ ikev2_helper_send_cached_server_auth_response(
     size_t plaintext_len = 0;
     size_t response_len = 0;
     if (!listener || !sa || !sa->active
+        || !config
         || !ikev2_helper_build_server_auth_plaintext(
-            server_auth_config, sign_response, plaintext, sizeof(plaintext),
-            &plaintext_len)
+            server_auth_config, sign_response,
+            (config->flags & PROVIDER_HELPER_CONFIG_APPLY_XFRM) == 0,
+            plaintext, sizeof(plaintext), &plaintext_len)
         || !ikev2_helper_build_encrypted_payload_response(
             response, sizeof(response), &response_len, listener, sa,
             PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH, sa->message_id,
@@ -9747,7 +9768,7 @@ ikev2_helper_apply_server_sign_response(
         }
 
         if (!ikev2_helper_send_cached_server_auth_response(
-                listener, sa, server_auth_config, response))
+                listener, sa, config, server_auth_config, response))
         {
             ++counters->ike_auth_request_failed;
             return ikev2_helper_send_sign_failure_response_and_clear(
