@@ -36,7 +36,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 60
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  904
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  920
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE     104
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
 #define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
@@ -548,6 +548,8 @@ struct provider_helper_runtime_stats {
     uint64_t ike_auth_final_auth_bad_shape;
     uint64_t ike_auth_final_auth_verify_failed;
     uint64_t ike_auth_final_auth_verified;
+    uint64_t ike_auth_final_auth_response_tx;
+    uint64_t ike_auth_final_auth_response_failed;
     uint64_t ike_auth_final_auth_unsupported_tx;
     uint64_t ike_auth_final_auth_unsupported_failed;
     uint64_t ike_create_child_install_unsupported_tx;
@@ -1006,6 +1008,13 @@ bool provider_helper_ikev2_build_child_sa_response_plaintext(
     const struct provider_helper_xfrm_lease *lease,
     const uint8_t *responder_nonce,
     size_t responder_nonce_len,
+    size_t *out_len);
+bool provider_helper_ikev2_build_ike_auth_child_sa_payloads(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_ikev2_child_sa_selection *selection,
+    uint32_t responder_spi,
+    const struct provider_helper_xfrm_lease *lease,
     size_t *out_len);
 bool provider_helper_ikev2_build_cookie(
     uint8_t *dst,

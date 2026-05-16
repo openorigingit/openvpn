@@ -328,6 +328,10 @@ struct ikev2_helper_ike_sa {
     uint64_t xfrm_lease_id;
     uint64_t policy_revision;
     struct provider_helper_xfrm_lease authorized_xfrm_lease;
+    bool initial_child_request_ready;
+    struct provider_helper_ikev2_child_sa_selection initial_child_selection;
+    struct provider_xfrm_ipv4_selector initial_child_local_ts;
+    struct provider_xfrm_ipv4_selector initial_child_remote_ts;
     struct ikev2_helper_child_sa_scaffold child_sa;
     time_t created;
     time_t updated;
@@ -5180,6 +5184,97 @@ ikev2_helper_child_ts_for_xfrm_lease(
     return true;
 }
 
+static bool
+ikev2_helper_stage_initial_child_request(
+    struct ikev2_helper_ike_sa *sa,
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    const struct provider_helper_ikev2_payload_summary *summary)
+{
+    if (!sa || !sa->active || !plaintext || !summary
+        || summary->sa_count != 1 || summary->nonce_count
+        || !summary->saw_tsi || !summary->saw_tsr
+        || !ikev2_helper_body_inside(plaintext_len, summary->tsi_offset,
+                                     summary->tsi_len)
+        || !ikev2_helper_body_inside(plaintext_len, summary->tsr_offset,
+                                     summary->tsr_len))
+    {
+        return false;
+    }
+
+    struct provider_helper_ikev2_child_sa_selection selection;
+    struct ikev2_helper_ipv4_ts_range tsi;
+    struct ikev2_helper_ipv4_ts_range tsr;
+    CLEAR(selection);
+    CLEAR(tsi);
+    CLEAR(tsr);
+    const enum provider_helper_ikev2_parse_result select_result =
+        provider_helper_ikev2_select_child_sa_proposal(plaintext,
+                                                       plaintext_len,
+                                                       summary, &selection);
+    if (select_result != PROVIDER_HELPER_IKEV2_PARSE_OK
+        || !ikev2_helper_read_single_ipv4_ts_range(
+            plaintext + summary->tsi_offset, summary->tsi_len, &tsi)
+        || !ikev2_helper_read_single_ipv4_ts_range(
+            plaintext + summary->tsr_offset, summary->tsr_len, &tsr)
+        || !ikev2_helper_xfrm_selector_from_ipv4_ts(
+            &tsr, &sa->initial_child_local_ts)
+        || !ikev2_helper_xfrm_selector_from_ipv4_ts(
+            &tsi, &sa->initial_child_remote_ts))
+    {
+        return false;
+    }
+
+    sa->initial_child_selection = selection;
+    sa->initial_child_request_ready = true;
+    return true;
+}
+
+static bool
+ikev2_helper_initial_child_ts_allowed_by_lease(
+    const struct ikev2_helper_ike_sa *sa,
+    const struct provider_helper_xfrm_lease *lease)
+{
+    if (!sa || !sa->initial_child_request_ready || !lease
+        || lease->address_family != AF_INET
+        || !(lease->flags & PROVIDER_HELPER_XFRM_LEASE_IPV4))
+    {
+        return false;
+    }
+
+    const struct provider_xfrm_ipv4_selector *remote =
+        &sa->initial_child_remote_ts;
+    const struct provider_xfrm_ipv4_selector *local =
+        &sa->initial_child_local_ts;
+    struct ikev2_helper_ipv4_ts_range requested_remote = {
+        .ip_protocol_id = remote->ip_protocol_id,
+        .start_port = remote->start_port,
+        .end_port = remote->end_port,
+        .start_addr = remote->start_addr,
+        .end_addr = remote->end_addr,
+    };
+    struct ikev2_helper_ipv4_ts_range requested_local = {
+        .ip_protocol_id = local->ip_protocol_id,
+        .start_port = local->start_port,
+        .end_port = local->end_port,
+        .start_addr = local->start_addr,
+        .end_addr = local->end_addr,
+    };
+
+    if (requested_remote.ip_protocol_id != requested_local.ip_protocol_id)
+    {
+        return false;
+    }
+    return ikev2_helper_ipv4_ts_allowed(
+               &requested_remote, lease->remote_ts_start_ipv4,
+               lease->remote_ts_end_ipv4, lease->remote_ts_start_port,
+               lease->remote_ts_end_port, lease->ip_protocol_id)
+           && ikev2_helper_ipv4_ts_allowed(
+               &requested_local, lease->local_ts_start_ipv4,
+               lease->local_ts_end_ipv4, lease->local_ts_start_port,
+               lease->local_ts_end_port, lease->ip_protocol_id);
+}
+
 static enum provider_helper_ikev2_parse_result
 ikev2_helper_validate_create_child_inner_payload(uint8_t payload_type,
                                                  const uint8_t *body,
@@ -6769,6 +6864,85 @@ ikev2_helper_scaffold_child_sa(
 }
 
 static bool
+ikev2_helper_scaffold_initial_child_sa(
+    const struct ikev2_helper_ike_sa_table *table,
+    struct ikev2_helper_ike_sa *sa,
+    uint32_t message_id,
+    time_t now,
+    bool apply_xfrm,
+    bool *xfrm_apply_failed)
+{
+    if (xfrm_apply_failed)
+    {
+        *xfrm_apply_failed = false;
+    }
+    if (!table || !sa || !sa->active || !sa->auth_authorized
+        || !sa->initial_child_request_ready
+        || !sa->initial_child_selection.selected
+        || !sa->initial_child_selection.initiator_spi || !message_id
+        || !ikev2_helper_initial_child_ts_allowed_by_lease(
+            sa, &sa->authorized_xfrm_lease)
+        || !sa->initiator_nonce_len || !sa->responder_nonce_len)
+    {
+        return false;
+    }
+
+    struct ikev2_helper_child_sa_scaffold child;
+    CLEAR(child);
+    if (!ikev2_helper_generate_child_responder_spi(table,
+                                                   &child.responder_spi))
+    {
+        return false;
+    }
+
+    child.ready = true;
+    child.initiator_spi = sa->initial_child_selection.initiator_spi;
+    child.message_id = message_id;
+    child.provider_session_id = sa->provider_session_id;
+    child.xfrm_lease_id = sa->xfrm_lease_id;
+    child.policy_revision = sa->policy_revision;
+    child.created = now;
+    child.updated = now;
+    child.selection = sa->initial_child_selection;
+    child.xfrm_lease = sa->authorized_xfrm_lease;
+    child.xfrm_lease.local_ts_start_ipv4 =
+        sa->initial_child_local_ts.start_addr;
+    child.xfrm_lease.local_ts_end_ipv4 = sa->initial_child_local_ts.end_addr;
+    child.xfrm_lease.local_ts_start_port =
+        sa->initial_child_local_ts.start_port;
+    child.xfrm_lease.local_ts_end_port = sa->initial_child_local_ts.end_port;
+    child.xfrm_lease.remote_ts_start_ipv4 =
+        sa->initial_child_remote_ts.start_addr;
+    child.xfrm_lease.remote_ts_end_ipv4 = sa->initial_child_remote_ts.end_addr;
+    child.xfrm_lease.remote_ts_start_port =
+        sa->initial_child_remote_ts.start_port;
+    child.xfrm_lease.remote_ts_end_port = sa->initial_child_remote_ts.end_port;
+    child.xfrm_lease.ip_protocol_id =
+        sa->initial_child_remote_ts.ip_protocol_id;
+    child.initiator_nonce_len = sa->initiator_nonce_len;
+    memcpy(child.initiator_nonce, sa->initiator_nonce,
+           sa->initiator_nonce_len);
+    child.responder_nonce_len = sa->responder_nonce_len;
+    memcpy(child.responder_nonce, sa->responder_nonce,
+           sa->responder_nonce_len);
+    if (!ikev2_helper_derive_child_sa_keys(sa, &child)
+        || !ikev2_helper_build_child_sa_xfrm_plan(
+            sa, &child, &sa->initial_child_local_ts,
+            &sa->initial_child_remote_ts, apply_xfrm, xfrm_apply_failed))
+    {
+        ikev2_helper_secure_zero(&child, sizeof(child));
+        return false;
+    }
+
+    ikev2_helper_secure_zero(&sa->child_sa, sizeof(sa->child_sa));
+    child.xfrm_applied = apply_xfrm;
+    sa->child_sa = child;
+    ikev2_helper_child_sa_zero_key_material(&sa->child_sa);
+    ikev2_helper_secure_zero(&child, sizeof(child));
+    return true;
+}
+
+static bool
 ikev2_helper_ike_sa_uses_xfrm_lease(
     const struct ikev2_helper_ike_sa *sa,
     const struct provider_helper_xfrm_lease *lease)
@@ -7831,6 +8005,152 @@ ikev2_helper_send_cached_server_auth_response(
         sa->eap_tls_started = true;
         sa->pending_eap_identifier = IKEV2_HELPER_EAP_TLS_START_REQUEST_ID;
     }
+    ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+    ikev2_helper_secure_zero(response, sizeof(response));
+    return ret;
+}
+
+static bool
+ikev2_helper_build_responder_eap_auth_data(
+    const struct ikev2_helper_ike_sa *sa,
+    const struct provider_helper_server_auth_config *server_auth_config,
+    uint8_t *auth_data,
+    size_t auth_data_len)
+{
+    if (!sa || !server_auth_config || !auth_data
+        || auth_data_len != IKEV2_HELPER_PRF_SHA256_BYTES
+        || !sa->eap_tls_msk_ready)
+    {
+        return false;
+    }
+
+    uint8_t signed_octets[PROVIDER_HELPER_SERVER_AUTH_TRANSCRIPT_SIZE];
+    uint8_t auth_key[IKEV2_HELPER_PRF_SHA256_BYTES];
+    size_t signed_octets_len = 0;
+    CLEAR(signed_octets);
+    CLEAR(auth_key);
+
+    const bool ret =
+        ikev2_helper_build_responder_signed_octets(
+            sa, server_auth_config, signed_octets, sizeof(signed_octets),
+            &signed_octets_len)
+        && ikev2_helper_hmac_sha256(
+               sa->eap_tls_msk, sizeof(sa->eap_tls_msk),
+               (const uint8_t *)IKEV2_HELPER_AUTH_KEY_PAD,
+               IKEV2_HELPER_AUTH_KEY_PAD_BYTES, auth_key, sizeof(auth_key))
+        && ikev2_helper_hmac_sha256(auth_key, sizeof(auth_key),
+                                    signed_octets, signed_octets_len,
+                                    auth_data, auth_data_len);
+    ikev2_helper_secure_zero(signed_octets, sizeof(signed_octets));
+    ikev2_helper_secure_zero(auth_key, sizeof(auth_key));
+    if (!ret)
+    {
+        ikev2_helper_secure_zero(auth_data, auth_data_len);
+    }
+    return ret;
+}
+
+static bool
+ikev2_helper_build_final_auth_child_sa_plaintext(
+    const struct ikev2_helper_ike_sa *sa,
+    const struct provider_helper_server_auth_config *server_auth_config,
+    const struct ikev2_helper_child_sa_scaffold *child,
+    uint8_t *plaintext,
+    size_t plaintext_size,
+    size_t *plaintext_len)
+{
+    if (plaintext_len)
+    {
+        *plaintext_len = 0;
+    }
+    if (!sa || !server_auth_config || !child || !child->ready || !plaintext
+        || !plaintext_len)
+    {
+        return false;
+    }
+
+    uint8_t auth_data[IKEV2_HELPER_PRF_SHA256_BYTES];
+    uint8_t child_payloads[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    size_t child_payloads_len = 0;
+    CLEAR(auth_data);
+    CLEAR(child_payloads);
+
+    const uint16_t auth_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4
+        + IKEV2_HELPER_PRF_SHA256_BYTES;
+    const bool ready =
+        ikev2_helper_build_responder_eap_auth_data(
+            sa, server_auth_config, auth_data, sizeof(auth_data))
+        && provider_helper_ikev2_build_ike_auth_child_sa_payloads(
+            child_payloads, sizeof(child_payloads), &child->selection,
+            child->responder_spi, &child->xfrm_lease, &child_payloads_len);
+    const size_t total_len = auth_payload_len + child_payloads_len;
+    if (!ready || total_len > plaintext_size)
+    {
+        ikev2_helper_secure_zero(auth_data, sizeof(auth_data));
+        ikev2_helper_secure_zero(child_payloads, sizeof(child_payloads));
+        return false;
+    }
+
+    uint8_t *pos = plaintext;
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_SA;
+    *pos++ = 0;
+    ikev2_helper_write_be16(&pos, auth_payload_len);
+    *pos++ = IKEV2_HELPER_AUTH_METHOD_SHARED_KEY_MIC;
+    *pos++ = 0;
+    *pos++ = 0;
+    *pos++ = 0;
+    memcpy(pos, auth_data, sizeof(auth_data));
+    pos += sizeof(auth_data);
+    memcpy(pos, child_payloads, child_payloads_len);
+    pos += child_payloads_len;
+    if ((size_t)(pos - plaintext) != total_len)
+    {
+        ikev2_helper_secure_zero(plaintext, plaintext_size);
+        ikev2_helper_secure_zero(auth_data, sizeof(auth_data));
+        ikev2_helper_secure_zero(child_payloads, sizeof(child_payloads));
+        return false;
+    }
+
+    *plaintext_len = total_len;
+    ikev2_helper_secure_zero(auth_data, sizeof(auth_data));
+    ikev2_helper_secure_zero(child_payloads, sizeof(child_payloads));
+    return true;
+}
+
+static bool
+ikev2_helper_send_cached_final_auth_child_sa_response(
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_ike_sa *sa,
+    const struct provider_helper_server_auth_config *server_auth_config,
+    const struct ikev2_helper_child_sa_scaffold *child,
+    uint32_t message_id)
+{
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    uint8_t response[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    size_t plaintext_len = 0;
+    size_t response_len = 0;
+    if (!listener || !sa || !sa->active || !server_auth_config || !child
+        || !child->ready
+        || !ikev2_helper_build_final_auth_child_sa_plaintext(
+            sa, server_auth_config, child, plaintext, sizeof(plaintext),
+            &plaintext_len)
+        || !ikev2_helper_build_encrypted_payload_response(
+            response, sizeof(response), &response_len, listener, sa,
+            PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH, message_id,
+            PROVIDER_HELPER_IKEV2_PAYLOAD_AUTH, plaintext, plaintext_len))
+    {
+        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+        ikev2_helper_secure_zero(response, sizeof(response));
+        return false;
+    }
+
+    const ssize_t sent =
+        sendto(listener->fd, response, response_len, 0,
+               (const struct sockaddr *)&sa->peer, sa->peer_len);
+    const bool ret = sent == (ssize_t)response_len
+                     && ikev2_helper_cache_protected_response(
+                         sa, message_id, response, response_len);
     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
     ikev2_helper_secure_zero(response, sizeof(response));
     return ret;
@@ -10034,23 +10354,121 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     }
                     else
                     {
+                        const bool apply_xfrm =
+                            (config->flags
+                             & PROVIDER_HELPER_CONFIG_APPLY_XFRM) != 0;
+                        const bool allow_test_no_xfrm =
+                            !apply_xfrm
+                            && (config->flags
+                                & PROVIDER_HELPER_CONFIG_TEST_AUTH_CONTINUATION);
                         ++counters->ike_auth_final_auth_verified;
-                        if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
-                                listener, sa,
-                                PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
-                                header.message_id,
-                                PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
+                        if (!server_auth_configured
+                            || !provider_helper_server_auth_config_valid(
+                                server_auth_config, NULL, 0)
+                            || !sa->initial_child_request_ready
+                            || (!apply_xfrm && !allow_test_no_xfrm))
                         {
-                            ++counters->ike_auth_final_auth_unsupported_tx;
+                            if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
+                                    listener, sa,
+                                    PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+                                    header.message_id,
+                                    PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
+                            {
+                                ++counters->ike_auth_final_auth_unsupported_tx;
+                            }
+                            else
+                            {
+                                ++counters
+                                      ->ike_auth_final_auth_unsupported_failed;
+                            }
+                            ikev2_helper_clear_ike_sa(sa_table, sa, counters);
                         }
                         else
                         {
-                            ++counters->ike_auth_final_auth_unsupported_failed;
+                            bool xfrm_apply_failed = false;
+                            sa->auth_allowed = false;
+                            sa->auth_authorized = true;
+                            if (ikev2_helper_scaffold_initial_child_sa(
+                                    sa_table, sa, header.message_id,
+                                    time(NULL), apply_xfrm,
+                                    &xfrm_apply_failed))
+                            {
+                                ++counters->ike_create_child_scaffolded;
+                                ++counters->ike_create_child_keymat_ready;
+                                if (apply_xfrm)
+                                {
+                                    ++counters
+                                          ->ike_create_child_xfrm_install_ok;
+                                }
+                                if (ikev2_helper_send_cached_final_auth_child_sa_response(
+                                        listener, sa, server_auth_config,
+                                        &sa->child_sa, header.message_id))
+                                {
+                                    ++counters
+                                          ->ike_auth_final_auth_response_tx;
+                                    sa->message_id = header.message_id;
+                                    sa->updated = time(NULL);
+                                    if (!ikev2_helper_send_session_update(
+                                            ipc_fd, tx_sequence, sa,
+                                            PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE,
+                                            "ike-authorized", "installed"))
+                                    {
+                                        ikev2_helper_note_fatal_ipc_failure();
+                                    }
+                                }
+                                else
+                                {
+                                    ++counters
+                                          ->ike_auth_final_auth_response_failed;
+                                    if (!ikev2_helper_send_session_close(
+                                            ipc_fd, tx_sequence, sa,
+                                            "final IKE_AUTH response failed"))
+                                    {
+                                        ikev2_helper_note_fatal_ipc_failure();
+                                    }
+                                    ikev2_helper_clear_ike_sa(sa_table, sa,
+                                                              counters);
+                                }
+                            }
+                            else
+                            {
+                                ++counters->ike_create_child_scaffold_failed;
+                                if (xfrm_apply_failed)
+                                {
+                                    ++counters
+                                          ->ike_create_child_xfrm_install_failed;
+                                }
+                                if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
+                                        listener, sa,
+                                        PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+                                        header.message_id,
+                                        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
+                                {
+                                    ++counters
+                                          ->ike_auth_final_auth_unsupported_tx;
+                                }
+                                else
+                                {
+                                    ++counters
+                                          ->ike_auth_final_auth_unsupported_failed;
+                                }
+                                if (!ikev2_helper_send_session_close(
+                                        ipc_fd, tx_sequence, sa,
+                                        xfrm_apply_failed
+                                            ? "XFRM CHILD_SA install failed"
+                                            : "initial CHILD_SA rejected"))
+                                {
+                                    ikev2_helper_note_fatal_ipc_failure();
+                                }
+                                ikev2_helper_clear_ike_sa(sa_table, sa,
+                                                          counters);
+                            }
                         }
-                        ikev2_helper_clear_ike_sa(sa_table, sa, counters);
                     }
                     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                     counters->ike_sa_active = sa_table->active;
+                    counters->ike_child_sa_scaffold_active =
+                        ikev2_helper_count_child_sa_scaffolds(sa_table);
                     return;
                 }
 
@@ -10324,6 +10742,17 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 return;
             }
             ++counters->ike_auth_idi_extracted;
+            if (inner_summary.saw_sa)
+            {
+                if (!ikev2_helper_stage_initial_child_request(
+                        sa, plaintext, plaintext_len, &inner_summary))
+                {
+                    ++counters->ike_auth_inner_malformed;
+                    ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+            }
 
             if (!server_auth_configured
                 || !provider_helper_server_auth_config_valid(

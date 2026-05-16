@@ -544,8 +544,10 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_auth_final_auth_bad_shape = 104,
         .ike_auth_final_auth_verify_failed = 105,
         .ike_auth_final_auth_verified = 106,
-        .ike_auth_final_auth_unsupported_tx = 107,
-        .ike_auth_final_auth_unsupported_failed = 108,
+        .ike_auth_final_auth_response_tx = 107,
+        .ike_auth_final_auth_response_failed = 108,
+        .ike_auth_final_auth_unsupported_tx = 109,
+        .ike_auth_final_auth_unsupported_failed = 110,
         .ike_create_child_install_unsupported_tx = 80,
         .ike_create_child_install_unsupported_failed = 81,
         .ike_exchange_pre_auth_dropped = 82,
@@ -737,6 +739,10 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_auth_final_auth_verify_failed);
     assert_int_equal(output.ike_auth_final_auth_verified,
                      input.ike_auth_final_auth_verified);
+    assert_int_equal(output.ike_auth_final_auth_response_tx,
+                     input.ike_auth_final_auth_response_tx);
+    assert_int_equal(output.ike_auth_final_auth_response_failed,
+                     input.ike_auth_final_auth_response_failed);
     assert_int_equal(output.ike_auth_final_auth_unsupported_tx,
                      input.ike_auth_final_auth_unsupported_tx);
     assert_int_equal(output.ike_auth_final_auth_unsupported_failed,
@@ -2670,7 +2676,7 @@ test_make_encrypted_ike_auth_message_id_flags_packet(
     CLEAR(plaintext);
     const uint8_t next_payload =
         cert_der ? PROVIDER_HELPER_IKEV2_PAYLOAD_CERT
-                 : PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+                 : PROVIDER_HELPER_IKEV2_PAYLOAD_SA;
     size_t plaintext_len = 0;
     plaintext_len = test_add_ikev2_payload(plaintext, plaintext_len,
                                            next_payload, 9, 0);
@@ -2708,6 +2714,59 @@ test_make_encrypted_ike_auth_message_id_flags_packet(
         plaintext[eap_body + 5] = eap_flags;
         test_write_be32(plaintext + eap_body + 6, 1);
         plaintext[eap_body + 10] = 0x16;
+
+        plaintext_len = test_add_ikev2_payload(
+            plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_TSR,
+            TEST_IKEV2_TS_IPV4_PAYLOAD_LEN, 0);
+        const size_t tsi_body = plaintext_len - TEST_IKEV2_TS_IPV4_PAYLOAD_LEN
+                                + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+        plaintext[tsi_body] = 1;
+        const size_t tsi = tsi_body + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+        plaintext[tsi] = PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE;
+        test_write_be16(plaintext + tsi + 2,
+                        PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
+        test_write_be16(plaintext + tsi + 6, 65535);
+        test_write_be32(plaintext + tsi + 8, 0x0a580002);
+        test_write_be32(plaintext + tsi + 12, 0x0a580002);
+
+        plaintext_len = test_add_ikev2_payload(
+            plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+            TEST_IKEV2_TS_IPV4_PAYLOAD_LEN, 0);
+        const size_t tsr_body = plaintext_len - TEST_IKEV2_TS_IPV4_PAYLOAD_LEN
+                                + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+        plaintext[tsr_body] = 1;
+        const size_t tsr = tsr_body + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+        plaintext[tsr] = PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE;
+        test_write_be16(plaintext + tsr + 2,
+                        PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
+        test_write_be16(plaintext + tsr + 6, 65535);
+        test_write_be32(plaintext + tsr + 8, 0x0a580001);
+        test_write_be32(plaintext + tsr + 12, 0x0a580001);
+    }
+    else
+    {
+        plaintext_len = test_add_ikev2_payload(
+            plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_TSI,
+            TEST_IKEV2_CHILD_SA_PAYLOAD_LEN, 0);
+        const size_t sa_body = plaintext_len - TEST_IKEV2_CHILD_SA_PAYLOAD_LEN
+                               + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+        test_write_be16(plaintext + sa_body + 2,
+                        TEST_IKEV2_CHILD_SA_PROPOSAL_LEN);
+        plaintext[sa_body + 4] = 1;
+        plaintext[sa_body + 5] = PROVIDER_HELPER_IKEV2_PROTOCOL_ESP;
+        plaintext[sa_body + 6] = 4;
+        plaintext[sa_body + 7] = 1;
+        test_write_be32(plaintext + sa_body + 8, 0x01020304);
+        const size_t transform =
+            sa_body + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE + 4;
+        test_write_be16(plaintext + transform + 2,
+                        TEST_IKEV2_ENCR_TRANSFORM_LEN);
+        plaintext[transform + 4] = PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR;
+        test_write_be16(plaintext + transform + 6,
+                        PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16);
+        test_write_be16(plaintext + transform + 8,
+                        0x8000u | PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH);
+        test_write_be16(plaintext + transform + 10, 256);
 
         plaintext_len = test_add_ikev2_payload(
             plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_TSR,
@@ -5133,6 +5192,90 @@ test_recv_ikev2_encrypted_child_sa_response(
     return responder_child_spi;
 }
 
+static uint32_t
+test_recv_ikev2_encrypted_final_auth_child_sa_response(
+    int fd,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    uint32_t expected_message_id,
+    const struct provider_helper_xfrm_lease *lease,
+    bool expect_natt)
+{
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t payload_len = test_recv_ikev2_encrypted_response_payload(
+        fd, initiator_spi, material, PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+        expected_message_id, PROVIDER_HELPER_IKEV2_PAYLOAD_AUTH, expect_natt,
+        plaintext, sizeof(plaintext));
+    assert_non_null(lease);
+    assert_true(payload_len > PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE);
+
+    uint8_t packet[PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                   + PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t packet_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE + payload_len;
+    assert_true(packet_len <= sizeof(packet));
+    test_make_ikev2_header(packet, false,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+                           PROVIDER_HELPER_IKEV2_FLAG_RESPONSE,
+                           material->responder_spi, (uint32_t)packet_len);
+    test_write_be64(packet, initiator_spi);
+    packet[16] = PROVIDER_HELPER_IKEV2_PAYLOAD_AUTH;
+    memcpy(packet + PROVIDER_HELPER_IKEV2_HEADER_SIZE, plaintext,
+           payload_len);
+
+    struct provider_helper_ikev2_header header;
+    struct provider_helper_ikev2_payload_summary summary;
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, packet_len,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, false,
+                         &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_parse_payloads(
+                         packet, packet_len, &header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_true(summary.saw_auth);
+    assert_true(summary.saw_sa);
+    assert_true(summary.saw_tsi);
+    assert_true(summary.saw_tsr);
+    assert_false(summary.saw_nonce);
+    const size_t auth_body =
+        PROVIDER_HELPER_IKEV2_HEADER_SIZE
+        + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    assert_int_equal(packet[auth_body],
+                     TEST_IKEV2_AUTH_METHOD_SHARED_KEY_MIC);
+
+    struct provider_helper_ikev2_child_sa_selection selected;
+    assert_int_equal(provider_helper_ikev2_select_child_sa_proposal(
+                         packet, packet_len, &summary, &selected),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_true(selected.selected);
+    assert_int_equal(selected.encr_id, PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16);
+    assert_int_equal(selected.encr_key_bits, 256);
+    assert_true(selected.initiator_spi != 0);
+    const uint32_t responder_child_spi = selected.initiator_spi;
+
+    const size_t tsi = summary.tsi_offset + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+    assert_int_equal(packet[summary.tsi_offset], 1);
+    assert_int_equal(packet[tsi], PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE);
+    assert_int_equal(packet[tsi + 1], lease->ip_protocol_id);
+    assert_int_equal(test_read_be32(packet + tsi + 8),
+                     lease->remote_ts_start_ipv4);
+    assert_int_equal(test_read_be32(packet + tsi + 12),
+                     lease->remote_ts_end_ipv4);
+
+    const size_t tsr = summary.tsr_offset + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+    assert_int_equal(packet[summary.tsr_offset], 1);
+    assert_int_equal(packet[tsr], PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE);
+    assert_int_equal(packet[tsr + 1], lease->ip_protocol_id);
+    assert_int_equal(test_read_be32(packet + tsr + 8),
+                     lease->local_ts_start_ipv4);
+    assert_int_equal(test_read_be32(packet + tsr + 12),
+                     lease->local_ts_end_ipv4);
+
+    secure_memzero(plaintext, sizeof(plaintext));
+    secure_memzero(packet, sizeof(packet));
+    return responder_child_spi;
+}
+
 #endif
 
 struct test_cookie_mac_ctx {
@@ -6067,6 +6210,21 @@ test_provider_helper_ikev2_child_sa_response_plaintext(void **state)
     assert_int_equal(selected.initiator_spi, responder_spi);
     assert_true(selected.has_esn);
     assert_int_equal(selected.esn_id, PROVIDER_HELPER_IKEV2_ESN_NO_EXTENDED);
+
+    assert_true(provider_helper_ikev2_build_ike_auth_child_sa_payloads(
+                    plaintext, sizeof(plaintext), &selection, responder_spi,
+                    &lease, &plaintext_len));
+    assert_true(plaintext_len > 1);
+    assert_int_equal(plaintext[plaintext_len - 1], 0);
+    assert_int_equal(plaintext[0], PROVIDER_HELPER_IKEV2_PAYLOAD_TSI);
+    assert_int_equal(test_read_be16(plaintext + 2), sa_payload_len);
+    const size_t ike_auth_tsi_payload = sa_payload_len;
+    assert_int_equal(plaintext[ike_auth_tsi_payload],
+                     PROVIDER_HELPER_IKEV2_PAYLOAD_TSR);
+    const size_t ike_auth_tsr_payload =
+        ike_auth_tsi_payload + TEST_IKEV2_TS_IPV4_PAYLOAD_LEN;
+    assert_int_equal(plaintext[ike_auth_tsr_payload],
+                     PROVIDER_HELPER_IKEV2_PAYLOAD_NONE);
 
     assert_false(provider_helper_ikev2_build_child_sa_response_plaintext(
                      plaintext, sizeof(plaintext), &selection, 0, &lease,
@@ -8589,6 +8747,8 @@ test_provider_helper_spawn_ikev2_eap_tls_auth_allow_success(void **state)
     struct provider_helper_supervisor supervisor;
     provider_helper_supervisor_init(&supervisor);
     supervisor.runtime_config.max_eap_tls_tx_fragment_bytes = 2048;
+    supervisor.runtime_config.flags |=
+        PROVIDER_HELPER_CONFIG_TEST_AUTH_CONTINUATION;
 
     struct test_provider_helper_auth_cb_state auth_state;
     CLEAR(auth_state);
@@ -8847,10 +9007,8 @@ test_provider_helper_spawn_ikev2_eap_tls_auth_allow_success(void **state)
         response_fd, natt_port, initiator_spi, &sa_init_material, true, 5,
         eap_tls_msk, sizeof(eap_tls_msk));
     usleep(10000);
-    test_recv_ikev2_encrypted_notify_exchange_response(
-        response_fd, initiator_spi, &sa_init_material,
-        PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH, 5,
-        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
+    (void)test_recv_ikev2_encrypted_final_auth_child_sa_response(
+        response_fd, initiator_spi, &sa_init_material, 5, &xfrm_lease, true);
 
     secure_memzero(client_private_key, sizeof(client_private_key));
     secure_memzero(client_public_key, sizeof(client_public_key));
@@ -8860,7 +9018,7 @@ test_provider_helper_spawn_ikev2_eap_tls_auth_allow_success(void **state)
     secure_memzero(client_finished, sizeof(client_finished));
     secure_memzero(eap_tls_msk, sizeof(eap_tls_msk));
 
-    target_rx_sequence = supervisor.last_rx_sequence + 1;
+    target_rx_sequence = supervisor.last_rx_sequence + 2;
     write_helper_header_fd(supervisor.ipc_fd,
                            PROVIDER_HELPER_MSG_STATS_REQUEST,
                            supervisor.next_tx_sequence++, 90);
@@ -8892,14 +9050,21 @@ test_provider_helper_spawn_ikev2_eap_tls_auth_allow_success(void **state)
     assert_int_equal(
         supervisor.runtime_stats.ike_auth_final_auth_verify_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_final_auth_verified, 1);
-    assert_int_equal(supervisor.runtime_stats.ike_auth_final_auth_unsupported_tx,
+    assert_int_equal(supervisor.runtime_stats.ike_auth_final_auth_response_tx,
                      1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_auth_final_auth_response_failed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_final_auth_unsupported_tx,
+                     0);
     assert_int_equal(
         supervisor.runtime_stats.ike_auth_final_auth_unsupported_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_exchange_pre_auth_dropped,
                      1);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_scaffolded, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_keymat_ready, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
     assert_int_equal(supervisor.runtime_stats.ike_create_child_response_tx, 0);
-    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
 
     close(response_fd);
     close(listener_fd);
@@ -9286,7 +9451,7 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
         response_fd, natt_port, initiator_spi, &sa_init_material, true, false,
         cert_der, cert_der_len);
 
-    for (int i = 0; i < 100 && cb_state.calls < 2; ++i)
+    for (int i = 0; i < 300 && cb_state.calls < 2; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
