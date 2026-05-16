@@ -303,6 +303,7 @@ enum provider_helper_server_auth_method {
 enum provider_helper_server_sign_purpose {
     PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH = 1,
     PROVIDER_HELPER_SERVER_SIGN_PURPOSE_EAP_TLS_CERTIFICATE_VERIFY = 2,
+    PROVIDER_HELPER_SERVER_SIGN_PURPOSE_EAP_TLS12_SERVER_KEY_EXCHANGE = 3,
 };
 
 enum provider_helper_server_sign_status {

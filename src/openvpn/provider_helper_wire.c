@@ -848,7 +848,9 @@ provider_helper_server_sign_request_valid(
     }
     if (request->purpose != PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH
         && request->purpose
-               != PROVIDER_HELPER_SERVER_SIGN_PURPOSE_EAP_TLS_CERTIFICATE_VERIFY)
+               != PROVIDER_HELPER_SERVER_SIGN_PURPOSE_EAP_TLS_CERTIFICATE_VERIFY
+        && request->purpose
+               != PROVIDER_HELPER_SERVER_SIGN_PURPOSE_EAP_TLS12_SERVER_KEY_EXCHANGE)
     {
         provider_helper_config_reason(reason, reason_size,
                                       "unsupported server sign request purpose");
