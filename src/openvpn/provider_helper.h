@@ -87,6 +87,8 @@
 #define PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE 7
 #define PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE 16
 #define PROVIDER_HELPER_IKEV2_MAX_TS_SELECTORS 16
+#define PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE 4
+#define PROVIDER_HELPER_IKEV2_MAX_CP_ATTRS 32
 
 #define PROVIDER_HELPER_CONFIG_FORCE_NATT (1u << 0)
 #define PROVIDER_HELPER_CONFIG_IPV4_ONLY  (1u << 1)
@@ -127,6 +129,20 @@
 #define PROVIDER_HELPER_IKEV2_DH_ECP_256 19
 #define PROVIDER_HELPER_IKEV2_ESN_NO_EXTENDED 0
 #define PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH 14
+#define PROVIDER_HELPER_IKEV2_CFG_REQUEST 1
+#define PROVIDER_HELPER_IKEV2_CFG_REPLY   2
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_ADDRESS 1
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_NETMASK 2
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_DNS 3
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_NBNS 4
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_DHCP 6
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_ADDRESS 8
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_DNS 10
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_NBNS 11
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_DHCP 12
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_SUBNET 13
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_SUPPORTED_ATTRIBUTES 14
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_SUBNET 15
 #define PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES 64
 #define PROVIDER_HELPER_IKEV2_ID_FQDN       2
 #define PROVIDER_HELPER_IKEV2_ID_RFC822     3
@@ -623,6 +639,7 @@ struct provider_helper_ikev2_payload_summary {
     bool saw_tsi;
     bool saw_tsr;
     bool saw_sk;
+    bool saw_cp;
     bool saw_cookie_notify;
     uint32_t sa_count;
     uint32_t ke_count;
@@ -636,6 +653,7 @@ struct provider_helper_ikev2_payload_summary {
     uint32_t tsi_count;
     uint32_t tsr_count;
     uint32_t sk_count;
+    uint32_t cp_count;
     size_t sa_offset;
     size_t sa_len;
     size_t ke_offset;
@@ -666,6 +684,8 @@ struct provider_helper_ikev2_payload_summary {
     size_t sk_offset;
     size_t sk_len;
     uint8_t sk_next_payload;
+    size_t cp_offset;
+    size_t cp_len;
     size_t cookie_offset;
     size_t cookie_len;
 };

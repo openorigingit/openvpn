@@ -2328,6 +2328,16 @@ provider_helper_ikev2_record_payload(
             }
             break;
 
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_CP:
+            summary->saw_cp = true;
+            ++summary->cp_count;
+            if (summary->cp_count == 1)
+            {
+                summary->cp_offset = body_offset;
+                summary->cp_len = body_len;
+            }
+            break;
+
         case PROVIDER_HELPER_IKEV2_PAYLOAD_SK:
             summary->saw_sk = true;
             ++summary->sk_count;

@@ -332,6 +332,8 @@ struct ikev2_helper_ike_sa {
     struct provider_helper_ikev2_child_sa_selection initial_child_selection;
     struct provider_xfrm_ipv4_selector initial_child_local_ts;
     struct provider_xfrm_ipv4_selector initial_child_remote_ts;
+    bool initial_cp_request_ready;
+    bool initial_cp_requested_ipv4_address;
     struct ikev2_helper_child_sa_scaffold child_sa;
     time_t created;
     time_t updated;
@@ -2867,6 +2869,90 @@ ikev2_helper_validate_eap_payload(
 }
 
 static enum provider_helper_ikev2_parse_result
+ikev2_helper_validate_cfg_attr(uint16_t attr_type, size_t attr_len)
+{
+    switch (attr_type)
+    {
+        case PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_ADDRESS:
+        case PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_NETMASK:
+        case PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_DNS:
+        case PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_NBNS:
+        case PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_DHCP:
+            return attr_len == 0 || attr_len == 4
+                   ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                   : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+
+        case PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_SUBNET:
+            return attr_len == 0 || attr_len == 8
+                   ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                   : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+
+        case PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_ADDRESS:
+        case PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_SUBNET:
+            return attr_len == 0 || attr_len == 17
+                   ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                   : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+
+        case PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_DNS:
+        case PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_NBNS:
+        case PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_DHCP:
+            return attr_len == 0 || attr_len == 16
+                   ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                   : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+
+        case PROVIDER_HELPER_IKEV2_CFG_ATTR_SUPPORTED_ATTRIBUTES:
+            return (attr_len % 2) == 0
+                   ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                   : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+
+        default:
+            return PROVIDER_HELPER_IKEV2_PARSE_OK;
+    }
+}
+
+static enum provider_helper_ikev2_parse_result
+ikev2_helper_validate_cp_payload(const uint8_t *body, size_t body_len)
+{
+    if (!body || body_len < PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE
+        || body[0] != PROVIDER_HELPER_IKEV2_CFG_REQUEST || body[1]
+        || body[2] || body[3])
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    size_t pos = PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE;
+    uint32_t attr_count = 0;
+    while (pos < body_len)
+    {
+        if (++attr_count > PROVIDER_HELPER_IKEV2_MAX_CP_ATTRS
+            || body_len - pos < 4)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const uint16_t raw_type = ikev2_helper_read_be16(body + pos);
+        const bool tv_format = (raw_type & 0x8000u) != 0;
+        const uint16_t attr_type = raw_type & 0x7fffu;
+        const uint16_t attr_len = ikev2_helper_read_be16(body + pos + 2);
+        pos += 4;
+        if (tv_format || attr_len > body_len - pos)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+        const enum provider_helper_ikev2_parse_result attr_result =
+            ikev2_helper_validate_cfg_attr(attr_type, attr_len);
+        if (attr_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+        {
+            return attr_result;
+        }
+        pos += attr_len;
+    }
+
+    return pos == body_len ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                           : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+}
+
+static enum provider_helper_ikev2_parse_result
 ikev2_helper_validate_ike_auth_inner_payload(
     uint8_t payload_type,
     const uint8_t *body,
@@ -2885,9 +2971,11 @@ ikev2_helper_validate_ike_auth_inner_payload(
         case PROVIDER_HELPER_IKEV2_PAYLOAD_AUTH:
         case PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY:
         case PROVIDER_HELPER_IKEV2_PAYLOAD_DELETE:
-        case PROVIDER_HELPER_IKEV2_PAYLOAD_CP:
             return body_len >= 4 ? PROVIDER_HELPER_IKEV2_PARSE_OK
                                  : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_CP:
+            return ikev2_helper_validate_cp_payload(body, body_len);
 
         case PROVIDER_HELPER_IKEV2_PAYLOAD_EAP:
             return ikev2_helper_validate_eap_payload(body, body_len, config);
@@ -3055,6 +3143,16 @@ ikev2_helper_record_inner_payload(
             {
                 summary->tsr_offset = body_offset;
                 summary->tsr_len = body_len;
+            }
+            break;
+
+        case PROVIDER_HELPER_IKEV2_PAYLOAD_CP:
+            summary->saw_cp = true;
+            ++summary->cp_count;
+            if (summary->cp_count == 1)
+            {
+                summary->cp_offset = body_offset;
+                summary->cp_len = body_len;
             }
             break;
     }
@@ -5113,6 +5211,56 @@ ikev2_helper_ipv4_ts_allowed(
 }
 
 static bool
+ikev2_helper_ipv4_ts_intersect(
+    const struct ikev2_helper_ipv4_ts_range *requested,
+    uint32_t allowed_start_addr,
+    uint32_t allowed_end_addr,
+    uint32_t allowed_start_port,
+    uint32_t allowed_end_port,
+    uint32_t allowed_protocol_id,
+    struct provider_xfrm_ipv4_selector *out)
+{
+    if (!requested || !out || allowed_start_addr > allowed_end_addr
+        || allowed_start_port > allowed_end_port || allowed_end_port > 65535
+        || allowed_protocol_id > 255)
+    {
+        return false;
+    }
+    if (allowed_protocol_id && requested->ip_protocol_id
+        && requested->ip_protocol_id != (uint8_t)allowed_protocol_id)
+    {
+        return false;
+    }
+
+    const uint32_t start_addr =
+        requested->start_addr > allowed_start_addr ? requested->start_addr
+                                                   : allowed_start_addr;
+    const uint32_t end_addr =
+        requested->end_addr < allowed_end_addr ? requested->end_addr
+                                               : allowed_end_addr;
+    const uint32_t start_port =
+        requested->start_port > allowed_start_port ? requested->start_port
+                                                   : allowed_start_port;
+    const uint32_t end_port =
+        requested->end_port < allowed_end_port ? requested->end_port
+                                               : allowed_end_port;
+    if (start_addr > end_addr || start_port > end_port)
+    {
+        return false;
+    }
+
+    CLEAR(*out);
+    out->start_addr = start_addr;
+    out->end_addr = end_addr;
+    out->start_port = (uint16_t)start_port;
+    out->end_port = (uint16_t)end_port;
+    out->ip_protocol_id =
+        requested->ip_protocol_id ? requested->ip_protocol_id
+                                  : (uint8_t)allowed_protocol_id;
+    return true;
+}
+
+static bool
 ikev2_helper_xfrm_selector_from_ipv4_ts(
     const struct ikev2_helper_ipv4_ts_range *src,
     struct provider_xfrm_ipv4_selector *dst)
@@ -5185,6 +5333,64 @@ ikev2_helper_child_ts_for_xfrm_lease(
 }
 
 static bool
+ikev2_helper_stage_initial_cp_request(
+    struct ikev2_helper_ike_sa *sa,
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    const struct provider_helper_ikev2_payload_summary *summary)
+{
+    if (!sa || !sa->active || !plaintext || !summary || summary->cp_count != 1
+        || !ikev2_helper_body_inside(plaintext_len, summary->cp_offset,
+                                     summary->cp_len))
+    {
+        return false;
+    }
+
+    const uint8_t *cp = plaintext + summary->cp_offset;
+    if (summary->cp_len < PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE
+        || cp[0] != PROVIDER_HELPER_IKEV2_CFG_REQUEST || cp[1] || cp[2]
+        || cp[3])
+    {
+        return false;
+    }
+
+    bool requested_ipv4_address = false;
+    size_t pos = PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE;
+    uint32_t attr_count = 0;
+    while (pos < summary->cp_len)
+    {
+        if (++attr_count > PROVIDER_HELPER_IKEV2_MAX_CP_ATTRS
+            || summary->cp_len - pos < 4)
+        {
+            return false;
+        }
+
+        const uint16_t raw_type = ikev2_helper_read_be16(cp + pos);
+        const bool tv_format = (raw_type & 0x8000u) != 0;
+        const uint16_t attr_type = raw_type & 0x7fffu;
+        const uint16_t attr_len = ikev2_helper_read_be16(cp + pos + 2);
+        pos += 4;
+        if (tv_format || attr_len > summary->cp_len - pos)
+        {
+            return false;
+        }
+
+        switch (attr_type)
+        {
+            case PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_ADDRESS:
+                requested_ipv4_address = true;
+                break;
+
+        }
+        pos += attr_len;
+    }
+
+    sa->initial_cp_request_ready = true;
+    sa->initial_cp_requested_ipv4_address = requested_ipv4_address;
+    return true;
+}
+
+static bool
 ikev2_helper_stage_initial_child_request(
     struct ikev2_helper_ike_sa *sa,
     const uint8_t *plaintext,
@@ -5231,11 +5437,14 @@ ikev2_helper_stage_initial_child_request(
 }
 
 static bool
-ikev2_helper_initial_child_ts_allowed_by_lease(
+ikev2_helper_narrow_initial_child_ts_to_lease(
     const struct ikev2_helper_ike_sa *sa,
-    const struct provider_helper_xfrm_lease *lease)
+    const struct provider_helper_xfrm_lease *lease,
+    struct provider_xfrm_ipv4_selector *local_ts,
+    struct provider_xfrm_ipv4_selector *remote_ts)
 {
-    if (!sa || !sa->initial_child_request_ready || !lease
+    if (!sa || !sa->initial_child_request_ready || !lease || !local_ts
+        || !remote_ts
         || lease->address_family != AF_INET
         || !(lease->flags & PROVIDER_HELPER_XFRM_LEASE_IPV4))
     {
@@ -5261,18 +5470,31 @@ ikev2_helper_initial_child_ts_allowed_by_lease(
         .end_addr = local->end_addr,
     };
 
-    if (requested_remote.ip_protocol_id != requested_local.ip_protocol_id)
+    if (!ikev2_helper_ipv4_ts_intersect(
+            &requested_remote, lease->remote_ts_start_ipv4,
+            lease->remote_ts_end_ipv4, lease->remote_ts_start_port,
+            lease->remote_ts_end_port, lease->ip_protocol_id, remote_ts)
+        || !ikev2_helper_ipv4_ts_intersect(
+            &requested_local, lease->local_ts_start_ipv4,
+            lease->local_ts_end_ipv4, lease->local_ts_start_port,
+            lease->local_ts_end_port, lease->ip_protocol_id, local_ts))
     {
         return false;
     }
-    return ikev2_helper_ipv4_ts_allowed(
-               &requested_remote, lease->remote_ts_start_ipv4,
-               lease->remote_ts_end_ipv4, lease->remote_ts_start_port,
-               lease->remote_ts_end_port, lease->ip_protocol_id)
-           && ikev2_helper_ipv4_ts_allowed(
-               &requested_local, lease->local_ts_start_ipv4,
-               lease->local_ts_end_ipv4, lease->local_ts_start_port,
-               lease->local_ts_end_port, lease->ip_protocol_id);
+    if (remote_ts->ip_protocol_id && local_ts->ip_protocol_id
+        && remote_ts->ip_protocol_id != local_ts->ip_protocol_id)
+    {
+        return false;
+    }
+    if (remote_ts->ip_protocol_id)
+    {
+        local_ts->ip_protocol_id = remote_ts->ip_protocol_id;
+    }
+    else
+    {
+        remote_ts->ip_protocol_id = local_ts->ip_protocol_id;
+    }
+    return true;
 }
 
 static enum provider_helper_ikev2_parse_result
@@ -6876,12 +7098,17 @@ ikev2_helper_scaffold_initial_child_sa(
     {
         *xfrm_apply_failed = false;
     }
+    struct provider_xfrm_ipv4_selector narrowed_local_ts;
+    struct provider_xfrm_ipv4_selector narrowed_remote_ts;
+    CLEAR(narrowed_local_ts);
+    CLEAR(narrowed_remote_ts);
     if (!table || !sa || !sa->active || !sa->auth_authorized
         || !sa->initial_child_request_ready
         || !sa->initial_child_selection.selected
         || !sa->initial_child_selection.initiator_spi || !message_id
-        || !ikev2_helper_initial_child_ts_allowed_by_lease(
-            sa, &sa->authorized_xfrm_lease)
+        || !ikev2_helper_narrow_initial_child_ts_to_lease(
+            sa, &sa->authorized_xfrm_lease, &narrowed_local_ts,
+            &narrowed_remote_ts)
         || !sa->initiator_nonce_len || !sa->responder_nonce_len)
     {
         return false;
@@ -6905,20 +7132,17 @@ ikev2_helper_scaffold_initial_child_sa(
     child.updated = now;
     child.selection = sa->initial_child_selection;
     child.xfrm_lease = sa->authorized_xfrm_lease;
-    child.xfrm_lease.local_ts_start_ipv4 =
-        sa->initial_child_local_ts.start_addr;
-    child.xfrm_lease.local_ts_end_ipv4 = sa->initial_child_local_ts.end_addr;
-    child.xfrm_lease.local_ts_start_port =
-        sa->initial_child_local_ts.start_port;
-    child.xfrm_lease.local_ts_end_port = sa->initial_child_local_ts.end_port;
+    child.xfrm_lease.local_ts_start_ipv4 = narrowed_local_ts.start_addr;
+    child.xfrm_lease.local_ts_end_ipv4 = narrowed_local_ts.end_addr;
+    child.xfrm_lease.local_ts_start_port = narrowed_local_ts.start_port;
+    child.xfrm_lease.local_ts_end_port = narrowed_local_ts.end_port;
     child.xfrm_lease.remote_ts_start_ipv4 =
-        sa->initial_child_remote_ts.start_addr;
-    child.xfrm_lease.remote_ts_end_ipv4 = sa->initial_child_remote_ts.end_addr;
+        narrowed_remote_ts.start_addr;
+    child.xfrm_lease.remote_ts_end_ipv4 = narrowed_remote_ts.end_addr;
     child.xfrm_lease.remote_ts_start_port =
-        sa->initial_child_remote_ts.start_port;
-    child.xfrm_lease.remote_ts_end_port = sa->initial_child_remote_ts.end_port;
-    child.xfrm_lease.ip_protocol_id =
-        sa->initial_child_remote_ts.ip_protocol_id;
+        narrowed_remote_ts.start_port;
+    child.xfrm_lease.remote_ts_end_port = narrowed_remote_ts.end_port;
+    child.xfrm_lease.ip_protocol_id = narrowed_remote_ts.ip_protocol_id;
     child.initiator_nonce_len = sa->initiator_nonce_len;
     memcpy(child.initiator_nonce, sa->initiator_nonce,
            sa->initiator_nonce_len);
@@ -6927,8 +7151,8 @@ ikev2_helper_scaffold_initial_child_sa(
            sa->responder_nonce_len);
     if (!ikev2_helper_derive_child_sa_keys(sa, &child)
         || !ikev2_helper_build_child_sa_xfrm_plan(
-            sa, &child, &sa->initial_child_local_ts,
-            &sa->initial_child_remote_ts, apply_xfrm, xfrm_apply_failed))
+            sa, &child, &narrowed_local_ts, &narrowed_remote_ts, apply_xfrm,
+            xfrm_apply_failed))
     {
         ikev2_helper_secure_zero(&child, sizeof(child));
         return false;
@@ -8051,6 +8275,69 @@ ikev2_helper_build_responder_eap_auth_data(
 }
 
 static bool
+ikev2_helper_initial_cp_reply_ipv4_address(
+    const struct ikev2_helper_ike_sa *sa,
+    const struct ikev2_helper_child_sa_scaffold *child,
+    uint32_t *address)
+{
+    if (!sa || !child || !child->ready || !address
+        || !sa->initial_cp_request_ready
+        || !sa->initial_cp_requested_ipv4_address
+        || child->xfrm_lease.address_family != AF_INET
+        || !(child->xfrm_lease.flags & PROVIDER_HELPER_XFRM_LEASE_IPV4)
+        || child->xfrm_lease.remote_ts_start_ipv4
+               != child->xfrm_lease.remote_ts_end_ipv4)
+    {
+        return false;
+    }
+
+    *address = child->xfrm_lease.remote_ts_start_ipv4;
+    return true;
+}
+
+static bool
+ikev2_helper_build_ipv4_cp_reply_payload(uint8_t *dst,
+                                         size_t dst_size,
+                                         uint8_t next_payload,
+                                         uint32_t ipv4_address,
+                                         size_t *payload_len)
+{
+    if (payload_len)
+    {
+        *payload_len = 0;
+    }
+    const size_t attr_len = 4u + 4u;
+    const size_t total_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                             + PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE
+                             + attr_len;
+    if (!dst || !payload_len || total_len > UINT16_MAX
+        || dst_size < total_len)
+    {
+        return false;
+    }
+
+    uint8_t *pos = dst;
+    *pos++ = next_payload;
+    *pos++ = 0;
+    ikev2_helper_write_be16(&pos, (uint16_t)total_len);
+    *pos++ = PROVIDER_HELPER_IKEV2_CFG_REPLY;
+    *pos++ = 0;
+    *pos++ = 0;
+    *pos++ = 0;
+    ikev2_helper_write_be16(
+        &pos, PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_ADDRESS);
+    ikev2_helper_write_be16(&pos, 4);
+    ikev2_helper_write_be32(&pos, ipv4_address);
+    if ((size_t)(pos - dst) != total_len)
+    {
+        memset(dst, 0, dst_size);
+        return false;
+    }
+    *payload_len = total_len;
+    return true;
+}
+
+static bool
 ikev2_helper_build_final_auth_child_sa_plaintext(
     const struct ikev2_helper_ike_sa *sa,
     const struct provider_helper_server_auth_config *server_auth_config,
@@ -8070,9 +8357,15 @@ ikev2_helper_build_final_auth_child_sa_plaintext(
     }
 
     uint8_t auth_data[IKEV2_HELPER_PRF_SHA256_BYTES];
+    uint8_t cp_payload[PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+                       + PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE + 8];
     uint8_t child_payloads[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    size_t cp_payload_len = 0;
     size_t child_payloads_len = 0;
+    bool include_cp = false;
+    uint32_t cp_ipv4_address = 0;
     CLEAR(auth_data);
+    CLEAR(cp_payload);
     CLEAR(child_payloads);
 
     const uint16_t auth_payload_len =
@@ -8084,16 +8377,41 @@ ikev2_helper_build_final_auth_child_sa_plaintext(
         && provider_helper_ikev2_build_ike_auth_child_sa_payloads(
             child_payloads, sizeof(child_payloads), &child->selection,
             child->responder_spi, &child->xfrm_lease, &child_payloads_len);
-    const size_t total_len = auth_payload_len + child_payloads_len;
+    if (ready && sa->initial_cp_request_ready
+        && sa->initial_cp_requested_ipv4_address)
+    {
+        include_cp =
+            ikev2_helper_initial_cp_reply_ipv4_address(sa, child,
+                                                       &cp_ipv4_address);
+        if (include_cp)
+        {
+            include_cp = ikev2_helper_build_ipv4_cp_reply_payload(
+                cp_payload, sizeof(cp_payload),
+                PROVIDER_HELPER_IKEV2_PAYLOAD_SA, cp_ipv4_address,
+                &cp_payload_len);
+        }
+    }
+    const size_t total_len =
+        auth_payload_len + cp_payload_len + child_payloads_len;
     if (!ready || total_len > plaintext_size)
     {
         ikev2_helper_secure_zero(auth_data, sizeof(auth_data));
+        ikev2_helper_secure_zero(cp_payload, sizeof(cp_payload));
+        ikev2_helper_secure_zero(child_payloads, sizeof(child_payloads));
+        return false;
+    }
+    if (sa->initial_cp_request_ready
+        && sa->initial_cp_requested_ipv4_address && !include_cp)
+    {
+        ikev2_helper_secure_zero(auth_data, sizeof(auth_data));
+        ikev2_helper_secure_zero(cp_payload, sizeof(cp_payload));
         ikev2_helper_secure_zero(child_payloads, sizeof(child_payloads));
         return false;
     }
 
     uint8_t *pos = plaintext;
-    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_SA;
+    *pos++ = include_cp ? PROVIDER_HELPER_IKEV2_PAYLOAD_CP
+                        : PROVIDER_HELPER_IKEV2_PAYLOAD_SA;
     *pos++ = 0;
     ikev2_helper_write_be16(&pos, auth_payload_len);
     *pos++ = IKEV2_HELPER_AUTH_METHOD_SHARED_KEY_MIC;
@@ -8102,18 +8420,25 @@ ikev2_helper_build_final_auth_child_sa_plaintext(
     *pos++ = 0;
     memcpy(pos, auth_data, sizeof(auth_data));
     pos += sizeof(auth_data);
+    if (include_cp)
+    {
+        memcpy(pos, cp_payload, cp_payload_len);
+        pos += cp_payload_len;
+    }
     memcpy(pos, child_payloads, child_payloads_len);
     pos += child_payloads_len;
     if ((size_t)(pos - plaintext) != total_len)
     {
         ikev2_helper_secure_zero(plaintext, plaintext_size);
         ikev2_helper_secure_zero(auth_data, sizeof(auth_data));
+        ikev2_helper_secure_zero(cp_payload, sizeof(cp_payload));
         ikev2_helper_secure_zero(child_payloads, sizeof(child_payloads));
         return false;
     }
 
     *plaintext_len = total_len;
     ikev2_helper_secure_zero(auth_data, sizeof(auth_data));
+    ikev2_helper_secure_zero(cp_payload, sizeof(cp_payload));
     ikev2_helper_secure_zero(child_payloads, sizeof(child_payloads));
     return true;
 }
@@ -10742,6 +11067,15 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 return;
             }
             ++counters->ike_auth_idi_extracted;
+            if (inner_summary.saw_cp
+                && !ikev2_helper_stage_initial_cp_request(
+                    sa, plaintext, plaintext_len, &inner_summary))
+            {
+                ++counters->ike_auth_inner_malformed;
+                ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                counters->ike_sa_active = sa_table->active;
+                return;
+            }
             if (inner_summary.saw_sa)
             {
                 if (!ikev2_helper_stage_initial_child_request(
