@@ -1668,6 +1668,9 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
 #define TEST_IKEV2_TLS_GROUP_X25519 29
 #define TEST_IKEV2_TLS_X25519_KEY_SHARE_BYTES 32
 #define TEST_IKEV2_TLS_AES_GCM_TAG_BYTES 16
+#define TEST_IKEV2_SERVER_AUTH_CERT_CHAIN_BYTES 512
+#define TEST_IKEV2_TLS_CERTIFICATE_HANDSHAKE_BYTES \
+    (4 + 1 + 3 + 3 + TEST_IKEV2_SERVER_AUTH_CERT_CHAIN_BYTES + 2)
 #define TEST_IKEV2_TLS_EXTENSION_SUPPORTED_VERSIONS 43
 #define TEST_IKEV2_TLS_EXTENSION_KEY_SHARE 51
 
@@ -4028,10 +4031,26 @@ test_recv_ikev2_encrypted_eap_tls_server_hello_request(
                      TEST_IKEV2_TLS_VERSION_1_2);
     const uint16_t encrypted_extensions_len =
         test_read_be16(encrypted_extensions + 3);
-    assert_int_equal(server_hello_record_len + 5 + encrypted_extensions_len,
-                     tls_len);
     assert_int_equal(encrypted_extensions_len,
                      6 + 1 + TEST_IKEV2_TLS_AES_GCM_TAG_BYTES);
+    const size_t encrypted_extensions_record_len =
+        5 + encrypted_extensions_len;
+    assert_true(tls_len > server_hello_record_len
+                          + encrypted_extensions_record_len + 5);
+
+    const uint8_t *certificate =
+        encrypted_extensions + encrypted_extensions_record_len;
+    assert_int_equal(certificate[0],
+                     TEST_IKEV2_TLS_CONTENT_TYPE_APPLICATION_DATA);
+    assert_int_equal(test_read_be16(certificate + 1),
+                     TEST_IKEV2_TLS_VERSION_1_2);
+    const uint16_t certificate_len = test_read_be16(certificate + 3);
+    assert_int_equal(certificate_len,
+                     TEST_IKEV2_TLS_CERTIFICATE_HANDSHAKE_BYTES + 1
+                     + TEST_IKEV2_TLS_AES_GCM_TAG_BYTES);
+    assert_int_equal(server_hello_record_len + encrypted_extensions_record_len
+                     + 5 + certificate_len,
+                     tls_len);
 
     secure_memzero(plaintext, sizeof(plaintext));
 }
@@ -5658,7 +5677,7 @@ test_provider_helper_fill_server_auth_config(
     snprintf(config->server_id, sizeof(config->server_id), "%s",
              "vpn.example.test");
     config->server_id_len = (uint32_t)strlen(config->server_id);
-    config->cert_chain_len = 512;
+    config->cert_chain_len = TEST_IKEV2_SERVER_AUTH_CERT_CHAIN_BYTES;
     for (uint32_t i = 0; i < config->cert_chain_len; ++i)
     {
         config->cert_chain[i] = (uint8_t)(i & 0xff);
@@ -7597,7 +7616,7 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
 #else
     struct provider_helper_supervisor supervisor;
     provider_helper_supervisor_init(&supervisor);
-    supervisor.runtime_config.max_eap_tls_tx_fragment_bytes = 512;
+    supervisor.runtime_config.max_eap_tls_tx_fragment_bytes = 2048;
 
     struct test_provider_helper_auth_cb_state auth_state;
     CLEAR(auth_state);
