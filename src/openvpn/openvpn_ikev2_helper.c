@@ -3863,17 +3863,26 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
             || supported_groups[i] == parsed.key_share_group;
     }
 
+    const bool tls13 = parsed.tls_version == IKEV2_HELPER_TLS_VERSION_1_3;
+    const bool tls12 = parsed.tls_version == IKEV2_HELPER_TLS_VERSION_1_2;
+    const bool tls13_key_share_ready = key_share_seen
+                                       && supported_key_share_offered
+                                       && parsed.key_share_group
+                                       && parsed.key_share_len
+                                       && key_share_group_advertised;
+    const bool tls12_selection_ready =
+        tls12 && !ikev2_helper_tls13_cipher_supported(parsed.cipher_suite);
+
     const bool valid = pos == ext_end
                        && (!supported_versions_seen
                            || supported_version_offered)
                        && supported_groups_seen && supported_group_offered
                        && signature_algorithms_seen
                        && supported_signature_offered
-                       && key_share_seen && supported_key_share_offered
                        && parsed.tls_version && parsed.cipher_suite
                        && parsed.signature_algorithm && parsed.named_group
-                       && parsed.key_share_group && parsed.key_share_len
-                       && key_share_group_advertised;
+                       && ((tls13 && tls13_key_share_ready)
+                           || tls12_selection_ready);
     if (valid && metadata)
     {
         parsed.ready = true;
