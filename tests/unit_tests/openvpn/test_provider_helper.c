@@ -2397,10 +2397,15 @@ test_x25519_shared_secret(const uint8_t *private_key, size_t private_key_len,
 }
 
 static void
-test_make_der_certificate(uint8_t *der, size_t der_size, size_t *der_len)
+test_make_der_certificate_with_key(uint8_t *der, size_t der_size,
+                                   size_t *der_len, EVP_PKEY **out_pkey)
 {
     assert_non_null(der);
     assert_non_null(der_len);
+    if (out_pkey)
+    {
+        *out_pkey = NULL;
+    }
 
     EVP_PKEY *pkey = NULL;
     EVP_PKEY_CTX *pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
@@ -2436,10 +2441,67 @@ test_make_der_certificate(uint8_t *der, size_t der_size, size_t *der_len)
     unsigned char *pos = der;
     assert_int_equal(i2d_X509(cert, &pos), encoded_len);
     *der_len = (size_t)encoded_len;
+    if (out_pkey)
+    {
+        *out_pkey = pkey;
+        pkey = NULL;
+    }
 
     X509_free(cert);
     EVP_PKEY_free(pkey);
     EVP_PKEY_CTX_free(pctx);
+}
+
+static void
+test_make_der_certificate(uint8_t *der, size_t der_size, size_t *der_len)
+{
+    test_make_der_certificate_with_key(der, der_size, der_len, NULL);
+}
+
+static void
+test_sign_tls13_client_certificate_verify(
+    EVP_PKEY *pkey,
+    const uint8_t *transcript_hash,
+    size_t transcript_hash_len,
+    uint8_t *signature,
+    size_t signature_size,
+    size_t *signature_len)
+{
+    static const char context[] = "TLS 1.3, client CertificateVerify";
+    uint8_t sign_input[64 + sizeof(context) + TEST_IKEV2_PRF_SHA256_BYTES];
+    uint8_t *pos = sign_input;
+
+    assert_non_null(pkey);
+    assert_non_null(transcript_hash);
+    assert_non_null(signature);
+    assert_non_null(signature_len);
+    assert_int_equal(transcript_hash_len, TEST_IKEV2_PRF_SHA256_BYTES);
+    *signature_len = 0;
+
+    memset(pos, 0x20, 64);
+    pos += 64;
+    memcpy(pos, context, strlen(context));
+    pos += strlen(context);
+    *pos++ = 0;
+    memcpy(pos, transcript_hash, transcript_hash_len);
+    pos += transcript_hash_len;
+    const size_t sign_input_len = (size_t)(pos - sign_input);
+
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    assert_non_null(ctx);
+    size_t needed = 0;
+    assert_int_equal(EVP_DigestSignInit(ctx, NULL, EVP_sha256(), NULL, pkey),
+                     1);
+    assert_int_equal(EVP_DigestSign(ctx, NULL, &needed, sign_input,
+                                    sign_input_len),
+                     1);
+    assert_true(needed <= signature_size);
+    assert_int_equal(EVP_DigestSign(ctx, signature, &needed, sign_input,
+                                    sign_input_len),
+                     1);
+    *signature_len = needed;
+    EVP_MD_CTX_free(ctx);
+    secure_memzero(sign_input, sizeof(sign_input));
 }
 
 static size_t
@@ -4397,6 +4459,7 @@ test_build_eap_tls_client_finished(
     const uint8_t *client_hello, size_t client_hello_len,
     const uint8_t *client_private_key, size_t client_private_key_len,
     const uint8_t *cert_der, size_t cert_der_len,
+    EVP_PKEY *cert_key,
     const uint8_t *server_flight, size_t server_flight_len,
     uint8_t *client_finished, size_t client_finished_size,
     size_t *client_finished_len)
@@ -4411,6 +4474,7 @@ test_build_eap_tls_client_finished(
     assert_non_null(client_hello);
     assert_non_null(client_private_key);
     assert_non_null(cert_der);
+    assert_non_null(cert_key);
     assert_non_null(server_flight);
     assert_non_null(client_finished);
     assert_non_null(client_finished_len);
@@ -4601,8 +4665,15 @@ test_build_eap_tls_client_finished(
     test_append_tls_transcript(transcript, sizeof(transcript),
                                &transcript_len, client_flight_handshake,
                                cert_handshake_len);
+    assert_true(test_sha256(transcript, transcript_len, transcript_hash,
+                            sizeof(transcript_hash)));
 
-    const size_t cv_signature_len = 64;
+    uint8_t certificate_verify_signature[128];
+    size_t cv_signature_len = 0;
+    test_sign_tls13_client_certificate_verify(
+        cert_key, transcript_hash, sizeof(transcript_hash),
+        certificate_verify_signature, sizeof(certificate_verify_signature),
+        &cv_signature_len);
     const size_t cv_body_len = 2 + 2 + cv_signature_len;
     const size_t cv_handshake_len =
         TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES + cv_body_len;
@@ -4616,10 +4687,7 @@ test_build_eap_tls_client_finished(
     handshake_pos += 2;
     test_write_be16(handshake_pos, (uint16_t)cv_signature_len);
     handshake_pos += 2;
-    for (size_t i = 0; i < cv_signature_len; ++i)
-    {
-        handshake_pos[i] = (uint8_t)(0xa5 ^ i);
-    }
+    memcpy(handshake_pos, certificate_verify_signature, cv_signature_len);
     handshake_pos += cv_signature_len;
     test_append_tls_transcript(
         transcript, sizeof(transcript), &transcript_len,
@@ -4694,6 +4762,8 @@ test_build_eap_tls_client_finished(
     secure_memzero(server_iv, sizeof(server_iv));
     secure_memzero(finished_key, sizeof(finished_key));
     secure_memzero(verify_data, sizeof(verify_data));
+    secure_memzero(certificate_verify_signature,
+                   sizeof(certificate_verify_signature));
     secure_memzero(client_flight_handshake, sizeof(client_flight_handshake));
     secure_memzero(inner, sizeof(inner));
     secure_memzero(nonce, sizeof(nonce));
@@ -8436,15 +8506,18 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
 
     uint8_t cert_der[2048];
     size_t cert_der_len = 0;
-    test_make_der_certificate(cert_der, sizeof(cert_der), &cert_der_len);
+    EVP_PKEY *cert_key = NULL;
+    test_make_der_certificate_with_key(cert_der, sizeof(cert_der),
+                                       &cert_der_len, &cert_key);
+    assert_non_null(cert_key);
 
     uint8_t client_finished[4096];
     size_t client_finished_len = 0;
     test_build_eap_tls_client_finished(
         client_hello, sizeof(client_hello), client_private_key,
-        sizeof(client_private_key), cert_der, cert_der_len, server_flight,
-        server_flight_len, client_finished, sizeof(client_finished),
-        &client_finished_len);
+        sizeof(client_private_key), cert_der, cert_der_len, cert_key,
+        server_flight, server_flight_len, client_finished,
+        sizeof(client_finished), &client_finished_len);
     const uint8_t fatal_alert[] = {
         TEST_IKEV2_TLS_CONTENT_TYPE_ALERT,
         0x03, 0x03,
@@ -8461,6 +8534,7 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
         fatal_alert, sizeof(fatal_alert), true);
     secure_memzero(client_private_key, sizeof(client_private_key));
     secure_memzero(client_public_key, sizeof(client_public_key));
+    EVP_PKEY_free(cert_key);
     secure_memzero(cert_der, sizeof(cert_der));
     secure_memzero(server_flight, sizeof(server_flight));
     secure_memzero(client_finished, sizeof(client_finished));

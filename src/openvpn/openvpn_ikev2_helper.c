@@ -38,6 +38,7 @@
 #include <openssl/obj_mac.h>
 #include <openssl/opensslv.h>
 #include <openssl/rand.h>
+#include <openssl/rsa.h>
 #include <openssl/x509.h>
 #elif defined(ENABLE_CRYPTO_MBEDTLS)
 #include <mbedtls/ecdh.h>
@@ -3625,11 +3626,19 @@ ikev2_helper_extract_tls13_certificate_metadata(
     struct ikev2_helper_ike_sa *sa,
     const uint8_t *handshake,
     size_t handshake_len,
-    const struct provider_helper_runtime_config *config)
+    const struct provider_helper_runtime_config *config,
+    uint8_t *leaf_cert_der,
+    size_t leaf_cert_der_size,
+    size_t *leaf_cert_der_len)
 {
+    if (leaf_cert_der_len)
+    {
+        *leaf_cert_der_len = 0;
+    }
     if (!sa || !handshake
         || handshake_len < IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE
-        || !config || !config->max_cert_chain_depth
+        || !config || !config->max_cert_chain_depth || !leaf_cert_der
+        || !leaf_cert_der_size || !leaf_cert_der_len
         || handshake[0] != IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CERTIFICATE)
     {
         return false;
@@ -3693,13 +3702,15 @@ ikev2_helper_extract_tls13_certificate_metadata(
         }
         if (certificate_count == 1)
         {
-            extracted =
-                ikev2_helper_extract_x509_metadata_from_der(sa, body + pos,
-                                                            cert_len);
+            extracted = cert_len <= leaf_cert_der_size
+                        && ikev2_helper_extract_x509_metadata_from_der(
+                            sa, body + pos, cert_len);
             if (!extracted)
             {
                 return false;
             }
+            memcpy(leaf_cert_der, body + pos, cert_len);
+            *leaf_cert_der_len = cert_len;
         }
         pos += cert_len;
 
@@ -3720,12 +3731,141 @@ ikev2_helper_extract_tls13_certificate_metadata(
 }
 
 static bool
-ikev2_helper_tls13_certificate_verify_shape_valid(
-    const struct ikev2_helper_ike_sa *sa,
+ikev2_helper_build_tls13_client_certificate_verify_input(
+    const struct ikev2_helper_tls_server_hello *server,
+    uint8_t *sign_input,
+    size_t sign_input_size,
+    size_t *sign_input_len)
+{
+    static const char context[] = "TLS 1.3, client CertificateVerify";
+    if (sign_input_len)
+    {
+        *sign_input_len = 0;
+    }
+    if (!server || !server->ready || !sign_input || !sign_input_len)
+    {
+        return false;
+    }
+
+    const size_t needed = 64 + strlen(context) + 1
+                          + IKEV2_HELPER_SHA256_DIGEST_BYTES;
+    if (needed > sign_input_size)
+    {
+        return false;
+    }
+
+    uint8_t *pos = sign_input;
+    memset(pos, 0x20, 64);
+    pos += 64;
+    memcpy(pos, context, strlen(context));
+    pos += strlen(context);
+    *pos++ = 0;
+    memcpy(pos, server->transcript_hash, sizeof(server->transcript_hash));
+    pos += sizeof(server->transcript_hash);
+    *sign_input_len = (size_t)(pos - sign_input);
+    return true;
+}
+
+#if defined(ENABLE_CRYPTO_OPENSSL)
+static bool
+ikev2_helper_openssl_pkey_is_ec_p256(EVP_PKEY *pkey)
+{
+    if (!pkey || EVP_PKEY_base_id(pkey) != EVP_PKEY_EC)
+    {
+        return false;
+    }
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    char group_name[80];
+    size_t group_name_len = 0;
+    CLEAR(group_name);
+    return EVP_PKEY_get_utf8_string_param(
+               pkey, OSSL_PKEY_PARAM_GROUP_NAME, group_name,
+               sizeof(group_name), &group_name_len) == 1
+           && group_name_len > 0
+           && (strcmp(group_name, "prime256v1") == 0
+               || strcmp(group_name, "secp256r1") == 0);
+#else
+    EC_KEY *ec = EVP_PKEY_get1_EC_KEY(pkey);
+    const EC_GROUP *group = ec ? EC_KEY_get0_group(ec) : NULL;
+    const int nid = group ? EC_GROUP_get_curve_name(group) : NID_undef;
+    EC_KEY_free(ec);
+    return nid == NID_X9_62_prime256v1;
+#endif
+}
+
+static bool
+ikev2_helper_verify_tls13_client_certificate_verify_openssl(
+    const uint8_t *cert_der,
+    size_t cert_der_len,
+    uint16_t signature_scheme,
+    const uint8_t *signature,
+    size_t signature_len,
+    const uint8_t *sign_input,
+    size_t sign_input_len)
+{
+    if (!cert_der || !cert_der_len || !signature || !signature_len
+        || !sign_input || !sign_input_len)
+    {
+        return false;
+    }
+
+    const unsigned char *parse = cert_der;
+    X509 *cert = d2i_X509(NULL, &parse, (long)cert_der_len);
+    if (!cert || parse != cert_der + cert_der_len)
+    {
+        X509_free(cert);
+        return false;
+    }
+
+    EVP_PKEY *pkey = X509_get_pubkey(cert);
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    EVP_PKEY_CTX *pctx = NULL;
+    bool ret = false;
+
+    if (!pkey || !ctx)
+    {
+        goto done;
+    }
+
+    if (signature_scheme == IKEV2_HELPER_TLS_SIGALG_ECDSA_SECP256R1_SHA256)
+    {
+        ret = ikev2_helper_openssl_pkey_is_ec_p256(pkey)
+              && EVP_DigestVerifyInit(ctx, &pctx, EVP_sha256(), NULL, pkey)
+                     == 1
+              && EVP_DigestVerify(ctx, signature, signature_len, sign_input,
+                                  sign_input_len) == 1;
+    }
+    else if (signature_scheme == IKEV2_HELPER_TLS_SIGALG_RSA_PSS_RSAE_SHA256)
+    {
+        ret = EVP_PKEY_base_id(pkey) == EVP_PKEY_RSA
+              && EVP_DigestVerifyInit(ctx, &pctx, EVP_sha256(), NULL, pkey)
+                     == 1
+              && EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING)
+                     == 1
+              && EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, RSA_PSS_SALTLEN_DIGEST)
+                     == 1
+              && EVP_DigestVerify(ctx, signature, signature_len, sign_input,
+                                  sign_input_len) == 1;
+    }
+
+done:
+    EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    X509_free(cert);
+    return ret;
+}
+#endif
+
+static bool
+ikev2_helper_tls13_certificate_verify_valid(
+    const struct ikev2_helper_tls_server_hello *server,
+    const uint8_t *cert_der,
+    size_t cert_der_len,
     const uint8_t *handshake,
     size_t handshake_len)
 {
-    if (!sa || !handshake
+    if (!server || !cert_der || !cert_der_len || !handshake
         || handshake_len < IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE + 4
         || handshake[0] != IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CERTIFICATE_VERIFY)
     {
@@ -3743,8 +3883,33 @@ ikev2_helper_tls13_certificate_verify_shape_valid(
     const uint8_t *body = handshake + IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE;
     const uint16_t signature_scheme = ikev2_helper_read_be16(body);
     const uint16_t signature_len = ikev2_helper_read_be16(body + 2);
-    return ikev2_helper_tls_signature_supported(signature_scheme)
-           && signature_len != 0 && (size_t)signature_len == body_len - 4;
+    if ((signature_scheme != IKEV2_HELPER_TLS_SIGALG_ECDSA_SECP256R1_SHA256
+         && signature_scheme != IKEV2_HELPER_TLS_SIGALG_RSA_PSS_RSAE_SHA256)
+        || signature_len == 0 || (size_t)signature_len != body_len - 4)
+    {
+        return false;
+    }
+
+    uint8_t sign_input[64 + sizeof("TLS 1.3, client CertificateVerify")
+                       + IKEV2_HELPER_SHA256_DIGEST_BYTES];
+    size_t sign_input_len = 0;
+    const uint8_t *signature = body + 4;
+    const bool input_ready =
+        ikev2_helper_build_tls13_client_certificate_verify_input(
+            server, sign_input, sizeof(sign_input), &sign_input_len);
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    const bool ret =
+        input_ready
+        && ikev2_helper_verify_tls13_client_certificate_verify_openssl(
+               cert_der, cert_der_len, signature_scheme, signature,
+               signature_len, sign_input, sign_input_len);
+#else
+    const bool ret = false;
+    (void)signature;
+    (void)input_ready;
+#endif
+    ikev2_helper_secure_zero(sign_input, sizeof(sign_input));
+    return ret;
 }
 
 static bool
@@ -3804,12 +3969,16 @@ ikev2_helper_eap_tls_client_handshake_flight_valid(
     }
 
     uint8_t *handshake = calloc(1, config->max_eap_tls_bytes);
-    if (!handshake)
+    uint8_t *client_cert_der = calloc(1, config->max_cert_chain_bytes);
+    if (!handshake || !client_cert_der)
     {
+        free(handshake);
+        free(client_cert_der);
         return false;
     }
 
     struct ikev2_helper_tls_server_hello server = sa->eap_tls_server_hello;
+    size_t client_cert_der_len = 0;
     bool saw_certificate = false;
     bool saw_certificate_verify = false;
     bool saw_finished = false;
@@ -3865,7 +4034,8 @@ ikev2_helper_eap_tls_client_handshake_flight_valid(
                 && message[0] == IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CERTIFICATE)
             {
                 if (!ikev2_helper_extract_tls13_certificate_metadata(
-                        sa, message, message_len, config)
+                        sa, message, message_len, config, client_cert_der,
+                        config->max_cert_chain_bytes, &client_cert_der_len)
                     || !ikev2_helper_tls13_append_transcript(
                         &server, message, message_len))
                 {
@@ -3877,8 +4047,9 @@ ikev2_helper_eap_tls_client_handshake_flight_valid(
                      && message[0]
                             == IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CERTIFICATE_VERIFY)
             {
-                if (!ikev2_helper_tls13_certificate_verify_shape_valid(
-                        sa, message, message_len)
+                if (!ikev2_helper_tls13_certificate_verify_valid(
+                        &server, client_cert_der, client_cert_der_len,
+                        message, message_len)
                     || !ikev2_helper_tls13_append_transcript(
                         &server, message, message_len))
                 {
@@ -3925,6 +4096,8 @@ done:
     }
     ikev2_helper_secure_zero(handshake, config->max_eap_tls_bytes);
     free(handshake);
+    ikev2_helper_secure_zero(client_cert_der, config->max_cert_chain_bytes);
+    free(client_cert_der);
     ikev2_helper_secure_zero(&server, sizeof(server));
     return ret;
 }
