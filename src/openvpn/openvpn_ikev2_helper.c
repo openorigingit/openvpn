@@ -166,8 +166,12 @@ struct ikev2_helper_tls_client_hello {
     uint16_t signature_algorithm;
     uint16_t named_group;
     uint16_t key_share_group;
+    size_t session_id_len;
     size_t key_share_len;
+    uint8_t random[IKEV2_HELPER_TLS_CLIENT_HELLO_RANDOM_BYTES];
+    uint8_t session_id[IKEV2_HELPER_TLS_CLIENT_HELLO_MAX_SESSION_ID];
     uint8_t key_share[IKEV2_HELPER_TLS_KEY_SHARE_MAX_BYTES];
+    uint8_t transcript_hash[IKEV2_HELPER_SHA256_DIGEST_BYTES];
 };
 
 struct ikev2_helper_child_sa_scaffold {
@@ -405,6 +409,8 @@ ikev2_helper_secure_zero(void *data, size_t len)
 static bool ikev2_helper_hmac_sha256(const uint8_t *key, size_t key_len,
                                      const uint8_t *input, size_t input_len,
                                      uint8_t *tag, size_t tag_len);
+static bool ikev2_helper_sha256(const uint8_t *input, size_t input_len,
+                                uint8_t *digest, size_t digest_len);
 
 static bool
 ikev2_helper_random_bytes(uint8_t *dst, size_t dst_len)
@@ -1110,6 +1116,37 @@ ikev2_helper_hmac_sha256(const uint8_t *key, size_t key_len,
         memcpy(tag, full, tag_len);
     }
     ikev2_helper_secure_zero(full, sizeof(full));
+    return ret;
+}
+
+static bool
+ikev2_helper_sha256(const uint8_t *input, size_t input_len,
+                    uint8_t *digest, size_t digest_len)
+{
+    if (!input || !input_len || !digest
+        || digest_len != IKEV2_HELPER_SHA256_DIGEST_BYTES)
+    {
+        return false;
+    }
+
+    bool ret = false;
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    unsigned int full_len = 0;
+    ret = EVP_Digest(input, input_len, digest, &full_len, EVP_sha256(), NULL)
+              == 1
+          && full_len == digest_len;
+#elif defined(ENABLE_CRYPTO_MBEDTLS)
+    const mbedtls_md_info_t *md_info =
+        mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    ret = md_info && mbedtls_md(md_info, input, input_len, digest) == 0;
+#else
+    (void)input;
+    (void)input_len;
+#endif
+    if (!ret)
+    {
+        ikev2_helper_secure_zero(digest, digest_len);
+    }
     return ret;
 }
 
@@ -2805,6 +2842,8 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
     }
     parsed.legacy_version = legacy_version;
     parsed.tls_version = legacy_version;
+    memcpy(parsed.random, body + 2,
+           IKEV2_HELPER_TLS_CLIENT_HELLO_RANDOM_BYTES);
     pos += 2 + IKEV2_HELPER_TLS_CLIENT_HELLO_RANDOM_BYTES;
 
     const uint8_t session_id_len = body[pos++];
@@ -2812,6 +2851,11 @@ ikev2_helper_tls_client_hello_body_valid(const uint8_t *body,
         || session_id_len > body_len - pos)
     {
         return false;
+    }
+    parsed.session_id_len = session_id_len;
+    if (session_id_len)
+    {
+        memcpy(parsed.session_id, body + pos, session_id_len);
     }
     pos += session_id_len;
 
@@ -3108,14 +3152,31 @@ ikev2_helper_eap_tls_record_header_valid(struct ikev2_helper_ike_sa *sa)
     const uint32_t handshake_len = ((uint32_t)handshake[1] << 16)
                                    | ((uint32_t)handshake[2] << 8)
                                    | handshake[3];
-    return handshake[0] == IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CLIENT_HELLO
-           && handshake_len != 0
-           && handshake_len
-                  == (uint32_t)(record_len
-                                - IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE)
-           && ikev2_helper_tls_client_hello_body_valid(
-               handshake + IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE,
-               handshake_len, &sa->eap_tls_client_hello);
+    if (handshake[0] != IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CLIENT_HELLO
+        || !handshake_len
+        || handshake_len
+               != (uint32_t)(record_len
+                             - IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE))
+    {
+        return false;
+    }
+
+    struct ikev2_helper_tls_client_hello metadata;
+    CLEAR(metadata);
+    if (!ikev2_helper_tls_client_hello_body_valid(
+            handshake + IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE,
+            handshake_len, &metadata)
+        || !ikev2_helper_sha256(handshake,
+                                IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE
+                                + handshake_len,
+                                metadata.transcript_hash,
+                                sizeof(metadata.transcript_hash)))
+    {
+        return false;
+    }
+
+    sa->eap_tls_client_hello = metadata;
+    return true;
 }
 
 static bool
