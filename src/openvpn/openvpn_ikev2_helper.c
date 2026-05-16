@@ -424,6 +424,10 @@ static bool ikev2_helper_send_cached_eap_tls12_server_finished_request(
     bool *tx_pending,
     bool *terminal_complete);
 
+static bool ikev2_helper_send_encrypted_ike_sa_delete_request(
+    const struct ikev2_helper_listener *listener,
+    const struct ikev2_helper_ike_sa *sa);
+
 static void
 ikev2_helper_clear_credential_metadata(struct ikev2_helper_ike_sa *sa);
 
@@ -7547,6 +7551,22 @@ ikev2_helper_find_listener(const struct ikev2_helper_listener *listeners,
     return NULL;
 }
 
+static void
+ikev2_helper_maybe_send_ike_sa_delete_request(
+    const struct ikev2_helper_listener *listeners,
+    size_t listener_count,
+    const struct ikev2_helper_ike_sa *sa)
+{
+    const struct ikev2_helper_listener *listener =
+        sa ? ikev2_helper_find_listener(listeners, listener_count,
+                                        sa->listener_id)
+           : NULL;
+    if (listener)
+    {
+        (void)ikev2_helper_send_encrypted_ike_sa_delete_request(listener, sa);
+    }
+}
+
 static bool
 ikev2_helper_listener_id_exists(const struct ikev2_helper_listener *listeners,
                                 size_t listener_count,
@@ -7982,6 +8002,8 @@ ikev2_helper_ike_sa_uses_xfrm_lease(
 static bool
 ikev2_helper_clear_ike_sas_for_xfrm_lease(
     struct ikev2_helper_ike_sa_table *table,
+    const struct ikev2_helper_listener *listeners,
+    size_t listener_count,
     const struct provider_helper_xfrm_lease *lease,
     struct provider_helper_runtime_stats *counters,
     uint32_t *cleared,
@@ -8003,6 +8025,8 @@ ikev2_helper_clear_ike_sas_for_xfrm_lease(
         struct ikev2_helper_ike_sa *sa = &table->entries[i];
         if (ikev2_helper_ike_sa_uses_xfrm_lease(sa, lease))
         {
+            ikev2_helper_maybe_send_ike_sa_delete_request(listeners,
+                                                          listener_count, sa);
             if (ikev2_helper_clear_ike_sa_with_session_close(
                     table, sa, counters, ipc_fd, tx_sequence, reason))
             {
@@ -8151,13 +8175,14 @@ ikev2_helper_delete_xfrm_lease(
 }
 
 static bool
-ikev2_helper_build_encrypted_payload_response(
-    uint8_t *response,
+ikev2_helper_build_encrypted_payload(
+    uint8_t *packet,
     size_t response_size,
     size_t *response_len,
     const struct ikev2_helper_listener *listener,
     const struct ikev2_helper_ike_sa *sa,
     uint8_t exchange_type,
+    uint8_t flags,
     uint32_t message_id,
     uint8_t first_payload,
     const uint8_t *plaintext,
@@ -8167,9 +8192,9 @@ ikev2_helper_build_encrypted_payload_response(
     {
         *response_len = 0;
     }
-    if (!response || !response_len || !listener || !sa || !sa->active
-        || !sa->initiator_spi || !sa->responder_spi || !message_id
-        || !plaintext || !plaintext_len
+    if (!packet || !response_len || !listener || !sa || !sa->active
+        || !sa->initiator_spi || !sa->responder_spi || !plaintext
+        || !plaintext_len
         || sa->sk_er_len <= IKEV2_HELPER_AES_GCM_SALT_BYTES
         || sa->sk_er_len > sizeof(sa->sk_er))
     {
@@ -8196,15 +8221,15 @@ ikev2_helper_build_encrypted_payload_response(
         return false;
     }
 
-    memset(response, 0, packet_len);
-    uint8_t *pos = response + offset;
+    memset(packet, 0, packet_len);
+    uint8_t *pos = packet + offset;
     ikev2_helper_write_be64(&pos, sa->initiator_spi);
     ikev2_helper_write_be64(&pos, sa->responder_spi);
     *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_SK;
     *pos++ = (PROVIDER_HELPER_IKEV2_MAJOR_VERSION << 4)
              | PROVIDER_HELPER_IKEV2_MINOR_VERSION;
     *pos++ = exchange_type;
-    *pos++ = PROVIDER_HELPER_IKEV2_FLAG_RESPONSE;
+    *pos++ = flags;
     ikev2_helper_write_be32(&pos, message_id);
     ikev2_helper_write_be32(&pos, ike_len);
 
@@ -8229,7 +8254,7 @@ ikev2_helper_build_encrypted_payload_response(
     uint8_t *ciphertext = pos;
     uint8_t *tag = pos + plaintext_len;
     const bool ret = ikev2_helper_aes_gcm_encrypt(
-        sa->sk_er, key_len, nonce, sizeof(nonce), response + offset,
+        sa->sk_er, key_len, nonce, sizeof(nonce), packet + offset,
         PROVIDER_HELPER_IKEV2_HEADER_SIZE
         + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE,
         plaintext, plaintext_len, ciphertext, plaintext_len, tag,
@@ -8237,14 +8262,75 @@ ikev2_helper_build_encrypted_payload_response(
     pos = tag + IKEV2_HELPER_AES_GCM_TAG_BYTES;
 
     ikev2_helper_secure_zero(nonce, sizeof(nonce));
-    if (!ret || (size_t)(pos - response) != packet_len)
+    if (!ret || (size_t)(pos - packet) != packet_len)
     {
-        ikev2_helper_secure_zero(response, response_size);
+        ikev2_helper_secure_zero(packet, response_size);
         return false;
     }
 
     *response_len = packet_len;
     return true;
+}
+
+static bool
+ikev2_helper_build_encrypted_payload_response(
+    uint8_t *response,
+    size_t response_size,
+    size_t *response_len,
+    const struct ikev2_helper_listener *listener,
+    const struct ikev2_helper_ike_sa *sa,
+    uint8_t exchange_type,
+    uint32_t message_id,
+    uint8_t first_payload,
+    const uint8_t *plaintext,
+    size_t plaintext_len)
+{
+    if (!message_id)
+    {
+        return false;
+    }
+    return ikev2_helper_build_encrypted_payload(
+        response, response_size, response_len, listener, sa, exchange_type,
+        PROVIDER_HELPER_IKEV2_FLAG_RESPONSE, message_id, first_payload,
+        plaintext, plaintext_len);
+}
+
+static bool
+ikev2_helper_send_encrypted_ike_sa_delete_request(
+    const struct ikev2_helper_listener *listener,
+    const struct ikev2_helper_ike_sa *sa)
+{
+    uint8_t request[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    uint8_t plaintext[PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4 + 1];
+    uint8_t *pos = plaintext;
+    size_t request_len = 0;
+
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+    *pos++ = 0;
+    ikev2_helper_write_be16(&pos, PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4);
+    *pos++ = PROVIDER_HELPER_IKEV2_PROTOCOL_IKE;
+    *pos++ = 0; /* IKE SA delete carries no SPI list. */
+    ikev2_helper_write_be16(&pos, 0);
+    *pos++ = 0; /* Pad Length: no padding bytes for AEAD. */
+
+    if (!listener || !sa || !sa->active || !sa->auth_authorized
+        || !ikev2_helper_build_encrypted_payload(
+            request, sizeof(request), &request_len, listener, sa,
+            PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 0, 0,
+            PROVIDER_HELPER_IKEV2_PAYLOAD_DELETE, plaintext,
+            (size_t)(pos - plaintext)))
+    {
+        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+        ikev2_helper_secure_zero(request, sizeof(request));
+        return false;
+    }
+
+    const ssize_t sent =
+        sendto(listener->fd, request, request_len, 0,
+               (const struct sockaddr *)&sa->peer, sa->peer_len);
+    ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+    ikev2_helper_secure_zero(request, sizeof(request));
+    return sent == (ssize_t)request_len;
 }
 
 static bool
@@ -11596,6 +11682,8 @@ ikev2_helper_xfrm_lease_expired_reason(const struct ikev2_helper_ike_sa *sa,
 static bool
 ikev2_helper_expire_authorized_ike_sas(
     struct ikev2_helper_ike_sa_table *table,
+    const struct ikev2_helper_listener *listeners,
+    size_t listener_count,
     struct provider_helper_runtime_stats *counters,
     time_t now,
     int ipc_fd,
@@ -11615,6 +11703,8 @@ ikev2_helper_expire_authorized_ike_sas(
             continue;
         }
 
+        ikev2_helper_maybe_send_ike_sa_delete_request(listeners,
+                                                      listener_count, sa);
         if (!ikev2_helper_clear_ike_sa_with_session_close(
                 table, sa, counters, ipc_fd, tx_sequence, reason))
         {
@@ -13812,7 +13902,8 @@ ikev2_helper_loop(int fd)
             ikev2_helper_expire_ike_sas(sa_table, &counters, time(NULL),
                                         config.half_open_timeout_seconds);
             if (!ikev2_helper_expire_authorized_ike_sas(
-                    sa_table, &counters, time(NULL), fd, &tx_sequence))
+                    sa_table, listeners, listener_count, &counters,
+                    time(NULL), fd, &tx_sequence))
             {
                 ret = 7;
                 goto done;
@@ -13833,7 +13924,8 @@ ikev2_helper_loop(int fd)
         ikev2_helper_expire_ike_sas(sa_table, &counters, pre_event_expire_now,
                                     config.half_open_timeout_seconds);
         if (!ikev2_helper_expire_authorized_ike_sas(
-                sa_table, &counters, pre_event_expire_now, fd, &tx_sequence))
+                sa_table, listeners, listener_count, &counters,
+                pre_event_expire_now, fd, &tx_sequence))
         {
             ret = 7;
             goto done;
@@ -13872,7 +13964,8 @@ ikev2_helper_loop(int fd)
         ikev2_helper_expire_ike_sas(sa_table, &counters, time(NULL),
                                     config.half_open_timeout_seconds);
         if (!ikev2_helper_expire_authorized_ike_sas(
-                sa_table, &counters, time(NULL), fd, &tx_sequence))
+                sa_table, listeners, listener_count, &counters, time(NULL), fd,
+                &tx_sequence))
         {
             ret = 7;
             goto done;
@@ -13968,8 +14061,9 @@ ikev2_helper_loop(int fd)
                         &replaced_lease)
                     || (replaced
                         && !ikev2_helper_clear_ike_sas_for_xfrm_lease(
-                            sa_table, &replaced_lease, &counters,
-                            &revoked, fd, &tx_sequence,
+                            sa_table, listeners, listener_count,
+                            &replaced_lease, &counters, &revoked, fd,
+                            &tx_sequence,
                             "XFRM lease replaced"))
                     || (replaced
                         && !ikev2_helper_commit_xfrm_lease_replacement(
@@ -14007,8 +14101,8 @@ ikev2_helper_loop(int fd)
                     || !ikev2_helper_read_xfrm_lease(fd, &header, &config,
                                                      &lease)
                     || !ikev2_helper_clear_ike_sas_for_xfrm_lease(
-                        sa_table, &lease, &counters, &revoked, fd,
-                        &tx_sequence, "XFRM lease deleted")
+                        sa_table, listeners, listener_count, &lease, &counters,
+                        &revoked, fd, &tx_sequence, "XFRM lease deleted")
                     || !ikev2_helper_delete_xfrm_lease(
                         xfrm_leases, &xfrm_lease_count, &lease, &deleted)
                     || !ikev2_helper_send_header(

@@ -4476,11 +4476,12 @@ test_assert_no_udp_datagram(int fd)
 
 #if defined(ENABLE_CRYPTO_OPENSSL)
 static size_t
-test_recv_ikev2_encrypted_response_payload(
+test_recv_ikev2_encrypted_payload_with_flags(
     int fd,
     uint64_t initiator_spi,
     const struct test_ikev2_sa_init_response_material *material,
     uint8_t expected_exchange_type,
+    uint8_t expected_flags,
     uint32_t expected_message_id,
     uint8_t expected_first_payload,
     bool expect_natt,
@@ -4516,7 +4517,7 @@ test_recv_ikev2_encrypted_response_payload(
     assert_int_equal(header.initiator_spi, initiator_spi);
     assert_int_equal(header.responder_spi, material->responder_spi);
     assert_int_equal(header.exchange_type, expected_exchange_type);
-    assert_int_equal(header.flags, PROVIDER_HELPER_IKEV2_FLAG_RESPONSE);
+    assert_int_equal(header.flags, expected_flags);
     assert_int_equal(header.message_id, expected_message_id);
     assert_true(summary.saw_sk);
     assert_int_equal(summary.sk_count, 1);
@@ -4556,6 +4557,24 @@ test_recv_ikev2_encrypted_response_payload(
     secure_memzero(sk_er, sizeof(sk_er));
     secure_memzero(nonce, sizeof(nonce));
     return payload_len;
+}
+
+static size_t
+test_recv_ikev2_encrypted_response_payload(
+    int fd,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    uint8_t expected_exchange_type,
+    uint32_t expected_message_id,
+    uint8_t expected_first_payload,
+    bool expect_natt,
+    uint8_t *plaintext,
+    size_t plaintext_size)
+{
+    return test_recv_ikev2_encrypted_payload_with_flags(
+        fd, initiator_spi, material, expected_exchange_type,
+        PROVIDER_HELPER_IKEV2_FLAG_RESPONSE, expected_message_id,
+        expected_first_payload, expect_natt, plaintext, plaintext_size);
 }
 
 static void
@@ -5964,6 +5983,32 @@ test_recv_ikev2_encrypted_empty_exchange_response(
         expected_message_id, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
         expect_natt, plaintext, sizeof(plaintext));
     assert_int_equal(payload_len, 0);
+    secure_memzero(plaintext, sizeof(plaintext));
+}
+
+static void
+test_recv_ikev2_encrypted_ike_delete_request(
+    int fd,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    uint32_t expected_message_id,
+    bool expect_natt)
+{
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t payload_len = test_recv_ikev2_encrypted_payload_with_flags(
+        fd, initiator_spi, material, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
+        0, expected_message_id, PROVIDER_HELPER_IKEV2_PAYLOAD_DELETE,
+        expect_natt, plaintext, sizeof(plaintext));
+
+    assert_int_equal(payload_len, PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4);
+    assert_int_equal(plaintext[0], PROVIDER_HELPER_IKEV2_PAYLOAD_NONE);
+    assert_int_equal(plaintext[1], 0);
+    assert_int_equal(test_read_be16(plaintext + 2),
+                     PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4);
+    assert_int_equal(plaintext[4], PROVIDER_HELPER_IKEV2_PROTOCOL_IKE);
+    assert_int_equal(plaintext[5], 0);
+    assert_int_equal(test_read_be16(plaintext + 6), 0);
+
     secure_memzero(plaintext, sizeof(plaintext));
 }
 
@@ -10952,6 +10997,8 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     assert_memory_equal(close_state.session_close.reason,
                         "XFRM lease deleted",
                         strlen("XFRM lease deleted"));
+    test_recv_ikev2_encrypted_ike_delete_request(response_fd, initiator_spi,
+                                                 &sa_init_material, 0, true);
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
