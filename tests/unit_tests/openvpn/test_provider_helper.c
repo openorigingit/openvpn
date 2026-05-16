@@ -8518,20 +8518,31 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
         sizeof(client_private_key), cert_der, cert_der_len, cert_key,
         server_flight, server_flight_len, client_finished,
         sizeof(client_finished), &client_finished_len);
-    const uint8_t fatal_alert[] = {
-        TEST_IKEV2_TLS_CONTENT_TYPE_ALERT,
-        0x03, 0x03,
-        0x00, 0x02,
-        TEST_IKEV2_TLS_ALERT_FATAL,
-        TEST_IKEV2_TLS_ALERT_HANDSHAKE_FAILURE,
-    };
     test_send_ikev2_encrypted_ike_auth_eap_response_fragment_datagram_from(
         response_fd, natt_port, initiator_spi, &sa_init_material, true, 4, 3,
         0, 0, client_finished, client_finished_len);
-    usleep(10000);
-    test_recv_ikev2_encrypted_eap_tls_request(
-        response_fd, initiator_spi, &sa_init_material, 4, 4, 0, 0,
-        fatal_alert, sizeof(fatal_alert), true);
+    for (int i = 0; i < 100 && auth_state.calls < 1; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(auth_state.calls, 1);
+    assert_int_equal(auth_state.request.profile,
+                     PROVIDER_HELPER_AUTH_PROFILE_EAP_TLS);
+    assert_int_equal(auth_state.request.claimed_principal_len, 1);
+    assert_memory_equal(auth_state.request.claimed_principal, "a", 1);
+    assert_int_equal(auth_state.request.credential_fingerprint_len, 71);
+    assert_memory_equal(auth_state.request.credential_fingerprint, "sha256:",
+                        strlen("sha256:"));
+    assert_int_equal(auth_state.request.cert_serial_len, strlen("1234"));
+    assert_memory_equal(auth_state.request.cert_serial, "1234",
+                        strlen("1234"));
+    assert_true(auth_state.request.cert_issuer_len > 0);
+    assert_non_null(strstr(auth_state.request.cert_issuer, "Test IKEv2 CA"));
+    test_recv_ikev2_encrypted_notify_exchange_response(
+        response_fd, initiator_spi, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH, 4,
+        PROVIDER_HELPER_IKEV2_NOTIFY_AUTHENTICATION_FAILED, true);
     secure_memzero(client_private_key, sizeof(client_private_key));
     secure_memzero(client_public_key, sizeof(client_public_key));
     EVP_PKEY_free(cert_key);
@@ -8556,10 +8567,12 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
     assert_int_equal(
         supervisor.runtime_stats.ike_auth_eap_tls_client_hello_rx, 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_cert_extracted, 1);
-    assert_int_equal(supervisor.runtime_stats.ike_auth_request_tx, 0);
-    assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_request_tx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_denied, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_deny_response_tx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported_response_tx,
-                     1);
+                     0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
 
     close(response_fd);

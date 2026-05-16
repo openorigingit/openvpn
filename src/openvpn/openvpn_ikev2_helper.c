@@ -9179,6 +9179,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                              struct ikev2_helper_cookie_context *cookie_ctx,
                              int ipc_fd,
                              uint64_t *tx_sequence,
+                             uint64_t *next_auth_request_id,
                              uint64_t *next_server_sign_request_id)
 {
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE + 1];
@@ -9634,27 +9635,37 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         ++counters->ike_auth_cert_extracted;
                     }
                     ikev2_helper_reset_eap_tls_rx_buffer(sa);
-                    if (ikev2_helper_send_cached_eap_tls_alert_request(
-                            listener, sa, header.message_id,
-                            next_eap_identifier, config, &tx_pending,
-                            &terminal_complete))
+                    if (ikev2_helper_queue_auth_request(
+                            ipc_fd, tx_sequence, next_auth_request_id,
+                            listener, sa))
                     {
-                        ++counters->ike_auth_unsupported;
-                        ++counters->ike_auth_unsupported_response_tx;
-                        if (tx_pending)
-                        {
-                            sa->message_id = header.message_id;
-                            sa->pending_eap_identifier = next_eap_identifier;
-                            sa->updated = time(NULL);
-                        }
-                        else
-                        {
-                            ikev2_helper_clear_ike_sa(sa_table, sa, counters);
-                        }
+                        ++counters->ike_auth_request_tx;
+                        sa->message_id = header.message_id;
+                        sa->pending_eap_identifier = next_eap_identifier;
+                        sa->updated = time(NULL);
                     }
                     else
                     {
-                        ++counters->ike_auth_unsupported_response_failed;
+                        ++counters->ike_auth_request_failed;
+                        if (helper_fatal)
+                        {
+                            ikev2_helper_secure_zero(plaintext,
+                                                     sizeof(plaintext));
+                            counters->ike_sa_active = sa_table->active;
+                            return;
+                        }
+                        if (ikev2_helper_send_cached_eap_tls_alert_request(
+                                listener, sa, header.message_id,
+                                next_eap_identifier, config, &tx_pending,
+                                &terminal_complete))
+                        {
+                            ++counters->ike_auth_unsupported;
+                            ++counters->ike_auth_unsupported_response_tx;
+                        }
+                        else
+                        {
+                            ++counters->ike_auth_unsupported_response_failed;
+                        }
                         ikev2_helper_clear_ike_sa(sa_table, sa, counters);
                     }
                     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
@@ -10669,6 +10680,7 @@ ikev2_helper_loop(int fd)
                                                  &sa_init_rate_state,
                                                  &counters, &cookie_ctx, fd,
                                                  &tx_sequence,
+                                                 &next_auth_request_id,
                                                  &next_server_sign_request_id);
                     if (helper_fatal)
                     {
