@@ -97,6 +97,8 @@
 #define IKEV2_HELPER_EAP_CODE_SUCCESS 3
 #define IKEV2_HELPER_EAP_CODE_FAILURE 4
 #define IKEV2_HELPER_EAP_TYPE_TLS 13
+#define IKEV2_HELPER_EAP_TLS_KEY_MATERIAL_BYTES 128
+#define IKEV2_HELPER_EAP_TLS_MSK_BYTES 64
 #define IKEV2_HELPER_EAP_TLS_FLAG_START 0x20
 #define IKEV2_HELPER_EAP_TLS_FLAG_MORE_FRAGMENTS 0x40
 #define IKEV2_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED 0x80
@@ -147,6 +149,8 @@
 #define IKEV2_HELPER_IKE_SA_INIT_MESSAGE_ID 0
 #define IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID 1
 #define IKEV2_HELPER_AUTH_METHOD_SHARED_KEY_MIC 2
+#define IKEV2_HELPER_AUTH_KEY_PAD "Key Pad for IKEv2"
+#define IKEV2_HELPER_AUTH_KEY_PAD_BYTES 17
 #define IKEV2_HELPER_IKE_SA_INIT_TRANSCRIPT_BYTES \
     PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE
 #define IKEV2_HELPER_PROTECTED_RESPONSE_CACHE_BYTES \
@@ -192,6 +196,8 @@ struct ikev2_helper_tls_server_hello {
     size_t shared_secret_len;
     size_t client_handshake_traffic_secret_len;
     size_t server_handshake_traffic_secret_len;
+    size_t master_secret_len;
+    size_t exporter_master_secret_len;
     size_t client_handshake_write_key_len;
     size_t server_handshake_write_key_len;
     size_t client_handshake_write_iv_len;
@@ -204,6 +210,8 @@ struct ikev2_helper_tls_server_hello {
     uint8_t transcript_hash[IKEV2_HELPER_SHA256_DIGEST_BYTES];
     uint8_t client_handshake_traffic_secret[IKEV2_HELPER_SHA256_DIGEST_BYTES];
     uint8_t server_handshake_traffic_secret[IKEV2_HELPER_SHA256_DIGEST_BYTES];
+    uint8_t master_secret[IKEV2_HELPER_SHA256_DIGEST_BYTES];
+    uint8_t exporter_master_secret[IKEV2_HELPER_SHA256_DIGEST_BYTES];
     uint8_t client_handshake_write_key[IKEV2_HELPER_TLS_AES_128_GCM_KEY_BYTES];
     uint8_t server_handshake_write_key[IKEV2_HELPER_TLS_AES_128_GCM_KEY_BYTES];
     uint8_t client_handshake_write_iv[IKEV2_HELPER_TLS_AEAD_IV_BYTES];
@@ -299,6 +307,8 @@ struct ikev2_helper_ike_sa {
     bool eap_tls_client_certificate;
     bool eap_tls_client_certificate_verify;
     bool eap_tls_client_finished;
+    bool eap_tls_msk_ready;
+    uint8_t eap_tls_msk[IKEV2_HELPER_EAP_TLS_MSK_BYTES];
     uint8_t *eap_tls_rx;
     size_t eap_tls_rx_capacity;
     uint8_t *eap_tls_tx;
@@ -504,6 +514,9 @@ static bool ikev2_helper_hmac_sha256(const uint8_t *key, size_t key_len,
                                      uint8_t *tag, size_t tag_len);
 static bool ikev2_helper_sha256(const uint8_t *input, size_t input_len,
                                 uint8_t *digest, size_t digest_len);
+static bool ikev2_helper_bytes_equal_constant_time(const uint8_t *a,
+                                                   const uint8_t *b,
+                                                   size_t len);
 
 static bool
 ikev2_helper_random_bytes(uint8_t *dst, size_t dst_len)
@@ -1348,30 +1361,54 @@ ikev2_helper_hkdf_expand_sha256(const uint8_t *secret,
 {
     if (!secret || secret_len != IKEV2_HELPER_SHA256_DIGEST_BYTES
         || !info || !info_len || !output || !output_len
-        || output_len > IKEV2_HELPER_SHA256_DIGEST_BYTES
+        || output_len
+               > (size_t)UINT8_MAX * IKEV2_HELPER_SHA256_DIGEST_BYTES
         || info_len > 96)
     {
         return false;
     }
 
-    uint8_t input[97];
+    uint8_t input[IKEV2_HELPER_SHA256_DIGEST_BYTES + 96 + 1];
     uint8_t block[IKEV2_HELPER_SHA256_DIGEST_BYTES];
-    memcpy(input, info, info_len);
-    input[info_len] = 1;
+    size_t generated = 0;
+    uint8_t counter = 1;
+    bool ret = false;
+    CLEAR(input);
+    CLEAR(block);
 
-    const bool ret =
-        ikev2_helper_hmac_sha256(secret, secret_len, input, info_len + 1,
-                                 block, sizeof(block));
-    if (ret)
+    while (generated < output_len)
     {
-        memcpy(output, block, output_len);
+        size_t input_len = 0;
+        if (generated)
+        {
+            memcpy(input, block, sizeof(block));
+            input_len += sizeof(block);
+        }
+        memcpy(input + input_len, info, info_len);
+        input_len += info_len;
+        input[input_len++] = counter++;
+
+        if (!ikev2_helper_hmac_sha256(secret, secret_len, input, input_len,
+                                      block, sizeof(block)))
+        {
+            goto cleanup;
+        }
+
+        const size_t remaining = output_len - generated;
+        const size_t copy_len = min_size(remaining, sizeof(block));
+        memcpy(output + generated, block, copy_len);
+        generated += copy_len;
     }
-    else
+
+    ret = true;
+
+cleanup:
+    ikev2_helper_secure_zero(input, sizeof(input));
+    ikev2_helper_secure_zero(block, sizeof(block));
+    if (!ret)
     {
         ikev2_helper_secure_zero(output, output_len);
     }
-    ikev2_helper_secure_zero(input, sizeof(input));
-    ikev2_helper_secure_zero(block, sizeof(block));
     return ret;
 }
 
@@ -1388,7 +1425,8 @@ ikev2_helper_tls13_hkdf_expand_label(const uint8_t *secret,
     if (!secret || secret_len != IKEV2_HELPER_SHA256_DIGEST_BYTES || !label
         || !*label || (!context && context_len) || context_len > UINT8_MAX
         || !output || !output_len
-        || output_len > IKEV2_HELPER_SHA256_DIGEST_BYTES)
+        || output_len
+               > (size_t)UINT8_MAX * IKEV2_HELPER_SHA256_DIGEST_BYTES)
     {
         return false;
     }
@@ -1425,6 +1463,133 @@ ikev2_helper_tls13_hkdf_expand_label(const uint8_t *secret,
     const bool ret = ikev2_helper_hkdf_expand_sha256(
         secret, secret_len, info, info_len, output, output_len);
     ikev2_helper_secure_zero(info, sizeof(info));
+    return ret;
+}
+
+static const uint8_t ikev2_helper_tls13_empty_sha256[
+    IKEV2_HELPER_SHA256_DIGEST_BYTES] = {
+    0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14,
+    0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
+    0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c,
+    0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
+};
+
+static bool
+ikev2_helper_tls13_derive_exporter_master_secret(
+    struct ikev2_helper_tls_server_hello *server)
+{
+    if (!server || !server->ready
+        || server->master_secret_len != IKEV2_HELPER_SHA256_DIGEST_BYTES)
+    {
+        return false;
+    }
+
+    const bool ret =
+        ikev2_helper_tls13_hkdf_expand_label(
+            server->master_secret, server->master_secret_len, "exp master",
+            server->transcript_hash, sizeof(server->transcript_hash),
+            server->exporter_master_secret,
+            sizeof(server->exporter_master_secret));
+    if (ret)
+    {
+        server->exporter_master_secret_len =
+            sizeof(server->exporter_master_secret);
+    }
+    else
+    {
+        server->exporter_master_secret_len = 0;
+        ikev2_helper_secure_zero(server->exporter_master_secret,
+                                 sizeof(server->exporter_master_secret));
+    }
+    return ret;
+}
+
+static bool
+ikev2_helper_tls13_exporter(
+    const struct ikev2_helper_tls_server_hello *server,
+    const char *label,
+    const uint8_t *context,
+    size_t context_len,
+    uint8_t *output,
+    size_t output_len)
+{
+    if (!server || !label || !*label || (!context && context_len)
+        || !output || !output_len
+        || server->exporter_master_secret_len
+               != IKEV2_HELPER_SHA256_DIGEST_BYTES)
+    {
+        return false;
+    }
+
+    uint8_t derived_secret[IKEV2_HELPER_SHA256_DIGEST_BYTES];
+    uint8_t context_hash[IKEV2_HELPER_SHA256_DIGEST_BYTES];
+    CLEAR(derived_secret);
+    CLEAR(context_hash);
+
+    bool context_ready = false;
+    if (context_len)
+    {
+        context_ready = ikev2_helper_sha256(context, context_len,
+                                            context_hash,
+                                            sizeof(context_hash));
+    }
+    else
+    {
+        memcpy(context_hash, ikev2_helper_tls13_empty_sha256,
+               sizeof(context_hash));
+        context_ready = true;
+    }
+    const bool ret =
+        context_ready
+        && ikev2_helper_tls13_hkdf_expand_label(
+               server->exporter_master_secret,
+               server->exporter_master_secret_len, label,
+               ikev2_helper_tls13_empty_sha256,
+               sizeof(ikev2_helper_tls13_empty_sha256), derived_secret,
+               sizeof(derived_secret))
+        && ikev2_helper_tls13_hkdf_expand_label(
+               derived_secret, sizeof(derived_secret), "exporter",
+               context_hash, sizeof(context_hash), output, output_len);
+
+    ikev2_helper_secure_zero(derived_secret, sizeof(derived_secret));
+    ikev2_helper_secure_zero(context_hash, sizeof(context_hash));
+    if (!ret)
+    {
+        ikev2_helper_secure_zero(output, output_len);
+    }
+    return ret;
+}
+
+static bool
+ikev2_helper_derive_eap_tls_msk(
+    const struct ikev2_helper_tls_server_hello *server,
+    uint8_t *msk,
+    size_t msk_len)
+{
+    if (!server || !msk || msk_len != IKEV2_HELPER_EAP_TLS_MSK_BYTES)
+    {
+        return false;
+    }
+
+    const uint8_t eap_type_context[] = { IKEV2_HELPER_EAP_TYPE_TLS };
+    uint8_t key_material[IKEV2_HELPER_EAP_TLS_KEY_MATERIAL_BYTES];
+    CLEAR(key_material);
+
+    const bool ret =
+        ikev2_helper_tls13_exporter(
+            server, "EXPORTER_EAP_TLS_Key_Material",
+            eap_type_context, sizeof(eap_type_context), key_material,
+            sizeof(key_material));
+    if (ret)
+    {
+        memcpy(msk, key_material, msk_len);
+    }
+    else
+    {
+        ikev2_helper_secure_zero(msk, msk_len);
+    }
+
+    ikev2_helper_secure_zero(key_material, sizeof(key_material));
     return ret;
 }
 
@@ -3012,7 +3177,7 @@ ikev2_helper_post_eap_final_auth_shape_valid(
         || !summary->saw_auth || summary->auth_count != 1
         || !ikev2_helper_body_inside(plaintext_len, summary->auth_offset,
                                      summary->auth_len)
-        || summary->auth_len <= 4)
+        || summary->auth_len != 4 + IKEV2_HELPER_PRF_SHA256_BYTES)
     {
         return false;
     }
@@ -3020,6 +3185,132 @@ ikev2_helper_post_eap_final_auth_shape_valid(
     const uint8_t *auth = plaintext + summary->auth_offset;
     return auth[0] == IKEV2_HELPER_AUTH_METHOD_SHARED_KEY_MIC && !auth[1]
            && !auth[2] && !auth[3];
+}
+
+static bool
+ikev2_helper_build_initiator_id_body(
+    const struct ikev2_helper_ike_sa *sa,
+    uint8_t *id_body,
+    size_t id_body_size,
+    size_t *id_body_len)
+{
+    if (id_body_len)
+    {
+        *id_body_len = 0;
+    }
+    if (!sa || !sa->claimed_principal_ready || !sa->claimed_principal_len
+        || sa->claimed_principal_id_type > UINT8_MAX
+        || !id_body || !id_body_len
+        || id_body_size < 4u + sa->claimed_principal_len)
+    {
+        return false;
+    }
+
+    uint8_t *pos = id_body;
+    *pos++ = (uint8_t)sa->claimed_principal_id_type;
+    *pos++ = 0;
+    *pos++ = 0;
+    *pos++ = 0;
+    memcpy(pos, sa->claimed_principal, sa->claimed_principal_len);
+    pos += sa->claimed_principal_len;
+    *id_body_len = (size_t)(pos - id_body);
+    return true;
+}
+
+static bool
+ikev2_helper_build_initiator_signed_octets(
+    const struct ikev2_helper_ike_sa *sa,
+    uint8_t *transcript,
+    size_t transcript_size,
+    size_t *transcript_len)
+{
+    if (transcript_len)
+    {
+        *transcript_len = 0;
+    }
+    if (!sa || !sa->active || !transcript || !transcript_len
+        || !sa->ike_sa_init_request_len || !sa->responder_nonce_len
+        || sa->sk_pi_len != IKEV2_HELPER_PRF_SHA256_BYTES)
+    {
+        return false;
+    }
+
+    uint8_t id_body[4 + IKEV2_HELPER_CLAIMED_PRINCIPAL_SIZE];
+    uint8_t id_hash[IKEV2_HELPER_SHA256_DIGEST_BYTES];
+    size_t id_body_len = 0;
+    const size_t needed = sa->ike_sa_init_request_len
+                          + sa->responder_nonce_len + sizeof(id_hash);
+
+    const bool ret =
+        needed <= transcript_size
+        && ikev2_helper_build_initiator_id_body(sa, id_body, sizeof(id_body),
+                                                &id_body_len)
+        && ikev2_helper_hmac_sha256(sa->sk_pi, sa->sk_pi_len, id_body,
+                                    id_body_len, id_hash, sizeof(id_hash));
+    if (ret)
+    {
+        uint8_t *pos = transcript;
+        memcpy(pos, sa->ike_sa_init_request, sa->ike_sa_init_request_len);
+        pos += sa->ike_sa_init_request_len;
+        memcpy(pos, sa->responder_nonce, sa->responder_nonce_len);
+        pos += sa->responder_nonce_len;
+        memcpy(pos, id_hash, sizeof(id_hash));
+        pos += sizeof(id_hash);
+        *transcript_len = (size_t)(pos - transcript);
+    }
+
+    ikev2_helper_secure_zero(id_body, sizeof(id_body));
+    ikev2_helper_secure_zero(id_hash, sizeof(id_hash));
+    if (!ret)
+    {
+        ikev2_helper_secure_zero(transcript, transcript_size);
+    }
+    return ret;
+}
+
+static bool
+ikev2_helper_post_eap_final_auth_verified(
+    const struct ikev2_helper_ike_sa *sa,
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    const struct provider_helper_ikev2_payload_summary *summary)
+{
+    if (!ikev2_helper_post_eap_final_auth_shape_valid(sa, plaintext,
+                                                      plaintext_len, summary)
+        || !sa->eap_tls_msk_ready)
+    {
+        return false;
+    }
+
+    const uint8_t *auth = plaintext + summary->auth_offset;
+    const uint8_t *received_auth = auth + 4;
+    uint8_t signed_octets[IKEV2_HELPER_IKE_SA_INIT_TRANSCRIPT_BYTES
+                          + IKEV2_HELPER_RESPONDER_NONCE_BYTES
+                          + IKEV2_HELPER_SHA256_DIGEST_BYTES];
+    uint8_t auth_key[IKEV2_HELPER_PRF_SHA256_BYTES];
+    uint8_t expected_auth[IKEV2_HELPER_PRF_SHA256_BYTES];
+    size_t signed_octets_len = 0;
+    CLEAR(signed_octets);
+    CLEAR(auth_key);
+    CLEAR(expected_auth);
+
+    const bool ret =
+        ikev2_helper_build_initiator_signed_octets(
+            sa, signed_octets, sizeof(signed_octets), &signed_octets_len)
+        && ikev2_helper_hmac_sha256(
+               sa->eap_tls_msk, sizeof(sa->eap_tls_msk),
+               (const uint8_t *)IKEV2_HELPER_AUTH_KEY_PAD,
+               IKEV2_HELPER_AUTH_KEY_PAD_BYTES, auth_key, sizeof(auth_key))
+        && ikev2_helper_hmac_sha256(auth_key, sizeof(auth_key),
+                                    signed_octets, signed_octets_len,
+                                    expected_auth, sizeof(expected_auth))
+        && ikev2_helper_bytes_equal_constant_time(
+               received_auth, expected_auth, sizeof(expected_auth));
+
+    ikev2_helper_secure_zero(signed_octets, sizeof(signed_octets));
+    ikev2_helper_secure_zero(auth_key, sizeof(auth_key));
+    ikev2_helper_secure_zero(expected_auth, sizeof(expected_auth));
+    return ret;
 }
 
 static void
@@ -3033,6 +3324,8 @@ ikev2_helper_clear_eap_tls_handshake_state(struct ikev2_helper_ike_sa *sa)
     sa->eap_tls_client_certificate = false;
     sa->eap_tls_client_certificate_verify = false;
     sa->eap_tls_client_finished = false;
+    sa->eap_tls_msk_ready = false;
+    ikev2_helper_secure_zero(sa->eap_tls_msk, sizeof(sa->eap_tls_msk));
     ikev2_helper_secure_zero(&sa->eap_tls_server_hello,
                              sizeof(sa->eap_tls_server_hello));
 }
@@ -4011,12 +4304,14 @@ ikev2_helper_eap_tls_client_handshake_flight_valid(
     }
 
     struct ikev2_helper_tls_server_hello server = sa->eap_tls_server_hello;
+    uint8_t eap_tls_msk[IKEV2_HELPER_EAP_TLS_MSK_BYTES];
     size_t client_cert_der_len = 0;
     bool saw_certificate = false;
     bool saw_certificate_verify = false;
     bool saw_finished = false;
     bool ret = false;
     size_t record_offset = 0;
+    CLEAR(eap_tls_msk);
     ikev2_helper_clear_credential_metadata(sa);
 
     while (record_offset < sa->eap_tls_message_len)
@@ -4113,13 +4408,17 @@ ikev2_helper_eap_tls_client_handshake_flight_valid(
     }
 
     ret = record_offset == sa->eap_tls_message_len && saw_certificate
-          && saw_certificate_verify && saw_finished;
+          && saw_certificate_verify && saw_finished
+          && ikev2_helper_derive_eap_tls_msk(&server, eap_tls_msk,
+                                             sizeof(eap_tls_msk));
     if (ret)
     {
         sa->eap_tls_server_hello = server;
         sa->eap_tls_client_certificate = true;
         sa->eap_tls_client_certificate_verify = true;
         sa->eap_tls_client_finished = true;
+        memcpy(sa->eap_tls_msk, eap_tls_msk, sizeof(sa->eap_tls_msk));
+        sa->eap_tls_msk_ready = true;
     }
 
 done:
@@ -4132,6 +4431,7 @@ done:
     ikev2_helper_secure_zero(client_cert_der, config->max_cert_chain_bytes);
     free(client_cert_der);
     ikev2_helper_secure_zero(&server, sizeof(server));
+    ikev2_helper_secure_zero(eap_tls_msk, sizeof(eap_tls_msk));
     return ret;
 }
 
@@ -7863,12 +8163,6 @@ ikev2_helper_tls13_derive_handshake_keys(
     const uint8_t *server_handshake,
     size_t server_handshake_len)
 {
-    static const uint8_t empty_sha256[IKEV2_HELPER_SHA256_DIGEST_BYTES] = {
-        0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14,
-        0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24,
-        0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c,
-        0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
-    };
     if (!sa || !server || !server_handshake || !server_handshake_len
         || !sa->eap_tls_rx
         || sa->eap_tls_message_len <= IKEV2_HELPER_TLS_RECORD_HEADER_SIZE
@@ -7893,10 +8187,12 @@ ikev2_helper_tls13_derive_handshake_keys(
     uint8_t early_secret[IKEV2_HELPER_SHA256_DIGEST_BYTES];
     uint8_t derived_secret[IKEV2_HELPER_SHA256_DIGEST_BYTES];
     uint8_t handshake_secret[IKEV2_HELPER_SHA256_DIGEST_BYTES];
+    uint8_t handshake_derived_secret[IKEV2_HELPER_SHA256_DIGEST_BYTES];
     CLEAR(zero);
     CLEAR(early_secret);
     CLEAR(derived_secret);
     CLEAR(handshake_secret);
+    CLEAR(handshake_derived_secret);
 
     const bool ret =
         ikev2_helper_tls13_append_transcript(server, client_handshake,
@@ -7908,7 +8204,8 @@ ikev2_helper_tls13_derive_handshake_keys(
                early_secret, sizeof(early_secret))
         && ikev2_helper_tls13_hkdf_expand_label(
                early_secret, sizeof(early_secret), "derived",
-               empty_sha256, sizeof(empty_sha256),
+               ikev2_helper_tls13_empty_sha256,
+               sizeof(ikev2_helper_tls13_empty_sha256),
                derived_secret, sizeof(derived_secret))
         && ikev2_helper_hkdf_extract_sha256(
                derived_secret, sizeof(derived_secret), server->shared_secret,
@@ -7943,7 +8240,16 @@ ikev2_helper_tls13_derive_handshake_keys(
                server->server_handshake_traffic_secret,
                sizeof(server->server_handshake_traffic_secret), "iv",
                NULL, 0, server->server_handshake_write_iv,
-               sizeof(server->server_handshake_write_iv));
+               sizeof(server->server_handshake_write_iv))
+        && ikev2_helper_tls13_hkdf_expand_label(
+               handshake_secret, sizeof(handshake_secret), "derived",
+               ikev2_helper_tls13_empty_sha256,
+               sizeof(ikev2_helper_tls13_empty_sha256),
+               handshake_derived_secret, sizeof(handshake_derived_secret))
+        && ikev2_helper_hkdf_extract_sha256(
+               handshake_derived_secret, sizeof(handshake_derived_secret),
+               zero, sizeof(zero), server->master_secret,
+               sizeof(server->master_secret));
 
     if (ret)
     {
@@ -7959,6 +8265,7 @@ ikev2_helper_tls13_derive_handshake_keys(
             sizeof(server->client_handshake_write_iv);
         server->server_handshake_write_iv_len =
             sizeof(server->server_handshake_write_iv);
+        server->master_secret_len = sizeof(server->master_secret);
         server->client_handshake_sequence = 0;
         server->server_handshake_sequence = 0;
     }
@@ -7983,12 +8290,20 @@ ikev2_helper_tls13_derive_handshake_keys(
                                  sizeof(server->client_handshake_write_iv));
         ikev2_helper_secure_zero(server->server_handshake_write_iv,
                                  sizeof(server->server_handshake_write_iv));
+        server->master_secret_len = 0;
+        server->exporter_master_secret_len = 0;
+        ikev2_helper_secure_zero(server->master_secret,
+                                 sizeof(server->master_secret));
+        ikev2_helper_secure_zero(server->exporter_master_secret,
+                                 sizeof(server->exporter_master_secret));
     }
 
     ikev2_helper_secure_zero(zero, sizeof(zero));
     ikev2_helper_secure_zero(early_secret, sizeof(early_secret));
     ikev2_helper_secure_zero(derived_secret, sizeof(derived_secret));
     ikev2_helper_secure_zero(handshake_secret, sizeof(handshake_secret));
+    ikev2_helper_secure_zero(handshake_derived_secret,
+                             sizeof(handshake_derived_secret));
     return ret;
 }
 
@@ -8496,9 +8811,16 @@ ikev2_helper_build_tls13_finished(
         ret && (size_t)(pos - handshake) == sizeof(handshake)
         && ikev2_helper_tls13_append_transcript(server, handshake,
                                                 sizeof(handshake))
+        && ikev2_helper_tls13_derive_exporter_master_secret(server)
         && ikev2_helper_tls13_encrypt_server_handshake_record(
                server, handshake, sizeof(handshake), record, record_size,
                record_len);
+    if (!built)
+    {
+        server->exporter_master_secret_len = 0;
+        ikev2_helper_secure_zero(server->exporter_master_secret,
+                                 sizeof(server->exporter_master_secret));
+    }
     ikev2_helper_secure_zero(finished_key, sizeof(finished_key));
     ikev2_helper_secure_zero(verify_data, sizeof(verify_data));
     ikev2_helper_secure_zero(handshake, sizeof(handshake));
@@ -9704,18 +10026,27 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         ++counters->ike_auth_final_auth_bad_shape;
                         ikev2_helper_clear_ike_sa(sa_table, sa, counters);
                     }
-                    else if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
-                                 listener, sa,
-                                 PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
-                                 header.message_id,
-                                 PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
+                    else if (!ikev2_helper_post_eap_final_auth_verified(
+                                 sa, plaintext, plaintext_len, &inner_summary))
                     {
-                        ++counters->ike_auth_final_auth_unsupported_tx;
+                        ++counters->ike_auth_final_auth_verify_failed;
                         ikev2_helper_clear_ike_sa(sa_table, sa, counters);
                     }
                     else
                     {
-                        ++counters->ike_auth_final_auth_unsupported_failed;
+                        ++counters->ike_auth_final_auth_verified;
+                        if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
+                                listener, sa,
+                                PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+                                header.message_id,
+                                PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
+                        {
+                            ++counters->ike_auth_final_auth_unsupported_tx;
+                        }
+                        else
+                        {
+                            ++counters->ike_auth_final_auth_unsupported_failed;
+                        }
                         ikev2_helper_clear_ike_sa(sa_table, sa, counters);
                     }
                     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
