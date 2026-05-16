@@ -1674,6 +1674,8 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
     (4 + 1 + 3 + 3 + TEST_IKEV2_SERVER_AUTH_CERT_CHAIN_BYTES + 2)
 #define TEST_IKEV2_TLS_CERTIFICATE_VERIFY_HANDSHAKE_BYTES \
     (4 + 2 + 2 + TEST_PROVIDER_HELPER_SERVER_SIGN_SIGNATURE_BYTES)
+#define TEST_IKEV2_TLS_FINISHED_HANDSHAKE_BYTES \
+    (4 + TEST_IKEV2_PRF_SHA256_BYTES)
 #define TEST_IKEV2_TLS_EXTENSION_SUPPORTED_VERSIONS 43
 #define TEST_IKEV2_TLS_EXTENSION_KEY_SHARE 51
 
@@ -4067,8 +4069,25 @@ test_recv_ikev2_encrypted_eap_tls_server_hello_request(
     assert_int_equal(certificate_verify_len,
                      TEST_IKEV2_TLS_CERTIFICATE_VERIFY_HANDSHAKE_BYTES + 1
                      + TEST_IKEV2_TLS_AES_GCM_TAG_BYTES);
+    const size_t certificate_verify_record_len = 5 + certificate_verify_len;
+    assert_true(tls_len > server_hello_record_len
+                          + encrypted_extensions_record_len
+                          + certificate_record_len
+                          + certificate_verify_record_len + 5);
+
+    const uint8_t *finished =
+        certificate_verify + certificate_verify_record_len;
+    assert_int_equal(finished[0],
+                     TEST_IKEV2_TLS_CONTENT_TYPE_APPLICATION_DATA);
+    assert_int_equal(test_read_be16(finished + 1),
+                     TEST_IKEV2_TLS_VERSION_1_2);
+    const uint16_t finished_len = test_read_be16(finished + 3);
+    assert_int_equal(finished_len,
+                     TEST_IKEV2_TLS_FINISHED_HANDSHAKE_BYTES + 1
+                     + TEST_IKEV2_TLS_AES_GCM_TAG_BYTES);
     assert_int_equal(server_hello_record_len + encrypted_extensions_record_len
-                     + certificate_record_len + 5 + certificate_verify_len,
+                     + certificate_record_len + certificate_verify_record_len
+                     + 5 + finished_len,
                      tls_len);
 
     secure_memzero(plaintext, sizeof(plaintext));

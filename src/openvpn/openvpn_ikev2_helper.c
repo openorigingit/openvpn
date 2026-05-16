@@ -114,6 +114,7 @@
 #define IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CERTIFICATE 11
 #define IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CERTIFICATE_VERIFY 15
 #define IKEV2_HELPER_TLS_HANDSHAKE_TYPE_ENCRYPTED_EXTENSIONS 8
+#define IKEV2_HELPER_TLS_HANDSHAKE_TYPE_FINISHED 20
 #define IKEV2_HELPER_TLS_CIPHER_TLS_AES_128_GCM_SHA256 0x1301
 #define IKEV2_HELPER_TLS_CIPHER_TLS_AES_256_GCM_SHA384 0x1302
 #define IKEV2_HELPER_TLS_CIPHER_ECDHE_RSA_AES_128_GCM_SHA256 0xc02f
@@ -7640,6 +7641,63 @@ ikev2_helper_build_tls13_certificate_verify(
 }
 
 static bool
+ikev2_helper_build_tls13_finished(
+    struct ikev2_helper_tls_server_hello *server,
+    uint8_t *record,
+    size_t record_size,
+    size_t *record_len)
+{
+    if (record_len)
+    {
+        *record_len = 0;
+    }
+    if (!server || !server->ready || !record || !record_size || !record_len
+        || server->server_handshake_traffic_secret_len
+           != IKEV2_HELPER_SHA256_DIGEST_BYTES)
+    {
+        return false;
+    }
+
+    uint8_t finished_key[IKEV2_HELPER_SHA256_DIGEST_BYTES];
+    uint8_t verify_data[IKEV2_HELPER_SHA256_DIGEST_BYTES];
+    CLEAR(finished_key);
+    CLEAR(verify_data);
+
+    uint8_t handshake[IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE
+                      + IKEV2_HELPER_SHA256_DIGEST_BYTES];
+    uint8_t *pos = handshake;
+    *pos++ = IKEV2_HELPER_TLS_HANDSHAKE_TYPE_FINISHED;
+    ikev2_helper_write_be24(&pos, IKEV2_HELPER_SHA256_DIGEST_BYTES);
+
+    const bool ret =
+        ikev2_helper_tls13_hkdf_expand_label(
+            server->server_handshake_traffic_secret,
+            server->server_handshake_traffic_secret_len, "finished",
+            NULL, 0, finished_key, sizeof(finished_key))
+        && ikev2_helper_hmac_sha256(
+               finished_key, sizeof(finished_key), server->transcript_hash,
+               sizeof(server->transcript_hash), verify_data,
+               sizeof(verify_data));
+    if (ret)
+    {
+        memcpy(pos, verify_data, sizeof(verify_data));
+        pos += sizeof(verify_data);
+    }
+
+    const bool built =
+        ret && (size_t)(pos - handshake) == sizeof(handshake)
+        && ikev2_helper_tls13_append_transcript(server, handshake,
+                                                sizeof(handshake))
+        && ikev2_helper_tls13_encrypt_server_handshake_record(
+               server, handshake, sizeof(handshake), record, record_size,
+               record_len);
+    ikev2_helper_secure_zero(finished_key, sizeof(finished_key));
+    ikev2_helper_secure_zero(verify_data, sizeof(verify_data));
+    ikev2_helper_secure_zero(handshake, sizeof(handshake));
+    return built;
+}
+
+static bool
 ikev2_helper_send_cached_eap_tls_certificate_verify_request(
     const struct ikev2_helper_listener *listener,
     struct ikev2_helper_ike_sa *sa,
@@ -7672,12 +7730,19 @@ ikev2_helper_send_cached_eap_tls_certificate_verify_request(
     }
 
     size_t certificate_verify_len = 0;
+    size_t finished_len = 0;
     const bool ret =
         ikev2_helper_build_tls13_certificate_verify(
             &sa->eap_tls_server_hello, sign_response, certificate_verify,
             config->max_eap_tls_bytes, &certificate_verify_len)
+        && ikev2_helper_build_tls13_finished(
+               &sa->eap_tls_server_hello,
+               certificate_verify + certificate_verify_len,
+               config->max_eap_tls_bytes - certificate_verify_len,
+               &finished_len)
         && ikev2_helper_append_cached_eap_tls_message(
-               sa, certificate_verify, certificate_verify_len, false, config)
+               sa, certificate_verify, certificate_verify_len + finished_len,
+               false, config)
         && ikev2_helper_send_cached_eap_tls_tx_fragment(
                listener, sa, message_id, eap_identifier, tx_pending,
                terminal_complete);
