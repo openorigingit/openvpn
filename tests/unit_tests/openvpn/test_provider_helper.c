@@ -1675,8 +1675,11 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
 #define TEST_IKEV2_TLS_RECORD_HEADER_BYTES 5
 #define TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES 4
 #define TEST_IKEV2_TLS_HANDSHAKE_TYPE_SERVER_HELLO 2
+#define TEST_IKEV2_TLS_HANDSHAKE_TYPE_CERTIFICATE 11
+#define TEST_IKEV2_TLS_HANDSHAKE_TYPE_CERTIFICATE_VERIFY 15
 #define TEST_IKEV2_TLS_HANDSHAKE_TYPE_FINISHED 20
 #define TEST_IKEV2_TLS_CIPHER_TLS_AES_128_GCM_SHA256 0x1301
+#define TEST_IKEV2_TLS_SIGALG_ECDSA_SECP256R1_SHA256 0x0403
 #define TEST_IKEV2_TLS_GROUP_X25519 29
 #define TEST_IKEV2_TLS_X25519_KEY_SHARE_BYTES 32
 #define TEST_IKEV2_TLS_AES_128_GCM_KEY_BYTES 16
@@ -2672,13 +2675,12 @@ test_make_encrypted_ike_auth_eap_response_fragment_packet(
     const uint8_t *fragment,
     size_t fragment_len)
 {
-    uint8_t plaintext[128];
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     CLEAR(plaintext);
 
     const bool length_included =
         (eap_flags & TEST_IKEV2_EAP_TLS_FLAG_LENGTH_INCLUDED) != 0;
     const size_t tls_len_size = length_included ? 4u : 0u;
-    assert_true(fragment_len <= 64);
     assert_true(!fragment_len || fragment);
     assert_true(6u + tls_len_size + fragment_len <= UINT16_MAX);
 
@@ -2703,6 +2705,7 @@ test_make_encrypted_ike_auth_eap_response_fragment_packet(
     }
     if (fragment_len)
     {
+        assert_true(fragment_offset + fragment_len + 1 <= sizeof(plaintext));
         memcpy(plaintext + fragment_offset, fragment, fragment_len);
     }
     plaintext[plaintext_len++] = 0;
@@ -4393,6 +4396,7 @@ static void
 test_build_eap_tls_client_finished(
     const uint8_t *client_hello, size_t client_hello_len,
     const uint8_t *client_private_key, size_t client_private_key_len,
+    const uint8_t *cert_der, size_t cert_der_len,
     const uint8_t *server_flight, size_t server_flight_len,
     uint8_t *client_finished, size_t client_finished_size,
     size_t *client_finished_len)
@@ -4406,12 +4410,14 @@ test_build_eap_tls_client_finished(
 
     assert_non_null(client_hello);
     assert_non_null(client_private_key);
+    assert_non_null(cert_der);
     assert_non_null(server_flight);
     assert_non_null(client_finished);
     assert_non_null(client_finished_len);
     *client_finished_len = 0;
     assert_true(client_hello_len > TEST_IKEV2_TLS_RECORD_HEADER_BYTES
                                    + TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES);
+    assert_true(cert_der_len > 0);
     assert_true(server_flight_len > TEST_IKEV2_TLS_RECORD_HEADER_BYTES
                                     + TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES);
 
@@ -4419,9 +4425,9 @@ test_build_eap_tls_client_finished(
     assert_int_equal((size_t)client_record_len
                      + TEST_IKEV2_TLS_RECORD_HEADER_BYTES,
                      client_hello_len);
-    const uint8_t *client_handshake =
+    const uint8_t *client_hello_handshake =
         client_hello + TEST_IKEV2_TLS_RECORD_HEADER_BYTES;
-    const size_t client_handshake_len = client_record_len;
+    const size_t client_hello_handshake_len = client_record_len;
 
     const uint16_t server_record_len = test_read_be16(server_flight + 3);
     const size_t server_record_total =
@@ -4505,8 +4511,8 @@ test_build_eap_tls_client_finished(
 
     size_t transcript_len = 0;
     test_append_tls_transcript(transcript, sizeof(transcript),
-                               &transcript_len, client_handshake,
-                               client_handshake_len);
+                               &transcript_len, client_hello_handshake,
+                               client_hello_handshake_len);
     test_append_tls_transcript(transcript, sizeof(transcript),
                                &transcript_len, server_handshake,
                                server_handshake_len);
@@ -4569,6 +4575,58 @@ test_build_eap_tls_client_finished(
     assert_true(test_sha256(transcript, transcript_len, transcript_hash,
                             sizeof(transcript_hash)));
 
+    uint8_t client_flight_handshake[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    uint8_t *handshake_pos = client_flight_handshake;
+
+    const size_t cert_list_len = 3 + cert_der_len + 2;
+    const size_t cert_body_len = 1 + 3 + cert_list_len;
+    const size_t cert_handshake_len =
+        TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES + cert_body_len;
+    assert_true(cert_body_len <= 0x00ffffffu);
+    assert_true(cert_list_len <= 0x00ffffffu);
+    assert_true(cert_handshake_len < sizeof(client_flight_handshake));
+    *handshake_pos++ = TEST_IKEV2_TLS_HANDSHAKE_TYPE_CERTIFICATE;
+    test_write_be24(handshake_pos, (uint32_t)cert_body_len);
+    handshake_pos += 3;
+    *handshake_pos++ = 0; /* certificate_request_context */
+    test_write_be24(handshake_pos, (uint32_t)cert_list_len);
+    handshake_pos += 3;
+    test_write_be24(handshake_pos, (uint32_t)cert_der_len);
+    handshake_pos += 3;
+    memcpy(handshake_pos, cert_der, cert_der_len);
+    handshake_pos += cert_der_len;
+    test_write_be16(handshake_pos, 0); /* certificate entry extensions */
+    handshake_pos += 2;
+    assert_int_equal(handshake_pos - client_flight_handshake, cert_handshake_len);
+    test_append_tls_transcript(transcript, sizeof(transcript),
+                               &transcript_len, client_flight_handshake,
+                               cert_handshake_len);
+
+    const size_t cv_signature_len = 64;
+    const size_t cv_body_len = 2 + 2 + cv_signature_len;
+    const size_t cv_handshake_len =
+        TEST_IKEV2_TLS_HANDSHAKE_HEADER_BYTES + cv_body_len;
+    assert_true((size_t)(handshake_pos - client_flight_handshake)
+                + cv_handshake_len < sizeof(client_flight_handshake));
+    *handshake_pos++ = TEST_IKEV2_TLS_HANDSHAKE_TYPE_CERTIFICATE_VERIFY;
+    test_write_be24(handshake_pos, (uint32_t)cv_body_len);
+    handshake_pos += 3;
+    test_write_be16(handshake_pos,
+                    TEST_IKEV2_TLS_SIGALG_ECDSA_SECP256R1_SHA256);
+    handshake_pos += 2;
+    test_write_be16(handshake_pos, (uint16_t)cv_signature_len);
+    handshake_pos += 2;
+    for (size_t i = 0; i < cv_signature_len; ++i)
+    {
+        handshake_pos[i] = (uint8_t)(0xa5 ^ i);
+    }
+    handshake_pos += cv_signature_len;
+    test_append_tls_transcript(
+        transcript, sizeof(transcript), &transcript_len,
+        client_flight_handshake + cert_handshake_len, cv_handshake_len);
+    assert_true(test_sha256(transcript, transcript_len, transcript_hash,
+                            sizeof(transcript_hash)));
+
     uint8_t finished_key[TEST_IKEV2_PRF_SHA256_BYTES];
     uint8_t verify_data[TEST_IKEV2_PRF_SHA256_BYTES];
     CLEAR(finished_key);
@@ -4580,23 +4638,31 @@ test_build_eap_tls_client_finished(
                                  transcript_hash, sizeof(transcript_hash),
                                  verify_data, sizeof(verify_data)));
 
-    uint8_t handshake[TEST_IKEV2_TLS_FINISHED_HANDSHAKE_BYTES];
-    uint8_t *handshake_pos = handshake;
+    const size_t finished_offset = (size_t)(handshake_pos - client_flight_handshake);
+    assert_true(finished_offset + TEST_IKEV2_TLS_FINISHED_HANDSHAKE_BYTES
+                < sizeof(client_flight_handshake));
     *handshake_pos++ = TEST_IKEV2_TLS_HANDSHAKE_TYPE_FINISHED;
     test_write_be24(handshake_pos, TEST_IKEV2_PRF_SHA256_BYTES);
     handshake_pos += 3;
     memcpy(handshake_pos, verify_data, sizeof(verify_data));
     handshake_pos += sizeof(verify_data);
-    assert_int_equal(handshake_pos - handshake, sizeof(handshake));
+    assert_int_equal((size_t)(handshake_pos - client_flight_handshake),
+                     finished_offset
+                     + TEST_IKEV2_TLS_FINISHED_HANDSHAKE_BYTES);
 
-    const size_t inner_len = sizeof(handshake) + 1;
+    const size_t client_flight_handshake_len =
+        (size_t)(handshake_pos - client_flight_handshake);
+    const size_t inner_len = client_flight_handshake_len + 1;
     const size_t encrypted_len = inner_len + TEST_IKEV2_TLS_AES_GCM_TAG_BYTES;
     const size_t record_total = TEST_IKEV2_TLS_RECORD_HEADER_BYTES
                                 + encrypted_len;
+    assert_true(encrypted_len <= UINT16_MAX);
     assert_true(record_total <= client_finished_size);
-    uint8_t inner[sizeof(handshake) + 1];
-    memcpy(inner, handshake, sizeof(handshake));
-    inner[sizeof(handshake)] = TEST_IKEV2_TLS_CONTENT_TYPE_HANDSHAKE;
+    uint8_t inner[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    assert_true(inner_len <= sizeof(inner));
+    memcpy(inner, client_flight_handshake, client_flight_handshake_len);
+    inner[client_flight_handshake_len] =
+        TEST_IKEV2_TLS_CONTENT_TYPE_HANDSHAKE;
 
     uint8_t nonce[TEST_IKEV2_TLS_AEAD_IV_BYTES];
     assert_true(test_tls13_record_nonce(client_iv, sizeof(client_iv), 0,
@@ -4610,8 +4676,7 @@ test_build_eap_tls_client_finished(
     assert_true(test_aes_gcm_encrypt(
                     client_key, sizeof(client_key), nonce, sizeof(nonce),
                     client_finished, TEST_IKEV2_TLS_RECORD_HEADER_BYTES,
-                    inner, inner_len, out,
-                    out + inner_len));
+                    inner, inner_len, out, out + inner_len));
     *client_finished_len = record_total;
 
     secure_memzero(shared_secret, sizeof(shared_secret));
@@ -4629,7 +4694,7 @@ test_build_eap_tls_client_finished(
     secure_memzero(server_iv, sizeof(server_iv));
     secure_memzero(finished_key, sizeof(finished_key));
     secure_memzero(verify_data, sizeof(verify_data));
-    secure_memzero(handshake, sizeof(handshake));
+    secure_memzero(client_flight_handshake, sizeof(client_flight_handshake));
     secure_memzero(inner, sizeof(inner));
     secure_memzero(nonce, sizeof(nonce));
 }
@@ -8369,12 +8434,17 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
         response_fd, initiator_spi, &sa_init_material, 3, 3, true,
         server_flight, sizeof(server_flight), &server_flight_len);
 
-    uint8_t client_finished[512];
+    uint8_t cert_der[2048];
+    size_t cert_der_len = 0;
+    test_make_der_certificate(cert_der, sizeof(cert_der), &cert_der_len);
+
+    uint8_t client_finished[4096];
     size_t client_finished_len = 0;
     test_build_eap_tls_client_finished(
         client_hello, sizeof(client_hello), client_private_key,
-        sizeof(client_private_key), server_flight, server_flight_len,
-        client_finished, sizeof(client_finished), &client_finished_len);
+        sizeof(client_private_key), cert_der, cert_der_len, server_flight,
+        server_flight_len, client_finished, sizeof(client_finished),
+        &client_finished_len);
     const uint8_t fatal_alert[] = {
         TEST_IKEV2_TLS_CONTENT_TYPE_ALERT,
         0x03, 0x03,
@@ -8391,6 +8461,7 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
         fatal_alert, sizeof(fatal_alert), true);
     secure_memzero(client_private_key, sizeof(client_private_key));
     secure_memzero(client_public_key, sizeof(client_public_key));
+    secure_memzero(cert_der, sizeof(cert_der));
     secure_memzero(server_flight, sizeof(server_flight));
     secure_memzero(client_finished, sizeof(client_finished));
 
@@ -8410,6 +8481,7 @@ test_provider_helper_spawn_ikev2_initial_eap_start(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_auth_eap_tls_rx, 3);
     assert_int_equal(
         supervisor.runtime_stats.ike_auth_eap_tls_client_hello_rx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_auth_cert_extracted, 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_request_tx, 0);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported, 1);
     assert_int_equal(supervisor.runtime_stats.ike_auth_unsupported_response_tx,

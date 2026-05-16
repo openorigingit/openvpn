@@ -292,6 +292,8 @@ struct ikev2_helper_ike_sa {
     bool eap_tls_message_complete;
     struct ikev2_helper_tls_client_hello eap_tls_client_hello;
     struct ikev2_helper_tls_server_hello eap_tls_server_hello;
+    bool eap_tls_client_certificate;
+    bool eap_tls_client_certificate_verify;
     bool eap_tls_client_finished;
     uint8_t *eap_tls_rx;
     size_t eap_tls_rx_capacity;
@@ -371,6 +373,14 @@ static bool ikev2_helper_aes_gcm_decrypt(const uint8_t *key,
                                          size_t plaintext_size,
                                          size_t *plaintext_len);
 
+static void
+ikev2_helper_clear_credential_metadata(struct ikev2_helper_ike_sa *sa);
+
+static bool ikev2_helper_extract_x509_metadata_from_der(
+    struct ikev2_helper_ike_sa *sa,
+    const uint8_t *cert_der,
+    size_t cert_der_len);
+
 enum ikev2_helper_add_sa_result {
     IKEV2_HELPER_ADD_SA_OK = 0,
     IKEV2_HELPER_ADD_SA_TABLE_FULL,
@@ -413,6 +423,12 @@ ikev2_helper_read_be16(const uint8_t *pos)
     uint16_t value;
     memcpy(&value, pos, sizeof(value));
     return ntohs(value);
+}
+
+static uint32_t
+ikev2_helper_read_be24(const uint8_t *pos)
+{
+    return ((uint32_t)pos[0] << 16) | ((uint32_t)pos[1] << 8) | pos[2];
 }
 
 static uint32_t
@@ -2980,6 +2996,8 @@ ikev2_helper_clear_eap_tls_handshake_state(struct ikev2_helper_ike_sa *sa)
         return;
     }
     CLEAR(sa->eap_tls_client_hello);
+    sa->eap_tls_client_certificate = false;
+    sa->eap_tls_client_certificate_verify = false;
     sa->eap_tls_client_finished = false;
     ikev2_helper_secure_zero(&sa->eap_tls_server_hello,
                              sizeof(sa->eap_tls_server_hello));
@@ -3603,33 +3621,145 @@ ikev2_helper_tls13_decrypt_client_handshake_record(
 }
 
 static bool
-ikev2_helper_eap_tls_client_finished_record_valid(
-    struct ikev2_helper_ike_sa *sa)
+ikev2_helper_extract_tls13_certificate_metadata(
+    struct ikev2_helper_ike_sa *sa,
+    const uint8_t *handshake,
+    size_t handshake_len,
+    const struct provider_helper_runtime_config *config)
 {
-    if (!sa || !sa->eap_tls_rx || !sa->eap_tls_message_complete
-        || sa->eap_tls_message_len < IKEV2_HELPER_TLS_RECORD_HEADER_SIZE
-                                    + IKEV2_HELPER_AES_GCM_TAG_BYTES + 1
-        || sa->eap_tls_received != sa->eap_tls_message_len
-        || !sa->eap_tls_server_hello.ready
-        || sa->eap_tls_client_finished)
+    if (!sa || !handshake
+        || handshake_len < IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE
+        || !config || !config->max_cert_chain_depth
+        || handshake[0] != IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CERTIFICATE)
     {
         return false;
     }
 
-    uint8_t handshake[IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE
-                      + IKEV2_HELPER_SHA256_DIGEST_BYTES];
-    size_t handshake_len = 0;
-    if (!ikev2_helper_tls13_decrypt_client_handshake_record(
-            &sa->eap_tls_server_hello, sa->eap_tls_rx,
-            sa->eap_tls_message_len, handshake, sizeof(handshake),
-            &handshake_len)
-        || handshake_len != sizeof(handshake)
-        || handshake[0] != IKEV2_HELPER_TLS_HANDSHAKE_TYPE_FINISHED
-        || (((uint32_t)handshake[1] << 16)
-            | ((uint32_t)handshake[2] << 8) | handshake[3])
-               != IKEV2_HELPER_SHA256_DIGEST_BYTES)
+    const uint32_t body_len = ikev2_helper_read_be24(handshake + 1);
+    if ((size_t)body_len
+        != handshake_len - IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE)
     {
-        ikev2_helper_secure_zero(handshake, sizeof(handshake));
+        return false;
+    }
+
+    const uint8_t *body = handshake + IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE;
+    size_t pos = 0;
+    if (body_len < 4)
+    {
+        return false;
+    }
+
+    const uint8_t context_len = body[pos++];
+    if (context_len != 0 || context_len > body_len - pos)
+    {
+        return false;
+    }
+    pos += context_len;
+
+    if (body_len - pos < 3)
+    {
+        return false;
+    }
+    const uint32_t certificate_list_len =
+        ikev2_helper_read_be24(body + pos);
+    pos += 3;
+    if (!certificate_list_len || certificate_list_len > body_len - pos
+        || pos + certificate_list_len != body_len
+        || certificate_list_len > config->max_cert_chain_bytes)
+    {
+        return false;
+    }
+
+    const size_t certificate_list_end = pos + certificate_list_len;
+    uint32_t certificate_count = 0;
+    bool extracted = false;
+    while (pos < certificate_list_end)
+    {
+        if (certificate_list_end - pos < 3)
+        {
+            return false;
+        }
+        const uint32_t cert_len = ikev2_helper_read_be24(body + pos);
+        pos += 3;
+        if (!cert_len || cert_len > certificate_list_end - pos)
+        {
+            return false;
+        }
+
+        ++certificate_count;
+        if (certificate_count > config->max_cert_chain_depth)
+        {
+            return false;
+        }
+        if (certificate_count == 1)
+        {
+            extracted =
+                ikev2_helper_extract_x509_metadata_from_der(sa, body + pos,
+                                                            cert_len);
+            if (!extracted)
+            {
+                return false;
+            }
+        }
+        pos += cert_len;
+
+        if (certificate_list_end - pos < 2)
+        {
+            return false;
+        }
+        const uint16_t extensions_len = ikev2_helper_read_be16(body + pos);
+        pos += 2;
+        if (extensions_len > certificate_list_end - pos)
+        {
+            return false;
+        }
+        pos += extensions_len;
+    }
+
+    return pos == certificate_list_end && extracted;
+}
+
+static bool
+ikev2_helper_tls13_certificate_verify_shape_valid(
+    const struct ikev2_helper_ike_sa *sa,
+    const uint8_t *handshake,
+    size_t handshake_len)
+{
+    if (!sa || !handshake
+        || handshake_len < IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE + 4
+        || handshake[0] != IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CERTIFICATE_VERIFY)
+    {
+        return false;
+    }
+
+    const uint32_t body_len = ikev2_helper_read_be24(handshake + 1);
+    if ((size_t)body_len
+        != handshake_len - IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE
+        || body_len < 4)
+    {
+        return false;
+    }
+
+    const uint8_t *body = handshake + IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE;
+    const uint16_t signature_scheme = ikev2_helper_read_be16(body);
+    const uint16_t signature_len = ikev2_helper_read_be16(body + 2);
+    return ikev2_helper_tls_signature_supported(signature_scheme)
+           && signature_len != 0 && (size_t)signature_len == body_len - 4;
+}
+
+static bool
+ikev2_helper_tls13_client_finished_valid(
+    const struct ikev2_helper_tls_server_hello *server,
+    const uint8_t *handshake,
+    size_t handshake_len)
+{
+    if (!server || !server->ready || !handshake
+        || handshake_len != IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE
+                            + IKEV2_HELPER_SHA256_DIGEST_BYTES
+        || handshake[0] != IKEV2_HELPER_TLS_HANDSHAKE_TYPE_FINISHED
+        || ikev2_helper_read_be24(handshake + 1)
+           != IKEV2_HELPER_SHA256_DIGEST_BYTES)
+    {
         return false;
     }
 
@@ -3639,26 +3769,17 @@ ikev2_helper_eap_tls_client_finished_record_valid(
     CLEAR(expected_verify_data);
     const bool ret =
         ikev2_helper_tls13_hkdf_expand_label(
-            sa->eap_tls_server_hello.client_handshake_traffic_secret,
-            sa->eap_tls_server_hello.client_handshake_traffic_secret_len,
+            server->client_handshake_traffic_secret,
+            server->client_handshake_traffic_secret_len,
             "finished", NULL, 0, finished_key, sizeof(finished_key))
         && ikev2_helper_hmac_sha256(
-               finished_key, sizeof(finished_key),
-               sa->eap_tls_server_hello.transcript_hash,
-               sizeof(sa->eap_tls_server_hello.transcript_hash),
+               finished_key, sizeof(finished_key), server->transcript_hash,
+               sizeof(server->transcript_hash),
                expected_verify_data, sizeof(expected_verify_data))
         && ikev2_helper_bytes_equal_constant_time(
                handshake + IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE,
-               expected_verify_data, sizeof(expected_verify_data))
-        && ikev2_helper_tls13_append_transcript(
-               &sa->eap_tls_server_hello, handshake, sizeof(handshake));
-    if (ret)
-    {
-        ++sa->eap_tls_server_hello.client_handshake_sequence;
-        sa->eap_tls_client_finished = true;
-    }
+               expected_verify_data, sizeof(expected_verify_data));
 
-    ikev2_helper_secure_zero(handshake, sizeof(handshake));
     ikev2_helper_secure_zero(finished_key, sizeof(finished_key));
     ikev2_helper_secure_zero(expected_verify_data,
                              sizeof(expected_verify_data));
@@ -3666,7 +3787,152 @@ ikev2_helper_eap_tls_client_finished_record_valid(
 }
 
 static bool
-ikev2_helper_eap_tls_record_valid(struct ikev2_helper_ike_sa *sa)
+ikev2_helper_eap_tls_client_handshake_flight_valid(
+    struct ikev2_helper_ike_sa *sa,
+    const struct provider_helper_runtime_config *config)
+{
+    if (!sa || !sa->eap_tls_rx || !sa->eap_tls_message_complete
+        || sa->eap_tls_message_len < IKEV2_HELPER_TLS_RECORD_HEADER_SIZE
+                                    + IKEV2_HELPER_AES_GCM_TAG_BYTES + 1
+        || sa->eap_tls_received != sa->eap_tls_message_len
+        || !sa->eap_tls_server_hello.ready
+        || sa->eap_tls_client_finished || !config
+        || !config->max_eap_tls_bytes
+        || config->max_eap_tls_bytes > PROVIDER_HELPER_IPC_MAX_MESSAGE)
+    {
+        return false;
+    }
+
+    uint8_t *handshake = calloc(1, config->max_eap_tls_bytes);
+    if (!handshake)
+    {
+        return false;
+    }
+
+    struct ikev2_helper_tls_server_hello server = sa->eap_tls_server_hello;
+    bool saw_certificate = false;
+    bool saw_certificate_verify = false;
+    bool saw_finished = false;
+    bool ret = false;
+    size_t record_offset = 0;
+    ikev2_helper_clear_credential_metadata(sa);
+
+    while (record_offset < sa->eap_tls_message_len)
+    {
+        if (sa->eap_tls_message_len - record_offset
+            <= IKEV2_HELPER_TLS_RECORD_HEADER_SIZE)
+        {
+            goto done;
+        }
+        const uint8_t *record = sa->eap_tls_rx + record_offset;
+        const uint16_t encrypted_len = ikev2_helper_read_be16(record + 3);
+        const size_t record_len =
+            IKEV2_HELPER_TLS_RECORD_HEADER_SIZE + (size_t)encrypted_len;
+        if (record_len > sa->eap_tls_message_len - record_offset)
+        {
+            goto done;
+        }
+
+        size_t handshake_len = 0;
+        if (!ikev2_helper_tls13_decrypt_client_handshake_record(
+                &server, record, record_len, handshake,
+                config->max_eap_tls_bytes, &handshake_len))
+        {
+            goto done;
+        }
+        ++server.client_handshake_sequence;
+
+        size_t handshake_offset = 0;
+        while (handshake_offset < handshake_len)
+        {
+            if (handshake_len - handshake_offset
+                < IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE)
+            {
+                goto done;
+            }
+            const uint8_t *message = handshake + handshake_offset;
+            const uint32_t message_body_len =
+                ikev2_helper_read_be24(message + 1);
+            const size_t message_len =
+                IKEV2_HELPER_TLS_HANDSHAKE_HEADER_SIZE
+                + (size_t)message_body_len;
+            if (message_len > handshake_len - handshake_offset)
+            {
+                goto done;
+            }
+
+            if (!saw_certificate
+                && message[0] == IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CERTIFICATE)
+            {
+                if (!ikev2_helper_extract_tls13_certificate_metadata(
+                        sa, message, message_len, config)
+                    || !ikev2_helper_tls13_append_transcript(
+                        &server, message, message_len))
+                {
+                    goto done;
+                }
+                saw_certificate = true;
+            }
+            else if (saw_certificate && !saw_certificate_verify
+                     && message[0]
+                            == IKEV2_HELPER_TLS_HANDSHAKE_TYPE_CERTIFICATE_VERIFY)
+            {
+                if (!ikev2_helper_tls13_certificate_verify_shape_valid(
+                        sa, message, message_len)
+                    || !ikev2_helper_tls13_append_transcript(
+                        &server, message, message_len))
+                {
+                    goto done;
+                }
+                saw_certificate_verify = true;
+            }
+            else if (saw_certificate && saw_certificate_verify
+                     && !saw_finished
+                     && message[0] == IKEV2_HELPER_TLS_HANDSHAKE_TYPE_FINISHED)
+            {
+                if (!ikev2_helper_tls13_client_finished_valid(
+                        &server, message, message_len)
+                    || !ikev2_helper_tls13_append_transcript(
+                        &server, message, message_len))
+                {
+                    goto done;
+                }
+                saw_finished = true;
+            }
+            else
+            {
+                goto done;
+            }
+            handshake_offset += message_len;
+        }
+        record_offset += record_len;
+    }
+
+    ret = record_offset == sa->eap_tls_message_len && saw_certificate
+          && saw_certificate_verify && saw_finished;
+    if (ret)
+    {
+        sa->eap_tls_server_hello = server;
+        sa->eap_tls_client_certificate = true;
+        sa->eap_tls_client_certificate_verify = true;
+        sa->eap_tls_client_finished = true;
+    }
+
+done:
+    if (!ret)
+    {
+        ikev2_helper_clear_credential_metadata(sa);
+    }
+    ikev2_helper_secure_zero(handshake, config->max_eap_tls_bytes);
+    free(handshake);
+    ikev2_helper_secure_zero(&server, sizeof(server));
+    return ret;
+}
+
+static bool
+ikev2_helper_eap_tls_record_valid(
+    struct ikev2_helper_ike_sa *sa,
+    const struct provider_helper_runtime_config *config)
 {
     if (!sa || !sa->active)
     {
@@ -3674,7 +3940,7 @@ ikev2_helper_eap_tls_record_valid(struct ikev2_helper_ike_sa *sa)
     }
     if (sa->eap_tls_server_hello.ready)
     {
-        return ikev2_helper_eap_tls_client_finished_record_valid(sa);
+        return ikev2_helper_eap_tls_client_handshake_flight_valid(sa, config);
     }
     return ikev2_helper_eap_tls_client_hello_record_valid(sa);
 }
@@ -3824,7 +4090,7 @@ ikev2_helper_process_followup_eap_tls_response(
     sa->eap_tls_received = new_received;
     sa->eap_tls_message_complete = !fragment.more_fragments;
     if (sa->eap_tls_message_complete
-        && !ikev2_helper_eap_tls_record_valid(sa))
+        && !ikev2_helper_eap_tls_record_valid(sa, config))
     {
         ikev2_helper_clear_eap_tls_buffer(sa);
         return false;
@@ -4857,6 +5123,26 @@ ikev2_helper_extract_x509_metadata_mbedtls(
 #endif
 
 static bool
+ikev2_helper_extract_x509_metadata_from_der(
+    struct ikev2_helper_ike_sa *sa,
+    const uint8_t *cert_der,
+    size_t cert_der_len)
+{
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    return ikev2_helper_extract_x509_metadata_openssl(sa, cert_der,
+                                                      cert_der_len);
+#elif defined(ENABLE_CRYPTO_MBEDTLS)
+    return ikev2_helper_extract_x509_metadata_mbedtls(sa, cert_der,
+                                                      cert_der_len);
+#else
+    (void)sa;
+    (void)cert_der;
+    (void)cert_der_len;
+    return false;
+#endif
+}
+
+static bool
 ikev2_helper_extract_credential_metadata(
     struct ikev2_helper_ike_sa *sa,
     const uint8_t *plaintext,
@@ -4893,17 +5179,8 @@ ikev2_helper_extract_credential_metadata(
 
     const uint8_t *cert_der = cert_payload + 1;
     const size_t cert_der_len = summary->cert_len - 1;
-#if defined(ENABLE_CRYPTO_OPENSSL)
-    return ikev2_helper_extract_x509_metadata_openssl(sa, cert_der,
-                                                      cert_der_len);
-#elif defined(ENABLE_CRYPTO_MBEDTLS)
-    return ikev2_helper_extract_x509_metadata_mbedtls(sa, cert_der,
-                                                      cert_der_len);
-#else
-    (void)cert_der;
-    (void)cert_der_len;
-    return false;
-#endif
+    return ikev2_helper_extract_x509_metadata_from_der(sa, cert_der,
+                                                       cert_der_len);
 }
 
 static bool
@@ -9178,6 +9455,11 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         (uint8_t)(sa->pending_eap_identifier + 1u);
                     bool tx_pending = false;
                     bool terminal_complete = false;
+                    if (sa->eap_tls_client_certificate
+                        && sa->credential_fingerprint_len)
+                    {
+                        ++counters->ike_auth_cert_extracted;
+                    }
                     ikev2_helper_reset_eap_tls_rx_buffer(sa);
                     if (ikev2_helper_send_cached_eap_tls_alert_request(
                             listener, sa, header.message_id,
