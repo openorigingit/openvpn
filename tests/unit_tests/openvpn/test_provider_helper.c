@@ -11512,6 +11512,8 @@ test_provider_helper_spawn_ikev2_lease_deadline_fails_closed(void **state)
     assert_memory_equal(close_state.session_close.reason,
                         "XFRM lease rekey deadline expired",
                         strlen("XFRM lease rekey deadline expired"));
+    test_recv_ikev2_encrypted_ike_delete_request(response_fd, initiator_spi,
+                                                 &sa_init_material, 0, true);
     assert_int_equal(supervisor.runtime_stats.xfrm_leases_stale, 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
