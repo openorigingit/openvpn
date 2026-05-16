@@ -192,9 +192,11 @@ struct ikev2_helper_tls_server_hello {
     size_t server_handshake_write_key_len;
     size_t client_handshake_write_iv_len;
     size_t server_handshake_write_iv_len;
+    size_t transcript_len;
     uint8_t random[IKEV2_HELPER_TLS_CLIENT_HELLO_RANDOM_BYTES];
     uint8_t key_share[IKEV2_HELPER_TLS_KEY_SHARE_MAX_BYTES];
     uint8_t shared_secret[IKEV2_HELPER_TLS_KEY_SHARE_MAX_BYTES];
+    uint8_t transcript[PROVIDER_HELPER_SERVER_AUTH_TRANSCRIPT_SIZE];
     uint8_t transcript_hash[IKEV2_HELPER_SHA256_DIGEST_BYTES];
     uint8_t client_handshake_traffic_secret[IKEV2_HELPER_SHA256_DIGEST_BYTES];
     uint8_t server_handshake_traffic_secret[IKEV2_HELPER_SHA256_DIGEST_BYTES];
@@ -1265,54 +1267,6 @@ ikev2_helper_sha256(const uint8_t *input, size_t input_len,
 #else
     (void)input;
     (void)input_len;
-#endif
-    if (!ret)
-    {
-        ikev2_helper_secure_zero(digest, digest_len);
-    }
-    return ret;
-}
-
-static bool
-ikev2_helper_sha256_concat(const uint8_t *first,
-                           size_t first_len,
-                           const uint8_t *second,
-                           size_t second_len,
-                           uint8_t *digest,
-                           size_t digest_len)
-{
-    if (!first || !first_len || !second || !second_len || !digest
-        || digest_len != IKEV2_HELPER_SHA256_DIGEST_BYTES)
-    {
-        return false;
-    }
-
-    bool ret = false;
-#if defined(ENABLE_CRYPTO_OPENSSL)
-    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-    unsigned int full_len = 0;
-    ret = ctx && EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) == 1
-          && EVP_DigestUpdate(ctx, first, first_len) == 1
-          && EVP_DigestUpdate(ctx, second, second_len) == 1
-          && EVP_DigestFinal_ex(ctx, digest, &full_len) == 1
-          && full_len == digest_len;
-    EVP_MD_CTX_free(ctx);
-#elif defined(ENABLE_CRYPTO_MBEDTLS)
-    mbedtls_md_context_t ctx;
-    const mbedtls_md_info_t *md_info =
-        mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-    mbedtls_md_init(&ctx);
-    ret = md_info && mbedtls_md_setup(&ctx, md_info, 0) == 0
-          && mbedtls_md_starts(&ctx) == 0
-          && mbedtls_md_update(&ctx, first, first_len) == 0
-          && mbedtls_md_update(&ctx, second, second_len) == 0
-          && mbedtls_md_finish(&ctx, digest) == 0;
-    mbedtls_md_free(&ctx);
-#else
-    (void)first;
-    (void)first_len;
-    (void)second;
-    (void)second_len;
 #endif
     if (!ret)
     {
@@ -6998,6 +6952,25 @@ ikev2_helper_send_cached_eap_tls_alert_request(
 }
 
 static bool
+ikev2_helper_tls13_append_transcript(
+    struct ikev2_helper_tls_server_hello *server,
+    const uint8_t *handshake,
+    size_t handshake_len)
+{
+    if (!server || !handshake || !handshake_len
+        || handshake_len > sizeof(server->transcript) - server->transcript_len)
+    {
+        return false;
+    }
+    memcpy(server->transcript + server->transcript_len, handshake,
+           handshake_len);
+    server->transcript_len += handshake_len;
+    return ikev2_helper_sha256(server->transcript, server->transcript_len,
+                               server->transcript_hash,
+                               sizeof(server->transcript_hash));
+}
+
+static bool
 ikev2_helper_tls13_derive_handshake_keys(
     const struct ikev2_helper_ike_sa *sa,
     struct ikev2_helper_tls_server_hello *server,
@@ -7040,10 +7013,10 @@ ikev2_helper_tls13_derive_handshake_keys(
     CLEAR(handshake_secret);
 
     const bool ret =
-        ikev2_helper_sha256_concat(client_handshake, client_handshake_len,
-                                   server_handshake, server_handshake_len,
-                                   server->transcript_hash,
-                                   sizeof(server->transcript_hash))
+        ikev2_helper_tls13_append_transcript(server, client_handshake,
+                                             client_handshake_len)
+        && ikev2_helper_tls13_append_transcript(server, server_handshake,
+                                                server_handshake_len)
         && ikev2_helper_hkdf_extract_sha256(
                zero, sizeof(zero), zero, sizeof(zero),
                early_secret, sizeof(early_secret))
@@ -7105,6 +7078,9 @@ ikev2_helper_tls13_derive_handshake_keys(
     }
     else
     {
+        server->transcript_len = 0;
+        ikev2_helper_secure_zero(server->transcript,
+                                 sizeof(server->transcript));
         ikev2_helper_secure_zero(server->transcript_hash,
                                  sizeof(server->transcript_hash));
         ikev2_helper_secure_zero(
@@ -7245,9 +7221,12 @@ ikev2_helper_build_tls13_encrypted_extensions(
         return false;
     }
 
-    const bool ret = ikev2_helper_tls13_encrypt_server_handshake_record(
-        server, handshake, sizeof(handshake), record, record_size,
-        record_len);
+    const bool ret =
+        ikev2_helper_tls13_append_transcript(server, handshake,
+                                             sizeof(handshake))
+        && ikev2_helper_tls13_encrypt_server_handshake_record(
+               server, handshake, sizeof(handshake), record, record_size,
+               record_len);
     ikev2_helper_secure_zero(handshake, sizeof(handshake));
     return ret;
 }
