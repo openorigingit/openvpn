@@ -31,6 +31,7 @@
 
 static const char test_revocation_fingerprint[] =
     "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+static const char test_revocation_principal[] = "alice@example.test";
 
 static struct push_entry
 push_entry(const char *option)
@@ -412,6 +413,123 @@ test_provider_policy_revocation_file_append(void **state)
 }
 
 static void
+test_provider_policy_principal_revocation_list(void **state)
+{
+    (void)state;
+
+    assert_true(provider_policy_principal_valid(test_revocation_principal));
+    assert_false(provider_policy_principal_valid(""));
+    assert_false(provider_policy_principal_valid("alice example.test"));
+
+    struct provider_policy_principal_list list = { 0 };
+    assert_false(provider_policy_principal_list_defined(&list));
+    assert_true(provider_policy_principal_list_add_runtime(
+        &list, test_revocation_principal));
+    assert_true(provider_policy_principal_list_defined(&list));
+    assert_int_equal(list.count, 1);
+    assert_true(provider_policy_principal_list_contains(
+        &list, test_revocation_principal));
+    assert_false(provider_policy_principal_list_contains(
+        &list, "Alice@example.test"));
+
+    assert_true(provider_policy_principal_list_add_runtime(
+        &list, test_revocation_principal));
+    assert_int_equal(list.count, 1);
+    assert_false(provider_policy_principal_list_add_runtime(
+        &list, "bad principal"));
+
+    provider_policy_principal_list_free_runtime(&list);
+    assert_false(provider_policy_principal_list_defined(&list));
+    assert_int_equal(list.count, 0);
+}
+
+static void
+test_provider_policy_principal_revocation_file_load(void **state)
+{
+    (void)state;
+
+    char path[] = "provider-policy-principal-revocations-XXXXXX";
+    const int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    FILE *fp = fdopen(fd, "w");
+    assert_non_null(fp);
+    assert_true(fprintf(fp,
+                        "# comment\n"
+                        "\n"
+                        "  %s  # inline comment\n"
+                        "bob@example.test\n"
+                        "%s\n",
+                        test_revocation_principal,
+                        test_revocation_principal) > 0);
+    assert_int_equal(fclose(fp), 0);
+
+    struct provider_policy_principal_list list = { 0 };
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    size_t loaded_count = 0;
+    assert_true(provider_policy_principal_list_load_runtime(
+        &list, path, reason, sizeof(reason), &loaded_count));
+    assert_int_equal(loaded_count, 2);
+    assert_true(provider_policy_principal_list_contains(
+        &list, test_revocation_principal));
+    assert_true(provider_policy_principal_list_contains(
+        &list, "bob@example.test"));
+    assert_string_equal(reason, "ok");
+
+    provider_policy_principal_list_free_runtime(&list);
+    assert_int_equal(unlink(path), 0);
+}
+
+static void
+test_provider_policy_principal_revocation_file_rejects_invalid(void **state)
+{
+    (void)state;
+
+    char path[] = "provider-policy-bad-principal-revocations-XXXXXX";
+    const int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    FILE *fp = fdopen(fd, "w");
+    assert_non_null(fp);
+    assert_true(fprintf(fp, "alice example.test\n") > 0);
+    assert_int_equal(fclose(fp), 0);
+
+    struct provider_policy_principal_list list = { 0 };
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    assert_false(provider_policy_principal_list_load_runtime(
+        &list, path, reason, sizeof(reason), NULL));
+    assert_non_null(strstr(reason, "invalid principal"));
+    assert_false(provider_policy_principal_list_defined(&list));
+
+    assert_int_equal(unlink(path), 0);
+}
+
+static void
+test_provider_policy_principal_revocation_file_append(void **state)
+{
+    (void)state;
+
+    char path[] = "provider-policy-append-principal-revocations-XXXXXX";
+    const int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    close(fd);
+
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    assert_true(provider_policy_principal_list_append_file(
+        path, test_revocation_principal, reason, sizeof(reason)));
+    assert_string_equal(reason, "ok");
+
+    struct provider_policy_principal_list list = { 0 };
+    size_t loaded_count = 0;
+    assert_true(provider_policy_principal_list_load_runtime(
+        &list, path, reason, sizeof(reason), &loaded_count));
+    assert_int_equal(loaded_count, 1);
+    assert_true(provider_policy_principal_list_contains(
+        &list, test_revocation_principal));
+
+    provider_policy_principal_list_free_runtime(&list);
+    assert_int_equal(unlink(path), 0);
+}
+
+static void
 test_provider_policy_authorize_fails_closed(void **state)
 {
     (void)state;
@@ -443,6 +561,46 @@ test_provider_policy_authorize_fails_closed(void **state)
     assert_false(provider_policy_authorize(&context, &result));
     assert_int_equal(result.status, PROVIDER_POLICY_AUTH_DENIED);
     assert_non_null(strstr(result.reason, "not allowed"));
+}
+
+static void
+test_provider_policy_authorize_rejects_revoked_principal(void **state)
+{
+    (void)state;
+
+    struct provider_policy_fingerprint_entry allowed_entry = {
+        .credential_fingerprint = "SHA256:ABCD",
+    };
+    struct provider_policy_fingerprint_list allowed = {
+        .head = &allowed_entry,
+        .tail = &allowed_entry,
+        .count = 1,
+    };
+    struct provider_policy_principal_entry revoked_entry = {
+        .principal = test_revocation_principal,
+    };
+    struct provider_policy_principal_list revoked = {
+        .head = &revoked_entry,
+        .tail = &revoked_entry,
+        .count = 1,
+    };
+    struct provider_policy_auth_context context = {
+        .profile_mode = PROVIDER_POLICY_PROFILE_EAP_TLS,
+        .principal = test_revocation_principal,
+        .credential_fingerprint = "SHA256:ABCD",
+        .cert_serial = "1234",
+        .cert_issuer = "CN=Example CA",
+        .allowed_fingerprints = &allowed,
+        .revoked_principals = &revoked,
+        .policy_revision = 9,
+    };
+    struct provider_policy_auth_result result;
+
+    assert_false(provider_policy_authorize(&context, &result));
+    assert_int_equal(result.status, PROVIDER_POLICY_AUTH_DENIED);
+    assert_non_null(strstr(result.reason, "principal"));
+    assert_non_null(strstr(result.reason, "revoked"));
+    assert_int_equal(result.policy_revision, 0);
 }
 
 static void
@@ -534,7 +692,13 @@ main(void)
         cmocka_unit_test(test_provider_policy_revocation_file_load),
         cmocka_unit_test(test_provider_policy_revocation_file_rejects_invalid),
         cmocka_unit_test(test_provider_policy_revocation_file_append),
+        cmocka_unit_test(test_provider_policy_principal_revocation_list),
+        cmocka_unit_test(test_provider_policy_principal_revocation_file_load),
+        cmocka_unit_test(
+            test_provider_policy_principal_revocation_file_rejects_invalid),
+        cmocka_unit_test(test_provider_policy_principal_revocation_file_append),
         cmocka_unit_test(test_provider_policy_authorize_fails_closed),
+        cmocka_unit_test(test_provider_policy_authorize_rejects_revoked_principal),
         cmocka_unit_test(test_provider_policy_authorize_rejects_revoked_fingerprint),
         cmocka_unit_test(test_provider_policy_authorize_allowlisted_fingerprint),
     };

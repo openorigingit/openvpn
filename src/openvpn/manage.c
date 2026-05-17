@@ -130,6 +130,7 @@ man_help(void)
     msg(M_CLIENT, "client-kill CID [M]    : Kill client instance CID with message M (def=RESTART)");
     msg(M_CLIENT, "provider-revoke CID [M]: Revoke provider session credential and kill CID");
     msg(M_CLIENT, "provider-revoke-fingerprint FPR [M]: Revoke provider credential fingerprint");
+    msg(M_CLIENT, "provider-revoke-principal P [M]: Revoke provider principal");
     msg(M_CLIENT, "env-filter [level]     : Set env-var filter level");
     msg(M_CLIENT, "rsa-sig                : Enter a signature in response to >RSA_SIGN challenge");
     msg(M_CLIENT,
@@ -1329,6 +1330,30 @@ man_provider_revoke_fingerprint(struct management *man,
 }
 
 static void
+man_provider_revoke_principal(struct management *man, const char *principal,
+                              const char *reason)
+{
+    if (man->persist.callback.provider_revoke_by_principal)
+    {
+        const bool status =
+            (*man->persist.callback.provider_revoke_by_principal)(
+                man->persist.callback.arg, principal, reason);
+        if (status)
+        {
+            msg(M_CLIENT, "SUCCESS: provider-revoke-principal command succeeded");
+        }
+        else
+        {
+            msg(M_CLIENT, "ERROR: provider-revoke-principal command failed");
+        }
+    }
+    else
+    {
+        man_command_unsupported("provider-revoke-principal");
+    }
+}
+
+static void
 man_client_n_clients(struct management *man)
 {
     if (man->persist.callback.n_clients)
@@ -1800,6 +1825,13 @@ man_dispatch_command(struct management *man, struct status_output *so, const cha
         if (man_need(man, p, 1, MN_AT_LEAST))
         {
             man_provider_revoke_fingerprint(man, p[1], p[2]);
+        }
+    }
+    else if (streq(p[0], "provider-revoke-principal"))
+    {
+        if (man_need(man, p, 1, MN_AT_LEAST))
+        {
+            man_provider_revoke_principal(man, p[1], p[2]);
         }
     }
     else if (streq(p[0], "client-deny"))

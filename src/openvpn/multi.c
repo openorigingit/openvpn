@@ -1374,6 +1374,7 @@ multi_ikev2_helper_auth_request(void *arg,
         .cert_issuer = request->cert_issuer_len ? cert_issuer : NULL,
         .allowed_fingerprints = &m->top.options.ikev2_helper_allowed_fingerprints,
         .revoked_fingerprints = &m->provider_revoked_fingerprints,
+        .revoked_principals = &m->provider_revoked_principals,
         .policy_revision = m->provider_policy_revision,
     };
     struct provider_policy_auth_result result;
@@ -1520,6 +1521,33 @@ multi_init(struct context *t)
             "IKEv2 helper loaded %zu revoked credential fingerprint%s from %s, policy revision %" PRIu64,
             loaded_count, loaded_count == 1 ? "" : "s",
             t->options.ikev2_helper_revocation_file,
+            m->provider_policy_revision);
+    }
+    if (t->options.ikev2_helper_principal_revocation_file)
+    {
+        char reason[PROVIDER_POLICY_REASON_SIZE];
+        size_t loaded_count = 0;
+        if (!provider_policy_principal_list_load_runtime(
+                &m->provider_revoked_principals,
+                t->options.ikev2_helper_principal_revocation_file,
+                reason, sizeof(reason), &loaded_count))
+        {
+            msg(M_FATAL,
+                "IKEv2 helper principal revocation file load failed: %s",
+                reason);
+        }
+        if (UINT64_MAX - m->provider_policy_revision < loaded_count)
+        {
+            m->provider_policy_revision = UINT64_MAX;
+        }
+        else
+        {
+            m->provider_policy_revision += loaded_count;
+        }
+        msg(M_INFO,
+            "IKEv2 helper loaded %zu revoked principal%s from %s, policy revision %" PRIu64,
+            loaded_count, loaded_count == 1 ? "" : "s",
+            t->options.ikev2_helper_principal_revocation_file,
             m->provider_policy_revision);
     }
 
@@ -1919,6 +1947,8 @@ multi_uninit(struct multi_context *m)
         multi_ikev2_helper_listener_fds_close(m);
         provider_policy_fingerprint_list_free_runtime(
             &m->provider_revoked_fingerprints);
+        provider_policy_principal_list_free_runtime(
+            &m->provider_revoked_principals);
         provider_session_table_free(&m->provider_sessions);
 
         hash_free(m->hash);
@@ -5342,6 +5372,65 @@ management_provider_revoke_fingerprint(void *arg,
 }
 
 static bool
+management_provider_revoke_principal(void *arg, const char *principal,
+                                     const char *reason)
+{
+    struct multi_context *m = (struct multi_context *)arg;
+    if (!provider_policy_principal_valid(principal))
+    {
+        return false;
+    }
+
+    const bool already_revoked =
+        provider_policy_principal_list_contains(&m->provider_revoked_principals,
+                                                principal);
+    if (!already_revoked
+        && m->top.options.ikev2_helper_principal_revocation_file)
+    {
+        char file_reason[PROVIDER_POLICY_REASON_SIZE];
+        if (!provider_policy_principal_list_append_file(
+                m->top.options.ikev2_helper_principal_revocation_file,
+                principal, file_reason, sizeof(file_reason)))
+        {
+            msg(M_WARN,
+                "MANAGEMENT: provider principal revocation was not persisted: %s",
+                file_reason);
+            return false;
+        }
+    }
+
+    if (!provider_policy_principal_list_add_runtime(
+            &m->provider_revoked_principals, principal))
+    {
+        return false;
+    }
+    if (!already_revoked && m->provider_policy_revision < UINT64_MAX)
+    {
+        ++m->provider_policy_revision;
+    }
+
+    const char *revoke_reason =
+        reason && *reason ? reason : "provider principal revoked";
+    unsigned int killed = 0;
+    for (struct provider_session *session = m->provider_sessions.head; session;)
+    {
+        struct provider_session *next = session->next;
+        const unsigned long cid = session->management_cid;
+        if (session->principal && strcmp(session->principal, principal) == 0
+            && management_kill_provider_session_by_cid(m, cid, revoke_reason))
+        {
+            ++killed;
+        }
+        session = next;
+    }
+
+    msg(M_INFO,
+        "MANAGEMENT: provider principal revoked, killed %u active provider session%s, policy revision %" PRIu64,
+        killed, killed == 1 ? "" : "s", m->provider_policy_revision);
+    return true;
+}
+
+static bool
 management_provider_revoke_by_cid(void *arg, const unsigned long cid,
                                   const char *reason)
 {
@@ -5481,6 +5570,7 @@ init_management_callback_multi(struct multi_context *m)
         cb.provider_revoke_by_cid = management_provider_revoke_by_cid;
         cb.provider_revoke_by_fingerprint =
             management_provider_revoke_fingerprint;
+        cb.provider_revoke_by_principal = management_provider_revoke_principal;
         cb.client_auth = management_client_auth;
         cb.client_pending_auth = management_client_pending_auth;
         cb.get_peer_info = management_get_peer_info;

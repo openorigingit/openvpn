@@ -199,6 +199,7 @@ struct multi_context
     bool provider_helper_server_auth_config_sent;
     struct provider_session_table provider_sessions;
     struct provider_policy_fingerprint_list provider_revoked_fingerprints;
+    struct provider_policy_principal_list provider_revoked_principals;
     uint64_t provider_policy_revision;
 
 #ifdef ENABLE_MANAGEMENT
