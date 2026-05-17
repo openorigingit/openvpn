@@ -27,6 +27,10 @@
 
 struct status_output;
 
+#ifndef PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX
+#define PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX 4
+#endif
+
 struct provider_session_xfrm_lease {
     uint64_t lease_id;
     uint64_t provider_session_id;
@@ -48,6 +52,8 @@ struct provider_session_xfrm_lease {
     uint32_t remote_ts_start_port;
     uint32_t remote_ts_end_port;
     uint32_t ip_protocol_id;
+    uint32_t dns4_server_count;
+    uint32_t dns4_servers[PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX];
     uint32_t reserved;
 };
 

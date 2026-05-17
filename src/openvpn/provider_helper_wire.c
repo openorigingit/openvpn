@@ -356,6 +356,22 @@ provider_helper_xfrm_lease_valid(const struct provider_helper_xfrm_lease *lease,
                                       "unsupported XFRM lease flags");
         return false;
     }
+    if (lease->dns4_server_count > PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "too many XFRM lease DNS servers");
+        return false;
+    }
+    for (size_t i = 0; i < lease->dns4_server_count; ++i)
+    {
+        if (!lease->dns4_servers[i])
+        {
+            provider_helper_config_reason(
+                reason, reason_size,
+                "XFRM lease DNS server must be a nonzero IPv4 address");
+            return false;
+        }
+    }
     if ((lease->address_family == AF_INET
          && lease->flags != PROVIDER_HELPER_XFRM_LEASE_IPV4)
         || (lease->address_family == AF_INET6
@@ -1561,6 +1577,11 @@ provider_helper_ipc_encode_xfrm_lease(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u32(&pos, lease->remote_ts_start_port);
     provider_helper_wire_write_u32(&pos, lease->remote_ts_end_port);
     provider_helper_wire_write_u32(&pos, lease->ip_protocol_id);
+    provider_helper_wire_write_u32(&pos, lease->dns4_server_count);
+    for (size_t i = 0; i < PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX; ++i)
+    {
+        provider_helper_wire_write_u32(&pos, lease->dns4_servers[i]);
+    }
     provider_helper_wire_write_u32(&pos, lease->reserved);
 
     return (size_t)(pos - dst) == PROVIDER_HELPER_XFRM_LEASE_SIZE;
@@ -1597,6 +1618,11 @@ provider_helper_ipc_decode_xfrm_lease(const uint8_t *src, size_t src_len,
     lease->remote_ts_start_port = provider_helper_wire_read_u32(&pos);
     lease->remote_ts_end_port = provider_helper_wire_read_u32(&pos);
     lease->ip_protocol_id = provider_helper_wire_read_u32(&pos);
+    lease->dns4_server_count = provider_helper_wire_read_u32(&pos);
+    for (size_t i = 0; i < PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX; ++i)
+    {
+        lease->dns4_servers[i] = provider_helper_wire_read_u32(&pos);
+    }
     lease->reserved = provider_helper_wire_read_u32(&pos);
 
     return (size_t)(pos - src) == PROVIDER_HELPER_XFRM_LEASE_SIZE;

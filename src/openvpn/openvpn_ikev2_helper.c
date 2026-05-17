@@ -6258,7 +6258,6 @@ ikev2_helper_stage_initial_cp_request(
             case PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_ADDRESS:
                 requested_ipv4_address = true;
                 break;
-
         }
         pos += attr_len;
     }
@@ -9331,6 +9330,8 @@ ikev2_helper_build_ipv4_cp_reply_payload(uint8_t *dst,
                                          uint32_t subnet_address,
                                          uint32_t subnet_netmask,
                                          bool include_subnet,
+                                         const uint32_t *dns4_servers,
+                                         size_t dns4_server_count,
                                          size_t *payload_len)
 {
     if (payload_len)
@@ -9339,10 +9340,16 @@ ikev2_helper_build_ipv4_cp_reply_payload(uint8_t *dst,
     }
     const size_t address_attr_len = 4u + 4u;
     const size_t subnet_attr_len = 4u + 8u;
+    const size_t dns4_attr_len = 4u + 4u;
+    if (dns4_server_count > PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX)
+    {
+        return false;
+    }
     const size_t total_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
                              + PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE
                              + address_attr_len
-                             + (include_subnet ? subnet_attr_len : 0u);
+                             + (include_subnet ? subnet_attr_len : 0u)
+                             + (dns4_server_count * dns4_attr_len);
     if (!dst || !payload_len || total_len > UINT16_MAX
         || dst_size < total_len)
     {
@@ -9368,6 +9375,18 @@ ikev2_helper_build_ipv4_cp_reply_payload(uint8_t *dst,
         ikev2_helper_write_be16(&pos, 8);
         ikev2_helper_write_be32(&pos, subnet_address);
         ikev2_helper_write_be32(&pos, subnet_netmask);
+    }
+    for (size_t i = 0; i < dns4_server_count; ++i)
+    {
+        if (!dns4_servers || !dns4_servers[i])
+        {
+            memset(dst, 0, dst_size);
+            return false;
+        }
+        ikev2_helper_write_be16(
+            &pos, PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_DNS);
+        ikev2_helper_write_be16(&pos, 4);
+        ikev2_helper_write_be32(&pos, dns4_servers[i]);
     }
     if ((size_t)(pos - dst) != total_len)
     {
@@ -9399,7 +9418,8 @@ ikev2_helper_build_final_auth_child_sa_plaintext(
 
     uint8_t auth_data[IKEV2_HELPER_PRF_SHA256_BYTES];
     uint8_t cp_payload[PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
-                       + PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE + 8 + 12];
+                       + PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE + 8 + 12
+                       + (PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX * 8)];
     uint8_t child_payloads[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     size_t cp_payload_len = 0;
     size_t child_payloads_len = 0;
@@ -9437,7 +9457,8 @@ ikev2_helper_build_final_auth_child_sa_plaintext(
                 cp_payload, sizeof(cp_payload),
                 PROVIDER_HELPER_IKEV2_PAYLOAD_SA, cp_ipv4_address,
                 cp_ipv4_subnet_address, cp_ipv4_subnet_netmask,
-                include_cp_subnet,
+                include_cp_subnet, child->xfrm_lease.dns4_servers,
+                child->xfrm_lease.dns4_server_count,
                 &cp_payload_len);
         }
     }

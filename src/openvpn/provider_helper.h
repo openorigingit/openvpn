@@ -37,7 +37,11 @@
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 60
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
 #define PROVIDER_HELPER_RUNTIME_STATS_SIZE  920
-#define PROVIDER_HELPER_XFRM_LEASE_SIZE     104
+#ifndef PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX
+#define PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX 4
+#endif
+#define PROVIDER_HELPER_XFRM_LEASE_SIZE \
+    (104 + 4 + (PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX * 4))
 #define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
 #define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
 #define PROVIDER_HELPER_AUTH_SERIAL_SIZE      128
@@ -611,6 +615,8 @@ struct provider_helper_xfrm_lease {
     uint32_t remote_ts_start_port;
     uint32_t remote_ts_end_port;
     uint32_t ip_protocol_id;
+    uint32_t dns4_server_count;
+    uint32_t dns4_servers[PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX];
     uint32_t reserved;
 };
 

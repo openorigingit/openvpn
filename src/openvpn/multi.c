@@ -894,6 +894,9 @@ multi_ikev2_helper_copy_xfrm_lease(struct provider_helper_xfrm_lease *dst,
     dst->remote_ts_start_port = src->remote_ts_start_port;
     dst->remote_ts_end_port = src->remote_ts_end_port;
     dst->ip_protocol_id = src->ip_protocol_id;
+    dst->dns4_server_count = src->dns4_server_count;
+    memcpy(dst->dns4_servers, src->dns4_servers,
+           sizeof(dst->dns4_servers));
 }
 
 static void
@@ -1104,6 +1107,7 @@ multi_ikev2_helper_build_xfrm_lease(
     in_addr_t local_ipv4,
     in_addr_t remote_ipv4,
     bool full_tunnel,
+    const struct provider_policy_artifacts *artifacts,
     struct provider_session_xfrm_lease *lease)
 {
     uint32_t xfrm_id = 0;
@@ -1132,6 +1136,23 @@ multi_ikev2_helper_build_xfrm_lease(
     lease->remote_ts_start_port = 0;
     lease->remote_ts_end_port = 65535;
     lease->ip_protocol_id = 0;
+    if (artifacts)
+    {
+        const size_t dns_count =
+            artifacts->dns_server_count < PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX
+            ? artifacts->dns_server_count
+            : PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX;
+        for (size_t i = 0; i < dns_count; ++i)
+        {
+            struct in_addr addr;
+            if (inet_pton(AF_INET, artifacts->dns_servers[i], &addr) != 1)
+            {
+                return false;
+            }
+            lease->dns4_servers[i] = ntohl(addr.s_addr);
+        }
+        lease->dns4_server_count = (uint32_t)dns_count;
+    }
     return true;
 }
 
@@ -1239,6 +1260,19 @@ multi_ikev2_helper_authorize_session(
         .has_address_pool_handle = true,
         .now = now,
     };
+
+    struct provider_policy_artifacts artifacts;
+    struct provider_policy_preflight artifact_result;
+    if (!provider_policy_build_artifacts(&m->top.options.push_list, &artifacts,
+                                         &artifact_result))
+    {
+        gc_free(&gc);
+        ifconfig_pool_release(m->ifconfig_pool, pool_handle, true);
+        multi_ikev2_helper_auth_deny(response, request->request_id,
+                                     artifact_result.reason);
+        return true;
+    }
+
     struct provider_session *session =
         provider_session_create(&m->provider_sessions, &create);
     gc_free(&gc);
@@ -1255,7 +1289,7 @@ multi_ikev2_helper_authorize_session(
     struct provider_helper_xfrm_lease helper_lease;
     if (!multi_ikev2_helper_build_xfrm_lease(
             session, policy_revision, local_ts, pool_remote, full_tunnel,
-            &session_lease)
+            &artifacts, &session_lease)
         || !provider_session_set_xfrm_lease(session, &session_lease))
     {
         multi_ikev2_helper_release_session_address(m, session, true);

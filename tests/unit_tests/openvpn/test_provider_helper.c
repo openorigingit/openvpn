@@ -1023,6 +1023,8 @@ test_provider_helper_xfrm_lease_roundtrip(void **state)
         .remote_ts_start_port = 0,
         .remote_ts_end_port = 65535,
         .ip_protocol_id = 0,
+        .dns4_server_count = 2,
+        .dns4_servers = { 0x01010101, 0x08080808 },
     };
     struct provider_helper_runtime_config config;
     struct provider_helper_xfrm_lease output;
@@ -1055,6 +1057,9 @@ test_provider_helper_xfrm_lease_roundtrip(void **state)
     assert_int_equal(output.remote_ts_start_port, input.remote_ts_start_port);
     assert_int_equal(output.remote_ts_end_port, input.remote_ts_end_port);
     assert_int_equal(output.ip_protocol_id, input.ip_protocol_id);
+    assert_int_equal(output.dns4_server_count, input.dns4_server_count);
+    assert_memory_equal(output.dns4_servers, input.dns4_servers,
+                        sizeof(input.dns4_servers));
 
     input.mark_mask = 0;
     assert_true(provider_helper_xfrm_lease_valid(&input, reason, sizeof(reason)));
@@ -6246,8 +6251,16 @@ test_recv_ikev2_encrypted_final_auth_child_sa_response(
                      TEST_IKEV2_AUTH_METHOD_SHARED_KEY_MIC);
 
     assert_int_equal(summary.cp_count, 1);
+    const bool expect_subnet =
+        lease->local_ts_start_ipv4 == lease->local_ts_end_ipv4;
+    const size_t expected_cp_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+        + PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE
+        + 8
+        + (expect_subnet ? 12 : 0)
+        + (lease->dns4_server_count * 8);
     assert_int_equal(summary.cp_len,
-                     TEST_IKEV2_CP_IPV4_REPLY_PAYLOAD_LEN
+                     expected_cp_payload_len
                      - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE);
     assert_int_equal(packet[summary.cp_offset],
                      PROVIDER_HELPER_IKEV2_CFG_REPLY);
@@ -6261,14 +6274,27 @@ test_recv_ikev2_encrypted_final_auth_child_sa_response(
     assert_int_equal(test_read_be16(packet + cp_attr + 2), 4);
     assert_int_equal(test_read_be32(packet + cp_attr + 4),
                      lease->remote_ts_start_ipv4);
-    const size_t cp_subnet_attr = cp_attr + 8;
-    assert_int_equal(test_read_be16(packet + cp_subnet_attr),
-                     PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_SUBNET);
-    assert_int_equal(test_read_be16(packet + cp_subnet_attr + 2), 8);
-    assert_int_equal(test_read_be32(packet + cp_subnet_attr + 4),
-                     lease->local_ts_start_ipv4);
-    assert_int_equal(test_read_be32(packet + cp_subnet_attr + 8),
-                     0xffffffffu);
+    size_t next_cp_attr = cp_attr + 8;
+    if (expect_subnet)
+    {
+        assert_int_equal(test_read_be16(packet + next_cp_attr),
+                         PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_SUBNET);
+        assert_int_equal(test_read_be16(packet + next_cp_attr + 2), 8);
+        assert_int_equal(test_read_be32(packet + next_cp_attr + 4),
+                         lease->local_ts_start_ipv4);
+        assert_int_equal(test_read_be32(packet + next_cp_attr + 8),
+                         0xffffffffu);
+        next_cp_attr += 12;
+    }
+    for (size_t i = 0; i < lease->dns4_server_count; ++i)
+    {
+        assert_int_equal(test_read_be16(packet + next_cp_attr),
+                         PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_DNS);
+        assert_int_equal(test_read_be16(packet + next_cp_attr + 2), 4);
+        assert_int_equal(test_read_be32(packet + next_cp_attr + 4),
+                         lease->dns4_servers[i]);
+        next_cp_attr += 8;
+    }
 
     struct provider_helper_ikev2_child_sa_selection selected;
     assert_int_equal(provider_helper_ikev2_select_child_sa_proposal(
@@ -8306,6 +8332,8 @@ test_provider_helper_spawn_rejects_expired_xfrm_lease(void **state)
         .remote_ts_start_port = 0,
         .remote_ts_end_port = 65535,
         .ip_protocol_id = 0,
+        .dns4_server_count = 1,
+        .dns4_servers = { 0x01010101 },
     };
     assert_true(provider_helper_supervisor_send_xfrm_lease(&supervisor,
                                                            &xfrm_lease, 91));
@@ -9552,6 +9580,8 @@ test_provider_helper_spawn_ikev2_scaffold(void **state)
         .remote_ts_start_port = 0,
         .remote_ts_end_port = 65535,
         .ip_protocol_id = 0,
+        .dns4_server_count = 1,
+        .dns4_servers = { 0x01010101 },
     };
     assert_true(provider_helper_supervisor_send_xfrm_lease(&supervisor, &xfrm_lease,
                                                            99));
@@ -9999,6 +10029,8 @@ test_provider_helper_spawn_ikev2_eap_tls_auth_allow_success(void **state)
         .remote_ts_start_port = 0,
         .remote_ts_end_port = 65535,
         .ip_protocol_id = 0,
+        .dns4_server_count = 1,
+        .dns4_servers = { 0x01010101 },
     };
     uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
     assert_true(provider_helper_supervisor_send_xfrm_lease(
