@@ -85,6 +85,8 @@ provider_session_free(struct provider_session *session)
     free(session->provider_name);
     free(session->principal);
     free(session->credential_fingerprint);
+    free(session->cert_serial);
+    free(session->cert_issuer);
     free(session->assigned_address);
     free(session->authorized_selectors);
     free(session->helper_state);
@@ -196,6 +198,10 @@ provider_session_create(struct provider_session_table *table,
         || !provider_session_replace_string(&session->principal, create->principal)
         || !provider_session_replace_string(&session->credential_fingerprint,
                                             create->credential_fingerprint)
+        || !provider_session_replace_string(&session->cert_serial,
+                                            create->cert_serial)
+        || !provider_session_replace_string(&session->cert_issuer,
+                                            create->cert_issuer)
         || !provider_session_replace_string(&session->assigned_address,
                                             create->assigned_address)
         || !provider_session_replace_string(&session->authorized_selectors,

@@ -129,6 +129,7 @@ man_help(void)
         "                                      to the client and wait for a final client-auth/client-deny");
     msg(M_CLIENT, "client-kill CID [M]    : Kill client instance CID with message M (def=RESTART)");
     msg(M_CLIENT, "provider-revoke CID [M]: Revoke provider session credential and kill CID");
+    msg(M_CLIENT, "provider-revoke-cert CID [M]: Revoke provider session certificate identity");
     msg(M_CLIENT, "provider-revoke-fingerprint FPR [M]: Revoke provider credential fingerprint");
     msg(M_CLIENT, "provider-revoke-principal P [M]: Revoke provider principal");
     msg(M_CLIENT, "env-filter [level]     : Set env-var filter level");
@@ -1304,6 +1305,35 @@ man_provider_revoke(struct management *man, const char *cid_str,
 }
 
 static void
+man_provider_revoke_cert(struct management *man, const char *cid_str,
+                         const char *reason)
+{
+    unsigned long cid = 0;
+    if (parse_cid(cid_str, &cid))
+    {
+        if (man->persist.callback.provider_revoke_cert_by_cid)
+        {
+            const bool status =
+                (*man->persist.callback.provider_revoke_cert_by_cid)(
+                    man->persist.callback.arg, cid, reason);
+            if (status)
+            {
+                msg(M_CLIENT,
+                    "SUCCESS: provider-revoke-cert command succeeded");
+            }
+            else
+            {
+                msg(M_CLIENT, "ERROR: provider-revoke-cert command failed");
+            }
+        }
+        else
+        {
+            man_command_unsupported("provider-revoke-cert");
+        }
+    }
+}
+
+static void
 man_provider_revoke_fingerprint(struct management *man,
                                 const char *credential_fingerprint,
                                 const char *reason)
@@ -1818,6 +1848,13 @@ man_dispatch_command(struct management *man, struct status_output *so, const cha
         if (man_need(man, p, 1, MN_AT_LEAST))
         {
             man_provider_revoke(man, p[1], p[2]);
+        }
+    }
+    else if (streq(p[0], "provider-revoke-cert"))
+    {
+        if (man_need(man, p, 1, MN_AT_LEAST))
+        {
+            man_provider_revoke_cert(man, p[1], p[2]);
         }
     }
     else if (streq(p[0], "provider-revoke-fingerprint"))

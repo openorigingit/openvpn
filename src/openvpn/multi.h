@@ -200,6 +200,7 @@ struct multi_context
     struct provider_session_table provider_sessions;
     struct provider_policy_fingerprint_list provider_revoked_fingerprints;
     struct provider_policy_principal_list provider_revoked_principals;
+    struct provider_policy_cert_list provider_revoked_certs;
     uint64_t provider_policy_revision;
 
 #ifdef ENABLE_MANAGEMENT

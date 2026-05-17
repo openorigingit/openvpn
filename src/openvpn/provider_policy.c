@@ -894,6 +894,414 @@ provider_policy_principal_list_append_file(const char *path,
     return true;
 }
 
+bool
+provider_policy_cert_serial_valid(const char *serial)
+{
+    if (!serial || !*serial)
+    {
+        return false;
+    }
+
+    const size_t len = strlen(serial);
+    if (len >= PROVIDER_POLICY_CERT_SERIAL_SIZE)
+    {
+        return false;
+    }
+
+    for (const char *pos = serial; *pos; ++pos)
+    {
+        const unsigned char ch = (unsigned char)*pos;
+        if (ch <= ' ' || ch >= 0x7f)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool
+provider_policy_cert_issuer_valid(const char *issuer)
+{
+    if (!issuer || !*issuer)
+    {
+        return false;
+    }
+
+    const size_t len = strlen(issuer);
+    if (len >= PROVIDER_POLICY_CERT_ISSUER_SIZE)
+    {
+        return false;
+    }
+
+    for (const char *pos = issuer; *pos; ++pos)
+    {
+        const unsigned char ch = (unsigned char)*pos;
+        if (ch < ' ' || ch >= 0x7f)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool
+provider_policy_cert_list_defined(const struct provider_policy_cert_list *list)
+{
+    return list && list->head;
+}
+
+bool
+provider_policy_cert_list_contains(const struct provider_policy_cert_list *list,
+                                   const char *serial,
+                                   const char *issuer)
+{
+    if (!provider_policy_cert_serial_valid(serial)
+        || !provider_policy_cert_issuer_valid(issuer))
+    {
+        return false;
+    }
+
+    for (const struct provider_policy_cert_entry *entry =
+             list ? list->head : NULL;
+         entry;
+         entry = entry->next)
+    {
+        if (entry->serial && entry->issuer
+            && strcasecmp(entry->serial, serial) == 0
+            && strcmp(entry->issuer, issuer) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool
+provider_policy_cert_list_add_runtime(struct provider_policy_cert_list *list,
+                                      const char *serial,
+                                      const char *issuer)
+{
+    if (!list || !provider_policy_cert_serial_valid(serial)
+        || !provider_policy_cert_issuer_valid(issuer))
+    {
+        return false;
+    }
+
+    if (provider_policy_cert_list_contains(list, serial, issuer))
+    {
+        return true;
+    }
+
+    struct provider_policy_cert_entry *entry;
+    ALLOC_OBJ_CLEAR(entry, struct provider_policy_cert_entry);
+    entry->serial = string_alloc(serial, NULL);
+    entry->issuer = string_alloc(issuer, NULL);
+    if (!entry->serial || !entry->issuer)
+    {
+        free((char *)entry->serial);
+        free((char *)entry->issuer);
+        free(entry);
+        return false;
+    }
+
+    if (list->tail)
+    {
+        list->tail->next = entry;
+    }
+    else
+    {
+        list->head = entry;
+    }
+    list->tail = entry;
+    ++list->count;
+    return true;
+}
+
+void
+provider_policy_cert_list_free_runtime(struct provider_policy_cert_list *list)
+{
+    if (!list)
+    {
+        return;
+    }
+
+    struct provider_policy_cert_entry *entry = list->head;
+    while (entry)
+    {
+        struct provider_policy_cert_entry *next = entry->next;
+        free((char *)entry->serial);
+        free((char *)entry->issuer);
+        free(entry);
+        entry = next;
+    }
+    CLEAR(*list);
+}
+
+static char *
+provider_policy_trim_cert_revocation_line(char *line)
+{
+    char *start = line;
+    while (*start == ' ' || *start == '\t')
+    {
+        ++start;
+    }
+
+    if (*start == '#')
+    {
+        *start = '\0';
+        return start;
+    }
+
+    char *end = start + strlen(start);
+    while (end > start
+           && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r'
+               || end[-1] == '\n'))
+    {
+        --end;
+    }
+    *end = '\0';
+    return start;
+}
+
+bool
+provider_policy_cert_list_load_runtime(struct provider_policy_cert_list *list,
+                                       const char *path,
+                                       char *reason,
+                                       size_t reason_size,
+                                       size_t *loaded_count)
+{
+    if (loaded_count)
+    {
+        *loaded_count = 0;
+    }
+    provider_policy_set_reason(reason, reason_size, "ok");
+
+    if (!list || !path || !*path)
+    {
+        provider_policy_set_reason(reason, reason_size,
+                                   "missing certificate revocation file path");
+        return false;
+    }
+
+    FILE *fp = platform_fopen(path, "r");
+    if (!fp)
+    {
+        const int open_errno = errno;
+        if (open_errno == ENOENT)
+        {
+            return true;
+        }
+
+        provider_policy_set_reason(
+            reason, reason_size,
+            "could not open certificate revocation file '%s': %s",
+            path, strerror(open_errno));
+        return false;
+    }
+
+    char line[1024];
+    size_t line_number = 0;
+    struct provider_policy_cert_list loaded = { 0 };
+    while (fgets(line, sizeof(line), fp))
+    {
+        ++line_number;
+        const size_t len = strlen(line);
+        if (len && line[len - 1] != '\n' && !feof(fp))
+        {
+            provider_policy_set_reason(
+                reason, reason_size,
+                "certificate revocation file '%s' line %zu is too long",
+                path, line_number);
+            provider_policy_cert_list_free_runtime(&loaded);
+            fclose(fp);
+            return false;
+        }
+
+        char *entry = provider_policy_trim_cert_revocation_line(line);
+        if (!*entry)
+        {
+            continue;
+        }
+
+        char *issuer = strchr(entry, '\t');
+        if (!issuer)
+        {
+            provider_policy_set_reason(
+                reason, reason_size,
+                "certificate revocation file '%s' line %zu is missing issuer",
+                path, line_number);
+            provider_policy_cert_list_free_runtime(&loaded);
+            fclose(fp);
+            return false;
+        }
+        *issuer++ = '\0';
+
+        if (!provider_policy_cert_serial_valid(entry)
+            || !provider_policy_cert_issuer_valid(issuer))
+        {
+            provider_policy_set_reason(
+                reason, reason_size,
+                "certificate revocation file '%s' line %zu is invalid",
+                path, line_number);
+            provider_policy_cert_list_free_runtime(&loaded);
+            fclose(fp);
+            return false;
+        }
+
+        if (!provider_policy_cert_list_add_runtime(&loaded, entry, issuer))
+        {
+            provider_policy_set_reason(
+                reason, reason_size,
+                "certificate revocation file '%s' line %zu could not be loaded",
+                path, line_number);
+            provider_policy_cert_list_free_runtime(&loaded);
+            fclose(fp);
+            return false;
+        }
+    }
+
+    if (ferror(fp))
+    {
+        const int read_errno = errno;
+        provider_policy_set_reason(
+            reason, reason_size,
+            "could not read certificate revocation file '%s': %s",
+            path, strerror(read_errno));
+        provider_policy_cert_list_free_runtime(&loaded);
+        fclose(fp);
+        return false;
+    }
+
+    if (fclose(fp) != 0)
+    {
+        const int close_errno = errno;
+        provider_policy_set_reason(
+            reason, reason_size,
+            "could not close certificate revocation file '%s': %s",
+            path, strerror(close_errno));
+        provider_policy_cert_list_free_runtime(&loaded);
+        return false;
+    }
+
+    for (const struct provider_policy_cert_entry *cert = loaded.head;
+         cert;
+         cert = cert->next)
+    {
+        const size_t old_count = list->count;
+        if (!provider_policy_cert_list_add_runtime(list, cert->serial,
+                                                   cert->issuer))
+        {
+            provider_policy_set_reason(
+                reason, reason_size,
+                "certificate revocation file '%s' entry could not be loaded",
+                path);
+            provider_policy_cert_list_free_runtime(&loaded);
+            return false;
+        }
+        if (loaded_count && list->count != old_count)
+        {
+            ++*loaded_count;
+        }
+    }
+    provider_policy_cert_list_free_runtime(&loaded);
+    return true;
+}
+
+bool
+provider_policy_cert_list_append_file(const char *path,
+                                      const char *serial,
+                                      const char *issuer,
+                                      char *reason,
+                                      size_t reason_size)
+{
+    provider_policy_set_reason(reason, reason_size, "ok");
+    if (!path || !*path)
+    {
+        provider_policy_set_reason(reason, reason_size,
+                                   "missing certificate revocation file path");
+        return false;
+    }
+    if (!provider_policy_cert_serial_valid(serial)
+        || !provider_policy_cert_issuer_valid(issuer))
+    {
+        provider_policy_set_reason(reason, reason_size,
+                                   "invalid provider certificate identity");
+        return false;
+    }
+
+#ifdef _WIN32
+    FILE *fp = platform_fopen(path, "a");
+    if (!fp)
+    {
+        const int open_errno = errno;
+        provider_policy_set_reason(
+            reason, reason_size,
+            "could not open certificate revocation file '%s': %s",
+            path, strerror(open_errno));
+        return false;
+    }
+#else
+    int fd = platform_open(path, O_CREAT | O_APPEND | O_WRONLY | O_BINARY,
+                           S_IRUSR | S_IWUSR);
+    if (fd < 0)
+    {
+        const int open_errno = errno;
+        provider_policy_set_reason(
+            reason, reason_size,
+            "could not open certificate revocation file '%s': %s",
+            path, strerror(open_errno));
+        return false;
+    }
+
+    FILE *fp = fdopen(fd, "a");
+    if (!fp)
+    {
+        const int fdopen_errno = errno;
+        close(fd);
+        provider_policy_set_reason(
+            reason, reason_size,
+            "could not stream certificate revocation file '%s': %s",
+            path, strerror(fdopen_errno));
+        return false;
+    }
+#endif
+
+    if (fprintf(fp, "%s\t%s\n", serial, issuer) < 0 || fflush(fp) != 0)
+    {
+        const int write_errno = errno;
+        fclose(fp);
+        provider_policy_set_reason(
+            reason, reason_size,
+            "could not write certificate revocation file '%s': %s",
+            path, strerror(write_errno));
+        return false;
+    }
+
+#ifndef _WIN32
+    if (fsync(fd) != 0)
+    {
+        const int fsync_errno = errno;
+        fclose(fp);
+        provider_policy_set_reason(
+            reason, reason_size,
+            "could not sync certificate revocation file '%s': %s",
+            path, strerror(fsync_errno));
+        return false;
+    }
+#endif
+
+    if (fclose(fp) != 0)
+    {
+        const int close_errno = errno;
+        provider_policy_set_reason(
+            reason, reason_size,
+            "could not close certificate revocation file '%s': %s",
+            path, strerror(close_errno));
+        return false;
+    }
+    return true;
+}
+
 const char *
 provider_policy_preflight_status_name(enum provider_policy_preflight_status status)
 {
@@ -1303,6 +1711,15 @@ provider_policy_authorize(const struct provider_policy_auth_context *context,
     {
         provider_policy_set_auth_result(result, PROVIDER_POLICY_AUTH_DENIED,
                                         "provider certificate issuer is required");
+        return false;
+    }
+    if (provider_policy_cert_list_contains(context->revoked_certs,
+                                           context->cert_serial,
+                                           context->cert_issuer))
+    {
+        provider_policy_set_auth_result(
+            result, PROVIDER_POLICY_AUTH_DENIED,
+            "provider certificate identity is revoked");
         return false;
     }
     if (provider_policy_fingerprint_list_contains(

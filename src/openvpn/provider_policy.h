@@ -34,6 +34,8 @@ struct push_list;
 #define PROVIDER_POLICY_DNS_SIZE 64
 #define PROVIDER_POLICY_FINGERPRINT_SIZE 128
 #define PROVIDER_POLICY_PRINCIPAL_SIZE 256
+#define PROVIDER_POLICY_CERT_SERIAL_SIZE 128
+#define PROVIDER_POLICY_CERT_ISSUER_SIZE 256
 #define PROVIDER_POLICY_MAX_SELECTORS 32
 #define PROVIDER_POLICY_MAX_DNS_SERVERS 8
 
@@ -59,6 +61,18 @@ struct provider_policy_principal_list {
     size_t count;
 };
 
+struct provider_policy_cert_entry {
+    struct provider_policy_cert_entry *next;
+    const char *serial;
+    const char *issuer;
+};
+
+struct provider_policy_cert_list {
+    struct provider_policy_cert_entry *head;
+    struct provider_policy_cert_entry *tail;
+    size_t count;
+};
+
 enum provider_policy_profile_mode {
     PROVIDER_POLICY_PROFILE_UNDEF = 0,
     PROVIDER_POLICY_PROFILE_EAP_TLS,
@@ -74,6 +88,7 @@ struct provider_policy_auth_context {
     const struct provider_policy_fingerprint_list *allowed_fingerprints;
     const struct provider_policy_fingerprint_list *revoked_fingerprints;
     const struct provider_policy_principal_list *revoked_principals;
+    const struct provider_policy_cert_list *revoked_certs;
     uint64_t policy_revision;
 };
 
@@ -166,6 +181,32 @@ bool provider_policy_principal_list_load_runtime(
 bool provider_policy_principal_list_append_file(
     const char *path,
     const char *principal,
+    char *reason,
+    size_t reason_size);
+bool provider_policy_cert_serial_valid(const char *serial);
+bool provider_policy_cert_issuer_valid(const char *issuer);
+bool provider_policy_cert_list_defined(
+    const struct provider_policy_cert_list *list);
+bool provider_policy_cert_list_contains(
+    const struct provider_policy_cert_list *list,
+    const char *serial,
+    const char *issuer);
+bool provider_policy_cert_list_add_runtime(
+    struct provider_policy_cert_list *list,
+    const char *serial,
+    const char *issuer);
+void provider_policy_cert_list_free_runtime(
+    struct provider_policy_cert_list *list);
+bool provider_policy_cert_list_load_runtime(
+    struct provider_policy_cert_list *list,
+    const char *path,
+    char *reason,
+    size_t reason_size,
+    size_t *loaded_count);
+bool provider_policy_cert_list_append_file(
+    const char *path,
+    const char *serial,
+    const char *issuer,
     char *reason,
     size_t reason_size);
 

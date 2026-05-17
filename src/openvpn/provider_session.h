@@ -74,6 +74,8 @@ struct provider_session {
     char *provider_name;
     char *principal;
     char *credential_fingerprint;
+    char *cert_serial;
+    char *cert_issuer;
     char *assigned_address;
     char *authorized_selectors;
     char *helper_state;
@@ -110,6 +112,8 @@ struct provider_session_create {
     unsigned long management_cid;
     const char *principal;
     const char *credential_fingerprint;
+    const char *cert_serial;
+    const char *cert_issuer;
     const char *assigned_address;
     const char *authorized_selectors;
     uint64_t xfrm_lease_id;

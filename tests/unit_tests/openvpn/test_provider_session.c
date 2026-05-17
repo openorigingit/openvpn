@@ -60,6 +60,8 @@ default_session_create(void)
         .provider_name = "ikev2",
         .principal = "alice@example.test",
         .credential_fingerprint = "SHA256:01",
+        .cert_serial = "1234",
+        .cert_issuer = "CN=Example CA",
         .assigned_address = "10.88.0.2",
         .authorized_selectors = "10.88.0.1/32[tcp/443]",
         .xfrm_lease_id = 42,
@@ -114,6 +116,8 @@ test_provider_session_create_lookup_update(void **state)
     assert_string_equal(session->provider_name, "ikev2");
     assert_string_equal(session->principal, "alice@example.test");
     assert_string_equal(session->credential_fingerprint, "SHA256:01");
+    assert_string_equal(session->cert_serial, "1234");
+    assert_string_equal(session->cert_issuer, "CN=Example CA");
     assert_string_equal(session->assigned_address, "10.88.0.2");
     assert_string_equal(session->authorized_selectors, "10.88.0.1/32[tcp/443]");
     assert_int_equal(session->xfrm_lease_id, 42);

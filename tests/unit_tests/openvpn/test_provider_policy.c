@@ -32,6 +32,8 @@
 static const char test_revocation_fingerprint[] =
     "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 static const char test_revocation_principal[] = "alice@example.test";
+static const char test_revocation_cert_serial[] = "01AB";
+static const char test_revocation_cert_issuer[] = "CN=Example CA,O=OpenVPN Test";
 
 static struct push_entry
 push_entry(const char *option)
@@ -530,6 +532,129 @@ test_provider_policy_principal_revocation_file_append(void **state)
 }
 
 static void
+test_provider_policy_cert_revocation_list(void **state)
+{
+    (void)state;
+
+    assert_true(provider_policy_cert_serial_valid(test_revocation_cert_serial));
+    assert_false(provider_policy_cert_serial_valid(""));
+    assert_false(provider_policy_cert_serial_valid("01 AB"));
+    assert_true(provider_policy_cert_issuer_valid(test_revocation_cert_issuer));
+    assert_false(provider_policy_cert_issuer_valid(""));
+    assert_false(provider_policy_cert_issuer_valid("CN=Bad\tCA"));
+
+    struct provider_policy_cert_list list = { 0 };
+    assert_false(provider_policy_cert_list_defined(&list));
+    assert_true(provider_policy_cert_list_add_runtime(
+        &list, test_revocation_cert_serial, test_revocation_cert_issuer));
+    assert_true(provider_policy_cert_list_defined(&list));
+    assert_int_equal(list.count, 1);
+    assert_true(provider_policy_cert_list_contains(
+        &list, "01ab", test_revocation_cert_issuer));
+    assert_false(provider_policy_cert_list_contains(
+        &list, test_revocation_cert_serial, "CN=Other CA"));
+
+    assert_true(provider_policy_cert_list_add_runtime(
+        &list, test_revocation_cert_serial, test_revocation_cert_issuer));
+    assert_int_equal(list.count, 1);
+    assert_false(provider_policy_cert_list_add_runtime(
+        &list, "bad serial", test_revocation_cert_issuer));
+
+    provider_policy_cert_list_free_runtime(&list);
+    assert_false(provider_policy_cert_list_defined(&list));
+    assert_int_equal(list.count, 0);
+}
+
+static void
+test_provider_policy_cert_revocation_file_load(void **state)
+{
+    (void)state;
+
+    char path[] = "provider-policy-cert-revocations-XXXXXX";
+    const int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    FILE *fp = fdopen(fd, "w");
+    assert_non_null(fp);
+    assert_true(fprintf(fp,
+                        "# comment\n"
+                        "\n"
+                        "%s\t%s\n"
+                        "0B\tCN=Hash#Issuer,O=OpenVPN Test\n"
+                        "%s\t%s\n",
+                        test_revocation_cert_serial,
+                        test_revocation_cert_issuer,
+                        test_revocation_cert_serial,
+                        test_revocation_cert_issuer) > 0);
+    assert_int_equal(fclose(fp), 0);
+
+    struct provider_policy_cert_list list = { 0 };
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    size_t loaded_count = 0;
+    assert_true(provider_policy_cert_list_load_runtime(
+        &list, path, reason, sizeof(reason), &loaded_count));
+    assert_int_equal(loaded_count, 2);
+    assert_true(provider_policy_cert_list_contains(
+        &list, test_revocation_cert_serial, test_revocation_cert_issuer));
+    assert_true(provider_policy_cert_list_contains(
+        &list, "0b", "CN=Hash#Issuer,O=OpenVPN Test"));
+    assert_string_equal(reason, "ok");
+
+    provider_policy_cert_list_free_runtime(&list);
+    assert_int_equal(unlink(path), 0);
+}
+
+static void
+test_provider_policy_cert_revocation_file_rejects_invalid(void **state)
+{
+    (void)state;
+
+    char path[] = "provider-policy-bad-cert-revocations-XXXXXX";
+    const int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    FILE *fp = fdopen(fd, "w");
+    assert_non_null(fp);
+    assert_true(fprintf(fp, "01AB CN=MissingTab\n") > 0);
+    assert_int_equal(fclose(fp), 0);
+
+    struct provider_policy_cert_list list = { 0 };
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    assert_false(provider_policy_cert_list_load_runtime(
+        &list, path, reason, sizeof(reason), NULL));
+    assert_non_null(strstr(reason, "missing issuer"));
+    assert_false(provider_policy_cert_list_defined(&list));
+
+    assert_int_equal(unlink(path), 0);
+}
+
+static void
+test_provider_policy_cert_revocation_file_append(void **state)
+{
+    (void)state;
+
+    char path[] = "provider-policy-append-cert-revocations-XXXXXX";
+    const int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    close(fd);
+
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    assert_true(provider_policy_cert_list_append_file(
+        path, test_revocation_cert_serial, test_revocation_cert_issuer,
+        reason, sizeof(reason)));
+    assert_string_equal(reason, "ok");
+
+    struct provider_policy_cert_list list = { 0 };
+    size_t loaded_count = 0;
+    assert_true(provider_policy_cert_list_load_runtime(
+        &list, path, reason, sizeof(reason), &loaded_count));
+    assert_int_equal(loaded_count, 1);
+    assert_true(provider_policy_cert_list_contains(
+        &list, test_revocation_cert_serial, test_revocation_cert_issuer));
+
+    provider_policy_cert_list_free_runtime(&list);
+    assert_int_equal(unlink(path), 0);
+}
+
+static void
 test_provider_policy_authorize_fails_closed(void **state)
 {
     (void)state;
@@ -561,6 +686,47 @@ test_provider_policy_authorize_fails_closed(void **state)
     assert_false(provider_policy_authorize(&context, &result));
     assert_int_equal(result.status, PROVIDER_POLICY_AUTH_DENIED);
     assert_non_null(strstr(result.reason, "not allowed"));
+}
+
+static void
+test_provider_policy_authorize_rejects_revoked_cert(void **state)
+{
+    (void)state;
+
+    struct provider_policy_fingerprint_entry allowed_entry = {
+        .credential_fingerprint = "SHA256:ABCD",
+    };
+    struct provider_policy_fingerprint_list allowed = {
+        .head = &allowed_entry,
+        .tail = &allowed_entry,
+        .count = 1,
+    };
+    struct provider_policy_cert_entry revoked_entry = {
+        .serial = test_revocation_cert_serial,
+        .issuer = test_revocation_cert_issuer,
+    };
+    struct provider_policy_cert_list revoked = {
+        .head = &revoked_entry,
+        .tail = &revoked_entry,
+        .count = 1,
+    };
+    struct provider_policy_auth_context context = {
+        .profile_mode = PROVIDER_POLICY_PROFILE_EAP_TLS,
+        .principal = "alice@example.test",
+        .credential_fingerprint = "SHA256:ABCD",
+        .cert_serial = "01ab",
+        .cert_issuer = test_revocation_cert_issuer,
+        .allowed_fingerprints = &allowed,
+        .revoked_certs = &revoked,
+        .policy_revision = 9,
+    };
+    struct provider_policy_auth_result result;
+
+    assert_false(provider_policy_authorize(&context, &result));
+    assert_int_equal(result.status, PROVIDER_POLICY_AUTH_DENIED);
+    assert_non_null(strstr(result.reason, "certificate"));
+    assert_non_null(strstr(result.reason, "revoked"));
+    assert_int_equal(result.policy_revision, 0);
 }
 
 static void
@@ -697,7 +863,13 @@ main(void)
         cmocka_unit_test(
             test_provider_policy_principal_revocation_file_rejects_invalid),
         cmocka_unit_test(test_provider_policy_principal_revocation_file_append),
+        cmocka_unit_test(test_provider_policy_cert_revocation_list),
+        cmocka_unit_test(test_provider_policy_cert_revocation_file_load),
+        cmocka_unit_test(
+            test_provider_policy_cert_revocation_file_rejects_invalid),
+        cmocka_unit_test(test_provider_policy_cert_revocation_file_append),
         cmocka_unit_test(test_provider_policy_authorize_fails_closed),
+        cmocka_unit_test(test_provider_policy_authorize_rejects_revoked_cert),
         cmocka_unit_test(test_provider_policy_authorize_rejects_revoked_principal),
         cmocka_unit_test(test_provider_policy_authorize_rejects_revoked_fingerprint),
         cmocka_unit_test(test_provider_policy_authorize_allowlisted_fingerprint),

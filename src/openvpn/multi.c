@@ -1177,11 +1177,13 @@ multi_ikev2_helper_authorize_session(
     const struct provider_helper_auth_request *request,
     const char *principal,
     const char *credential_fingerprint,
+    const char *cert_serial,
+    const char *cert_issuer,
     uint64_t policy_revision,
     struct provider_helper_auth_response *response)
 {
     if (!m || !request || !principal || !credential_fingerprint
-        || !policy_revision || !response)
+        || !cert_serial || !cert_issuer || !policy_revision || !response)
     {
         return false;
     }
@@ -1254,6 +1256,8 @@ multi_ikev2_helper_authorize_session(
         .provider_name = MULTI_IKEV2_HELPER_PROVIDER_NAME,
         .principal = principal,
         .credential_fingerprint = credential_fingerprint,
+        .cert_serial = cert_serial,
+        .cert_issuer = cert_issuer,
         .assigned_address = assigned_address,
         .authorized_selectors = authorized_selectors,
         .policy_revision = policy_revision,
@@ -1375,6 +1379,7 @@ multi_ikev2_helper_auth_request(void *arg,
         .allowed_fingerprints = &m->top.options.ikev2_helper_allowed_fingerprints,
         .revoked_fingerprints = &m->provider_revoked_fingerprints,
         .revoked_principals = &m->provider_revoked_principals,
+        .revoked_certs = &m->provider_revoked_certs,
         .policy_revision = m->provider_policy_revision,
     };
     struct provider_policy_auth_result result;
@@ -1383,7 +1388,7 @@ multi_ikev2_helper_auth_request(void *arg,
     {
         return multi_ikev2_helper_authorize_session(
             m, request, principal, credential_fingerprint,
-            result.policy_revision, response);
+            cert_serial, cert_issuer, result.policy_revision, response);
     }
 
     multi_ikev2_helper_auth_deny(response, request->request_id,
@@ -1548,6 +1553,33 @@ multi_init(struct context *t)
             "IKEv2 helper loaded %zu revoked principal%s from %s, policy revision %" PRIu64,
             loaded_count, loaded_count == 1 ? "" : "s",
             t->options.ikev2_helper_principal_revocation_file,
+            m->provider_policy_revision);
+    }
+    if (t->options.ikev2_helper_cert_revocation_file)
+    {
+        char reason[PROVIDER_POLICY_REASON_SIZE];
+        size_t loaded_count = 0;
+        if (!provider_policy_cert_list_load_runtime(
+                &m->provider_revoked_certs,
+                t->options.ikev2_helper_cert_revocation_file,
+                reason, sizeof(reason), &loaded_count))
+        {
+            msg(M_FATAL,
+                "IKEv2 helper certificate revocation file load failed: %s",
+                reason);
+        }
+        if (UINT64_MAX - m->provider_policy_revision < loaded_count)
+        {
+            m->provider_policy_revision = UINT64_MAX;
+        }
+        else
+        {
+            m->provider_policy_revision += loaded_count;
+        }
+        msg(M_INFO,
+            "IKEv2 helper loaded %zu revoked certificate identit%s from %s, policy revision %" PRIu64,
+            loaded_count, loaded_count == 1 ? "y" : "ies",
+            t->options.ikev2_helper_cert_revocation_file,
             m->provider_policy_revision);
     }
 
@@ -1949,6 +1981,7 @@ multi_uninit(struct multi_context *m)
             &m->provider_revoked_fingerprints);
         provider_policy_principal_list_free_runtime(
             &m->provider_revoked_principals);
+        provider_policy_cert_list_free_runtime(&m->provider_revoked_certs);
         provider_session_table_free(&m->provider_sessions);
 
         hash_free(m->hash);
@@ -5431,6 +5464,104 @@ management_provider_revoke_principal(void *arg, const char *principal,
 }
 
 static bool
+management_provider_revoke_cert_identity(void *arg, const char *serial,
+                                         const char *issuer,
+                                         const char *reason)
+{
+    struct multi_context *m = (struct multi_context *)arg;
+    if (!provider_policy_cert_serial_valid(serial)
+        || !provider_policy_cert_issuer_valid(issuer))
+    {
+        return false;
+    }
+
+    const bool already_revoked =
+        provider_policy_cert_list_contains(&m->provider_revoked_certs,
+                                           serial, issuer);
+    if (!already_revoked
+        && m->top.options.ikev2_helper_cert_revocation_file)
+    {
+        char file_reason[PROVIDER_POLICY_REASON_SIZE];
+        if (!provider_policy_cert_list_append_file(
+                m->top.options.ikev2_helper_cert_revocation_file,
+                serial, issuer, file_reason, sizeof(file_reason)))
+        {
+            msg(M_WARN,
+                "MANAGEMENT: provider certificate identity revocation was not persisted: %s",
+                file_reason);
+            return false;
+        }
+    }
+
+    if (!provider_policy_cert_list_add_runtime(&m->provider_revoked_certs,
+                                               serial, issuer))
+    {
+        return false;
+    }
+    if (!already_revoked && m->provider_policy_revision < UINT64_MAX)
+    {
+        ++m->provider_policy_revision;
+    }
+
+    const char *revoke_reason =
+        reason && *reason ? reason : "provider certificate identity revoked";
+    unsigned int killed = 0;
+    for (struct provider_session *session = m->provider_sessions.head; session;)
+    {
+        struct provider_session *next = session->next;
+        const unsigned long cid = session->management_cid;
+        if (session->cert_serial && session->cert_issuer
+            && strcasecmp(session->cert_serial, serial) == 0
+            && strcmp(session->cert_issuer, issuer) == 0
+            && management_kill_provider_session_by_cid(m, cid, revoke_reason))
+        {
+            ++killed;
+        }
+        session = next;
+    }
+
+    msg(M_INFO,
+        "MANAGEMENT: provider certificate identity revoked, killed %u active provider session%s, policy revision %" PRIu64,
+        killed, killed == 1 ? "" : "s", m->provider_policy_revision);
+    return true;
+}
+
+static bool
+management_provider_revoke_cert_by_cid(void *arg, const unsigned long cid,
+                                       const char *reason)
+{
+    struct multi_context *m = (struct multi_context *)arg;
+    struct provider_session *session =
+        provider_session_lookup_by_cid(&m->provider_sessions, cid);
+    if (!session
+        || !provider_policy_cert_serial_valid(session->cert_serial)
+        || !provider_policy_cert_issuer_valid(session->cert_issuer))
+    {
+        return false;
+    }
+
+    char serial[PROVIDER_POLICY_CERT_SERIAL_SIZE];
+    char issuer[PROVIDER_POLICY_CERT_ISSUER_SIZE];
+    const int serial_len = snprintf(serial, sizeof(serial), "%s",
+                                    session->cert_serial);
+    const int issuer_len = snprintf(issuer, sizeof(issuer), "%s",
+                                    session->cert_issuer);
+    if (serial_len < 0 || issuer_len < 0
+        || (size_t)serial_len >= sizeof(serial)
+        || (size_t)issuer_len >= sizeof(issuer))
+    {
+        return false;
+    }
+
+    msg(M_INFO,
+        "MANAGEMENT: provider certificate identity revoke requested for CID %lu",
+        cid);
+    return management_provider_revoke_cert_identity(
+        arg, serial, issuer,
+        reason && *reason ? reason : "provider certificate identity revoked");
+}
+
+static bool
 management_provider_revoke_by_cid(void *arg, const unsigned long cid,
                                   const char *reason)
 {
@@ -5568,6 +5699,8 @@ init_management_callback_multi(struct multi_context *m)
         cb.n_clients = management_callback_n_clients;
         cb.kill_by_cid = management_kill_by_cid;
         cb.provider_revoke_by_cid = management_provider_revoke_by_cid;
+        cb.provider_revoke_cert_by_cid =
+            management_provider_revoke_cert_by_cid;
         cb.provider_revoke_by_fingerprint =
             management_provider_revoke_fingerprint;
         cb.provider_revoke_by_principal = management_provider_revoke_principal;

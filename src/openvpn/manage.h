@@ -185,6 +185,8 @@ struct management_callback
     bool (*kill_by_cid)(void *arg, const unsigned long cid, const char *kill_msg);
     bool (*provider_revoke_by_cid)(void *arg, const unsigned long cid,
                                    const char *reason);
+    bool (*provider_revoke_cert_by_cid)(void *arg, const unsigned long cid,
+                                        const char *reason);
     bool (*provider_revoke_by_fingerprint)(void *arg,
                                            const char *credential_fingerprint,
                                            const char *reason);
