@@ -128,6 +128,7 @@ man_help(void)
     msg(M_CLIENT,
         "                                      to the client and wait for a final client-auth/client-deny");
     msg(M_CLIENT, "client-kill CID [M]    : Kill client instance CID with message M (def=RESTART)");
+    msg(M_CLIENT, "provider-revoke CID [M]: Revoke provider session credential and kill CID");
     msg(M_CLIENT, "env-filter [level]     : Set env-var filter level");
     msg(M_CLIENT, "rsa-sig                : Enter a signature in response to >RSA_SIGN challenge");
     msg(M_CLIENT,
@@ -1273,6 +1274,34 @@ man_client_kill(struct management *man, const char *cid_str, const char *kill_ms
 }
 
 static void
+man_provider_revoke(struct management *man, const char *cid_str,
+                    const char *reason)
+{
+    unsigned long cid = 0;
+    if (parse_cid(cid_str, &cid))
+    {
+        if (man->persist.callback.provider_revoke_by_cid)
+        {
+            const bool status =
+                (*man->persist.callback.provider_revoke_by_cid)(
+                    man->persist.callback.arg, cid, reason);
+            if (status)
+            {
+                msg(M_CLIENT, "SUCCESS: provider-revoke command succeeded");
+            }
+            else
+            {
+                msg(M_CLIENT, "ERROR: provider-revoke command failed");
+            }
+        }
+        else
+        {
+            man_command_unsupported("provider-revoke");
+        }
+    }
+}
+
+static void
 man_client_n_clients(struct management *man)
 {
     if (man->persist.callback.n_clients)
@@ -1730,6 +1759,13 @@ man_dispatch_command(struct management *man, struct status_output *so, const cha
         if (man_need(man, p, 1, MN_AT_LEAST))
         {
             man_client_kill(man, p[1], p[2]);
+        }
+    }
+    else if (streq(p[0], "provider-revoke"))
+    {
+        if (man_need(man, p, 1, MN_AT_LEAST))
+        {
+            man_provider_revoke(man, p[1], p[2]);
         }
     }
     else if (streq(p[0], "client-deny"))

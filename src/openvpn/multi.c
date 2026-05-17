@@ -70,6 +70,7 @@
 #define MULTI_IKEV2_HELPER_PROVIDER_NAME "ikev2"
 #define MULTI_IKEV2_HELPER_XFRM_ID_BASE 0x0f000000u
 #define MULTI_IKEV2_HELPER_XFRM_ID_MAX  0x00ffffffu
+#define MULTI_IKEV2_HELPER_INITIAL_POLICY_REVISION 1
 #define MULTI_IKEV2_HELPER_SERVER_AUTH_CONFIG_REVISION 1u
 
 /*#define MULTI_DEBUG_EVENT_LOOP*/
@@ -1372,6 +1373,8 @@ multi_ikev2_helper_auth_request(void *arg,
         .cert_serial = request->cert_serial_len ? cert_serial : NULL,
         .cert_issuer = request->cert_issuer_len ? cert_issuer : NULL,
         .allowed_fingerprints = &m->top.options.ikev2_helper_allowed_fingerprints,
+        .revoked_fingerprints = &m->provider_revoked_fingerprints,
+        .policy_revision = m->provider_policy_revision,
     };
     struct provider_policy_auth_result result;
     provider_policy_authorize(&context, &result);
@@ -1491,6 +1494,8 @@ multi_init(struct context *t)
     multi_ikev2_helper_listener_fds_init(m);
     provider_helper_supervisor_init(&m->provider_helper);
     provider_session_table_init(&m->provider_sessions);
+    m->provider_policy_revision =
+        MULTI_IKEV2_HELPER_INITIAL_POLICY_REVISION;
 
     /*
      * Real address hash table (source port number is
@@ -1886,6 +1891,8 @@ multi_uninit(struct multi_context *m)
         multi_ikev2_helper_close_provider_sessions(m, "server shutdown");
         provider_helper_supervisor_free(&m->provider_helper);
         multi_ikev2_helper_listener_fds_close(m);
+        provider_policy_fingerprint_list_free_runtime(
+            &m->provider_revoked_fingerprints);
         provider_session_table_free(&m->provider_sessions);
 
         hash_free(m->hash);
@@ -5201,6 +5208,37 @@ lookup_by_cid(struct multi_context *m, const unsigned long cid)
 }
 
 static bool
+management_kill_provider_session_by_cid(struct multi_context *m,
+                                        const unsigned long cid,
+                                        const char *kill_msg)
+{
+    struct provider_session *session =
+        provider_session_lookup_by_cid(&m->provider_sessions, cid);
+    if (!session)
+    {
+        return false;
+    }
+
+    struct provider_session_xfrm_lease session_lease;
+    if (provider_session_get_xfrm_lease(session, &session_lease))
+    {
+        struct provider_helper_xfrm_lease helper_lease;
+        multi_ikev2_helper_copy_xfrm_lease(&helper_lease, &session_lease);
+        if (!provider_helper_supervisor_send_xfrm_lease_delete(
+                &m->provider_helper, &helper_lease, session_lease.lease_id))
+        {
+            msg(D_MULTI_ERRORS,
+                "MANAGEMENT: provider session CID %lu XFRM lease delete failed",
+                cid);
+            return false;
+        }
+    }
+
+    multi_ikev2_helper_release_session_address(m, session, true);
+    return provider_session_kill_by_cid(&m->provider_sessions, cid, kill_msg);
+}
+
+static bool
 management_kill_by_cid(void *arg, const unsigned long cid, const char *kill_msg)
 {
     struct multi_context *m = (struct multi_context *)arg;
@@ -5211,33 +5249,54 @@ management_kill_by_cid(void *arg, const unsigned long cid, const char *kill_msg)
         multi_schedule_context_wakeup(m, mi);
         return true;
     }
-    else
+
+    return management_kill_provider_session_by_cid(m, cid, kill_msg);
+}
+
+static bool
+management_provider_revoke_by_cid(void *arg, const unsigned long cid,
+                                  const char *reason)
+{
+    struct multi_context *m = (struct multi_context *)arg;
+    struct provider_session *session =
+        provider_session_lookup_by_cid(&m->provider_sessions, cid);
+    if (!session
+        || !provider_policy_fingerprint_valid(session->credential_fingerprint))
     {
-        struct provider_session *session =
-            provider_session_lookup_by_cid(&m->provider_sessions, cid);
-        if (!session)
-        {
-            return false;
-        }
-
-        struct provider_session_xfrm_lease session_lease;
-        if (provider_session_get_xfrm_lease(session, &session_lease))
-        {
-            struct provider_helper_xfrm_lease helper_lease;
-            multi_ikev2_helper_copy_xfrm_lease(&helper_lease, &session_lease);
-            if (!provider_helper_supervisor_send_xfrm_lease_delete(
-                    &m->provider_helper, &helper_lease, session_lease.lease_id))
-            {
-                msg(D_MULTI_ERRORS,
-                    "MANAGEMENT: provider session CID %lu XFRM lease delete failed",
-                    cid);
-                return false;
-            }
-        }
-
-        multi_ikev2_helper_release_session_address(m, session, true);
-        return provider_session_kill_by_cid(&m->provider_sessions, cid, kill_msg);
+        return false;
     }
+
+    char credential_fingerprint[PROVIDER_POLICY_FINGERPRINT_SIZE];
+    const int fp_len =
+        snprintf(credential_fingerprint, sizeof(credential_fingerprint), "%s",
+                 session->credential_fingerprint);
+    if (fp_len < 0 || (size_t)fp_len >= sizeof(credential_fingerprint))
+    {
+        return false;
+    }
+
+    const bool already_revoked =
+        provider_policy_fingerprint_list_contains(
+            &m->provider_revoked_fingerprints, credential_fingerprint);
+    if (!provider_policy_fingerprint_list_add_runtime(
+            &m->provider_revoked_fingerprints, credential_fingerprint))
+    {
+        return false;
+    }
+    if (!already_revoked)
+    {
+        if (m->provider_policy_revision < UINT64_MAX)
+        {
+            ++m->provider_policy_revision;
+        }
+    }
+
+    const char *revoke_reason =
+        reason && *reason ? reason : "provider credential revoked";
+    msg(M_INFO,
+        "MANAGEMENT: provider credential fingerprint revoked for CID %lu, policy revision %" PRIu64,
+        cid, m->provider_policy_revision);
+    return management_kill_provider_session_by_cid(m, cid, revoke_reason);
 }
 
 static bool
@@ -5347,6 +5406,7 @@ init_management_callback_multi(struct multi_context *m)
         cb.delete_event = management_delete_event;
         cb.n_clients = management_callback_n_clients;
         cb.kill_by_cid = management_kill_by_cid;
+        cb.provider_revoke_by_cid = management_provider_revoke_by_cid;
         cb.client_auth = management_client_auth;
         cb.client_pending_auth = management_client_pending_auth;
         cb.get_peer_info = management_get_peer_info;

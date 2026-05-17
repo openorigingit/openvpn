@@ -60,6 +60,8 @@ struct provider_policy_auth_context {
     const char *cert_issuer;
     const char *peer_address;
     const struct provider_policy_fingerprint_list *allowed_fingerprints;
+    const struct provider_policy_fingerprint_list *revoked_fingerprints;
+    uint64_t policy_revision;
 };
 
 enum provider_policy_preflight_status {
@@ -115,6 +117,11 @@ bool provider_policy_fingerprint_list_add(
     struct provider_policy_fingerprint_list *list,
     const char *credential_fingerprint,
     struct gc_arena *gc);
+bool provider_policy_fingerprint_list_add_runtime(
+    struct provider_policy_fingerprint_list *list,
+    const char *credential_fingerprint);
+void provider_policy_fingerprint_list_free_runtime(
+    struct provider_policy_fingerprint_list *list);
 
 bool provider_policy_push_option_supported(const char *option);
 

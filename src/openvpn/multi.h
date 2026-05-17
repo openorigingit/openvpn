@@ -39,6 +39,7 @@
 #include "mtcp.h"
 #include "multi_io.h"
 #include "provider_helper.h"
+#include "provider_policy.h"
 #include "provider_session.h"
 #include "vlan.h"
 #include "reflect_filter.h"
@@ -197,6 +198,8 @@ struct multi_context
     bool provider_helper_listener_fds_sent;
     bool provider_helper_server_auth_config_sent;
     struct provider_session_table provider_sessions;
+    struct provider_policy_fingerprint_list provider_revoked_fingerprints;
+    uint64_t provider_policy_revision;
 
 #ifdef ENABLE_MANAGEMENT
     struct hash *cid_hash;

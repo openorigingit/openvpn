@@ -240,10 +240,21 @@ provider_policy_fingerprint_list_add(
     }
 
     struct provider_policy_fingerprint_entry *entry;
-    ALLOC_OBJ_CLEAR_GC(entry, struct provider_policy_fingerprint_entry, gc);
+    if (gc)
+    {
+        ALLOC_OBJ_CLEAR_GC(entry, struct provider_policy_fingerprint_entry, gc);
+    }
+    else
+    {
+        ALLOC_OBJ_CLEAR(entry, struct provider_policy_fingerprint_entry);
+    }
     entry->credential_fingerprint = string_alloc(credential_fingerprint, gc);
     if (!entry->credential_fingerprint)
     {
+        if (!gc)
+        {
+            free(entry);
+        }
         return false;
     }
 
@@ -258,6 +269,35 @@ provider_policy_fingerprint_list_add(
     list->tail = entry;
     ++list->count;
     return true;
+}
+
+bool
+provider_policy_fingerprint_list_add_runtime(
+    struct provider_policy_fingerprint_list *list,
+    const char *credential_fingerprint)
+{
+    return provider_policy_fingerprint_list_add(list, credential_fingerprint,
+                                                NULL);
+}
+
+void
+provider_policy_fingerprint_list_free_runtime(
+    struct provider_policy_fingerprint_list *list)
+{
+    if (!list)
+    {
+        return;
+    }
+
+    struct provider_policy_fingerprint_entry *entry = list->head;
+    while (entry)
+    {
+        struct provider_policy_fingerprint_entry *next = entry->next;
+        free((char *)entry->credential_fingerprint);
+        free(entry);
+        entry = next;
+    }
+    CLEAR(*list);
 }
 
 const char *
@@ -664,6 +704,14 @@ provider_policy_authorize(const struct provider_policy_auth_context *context,
                                         "provider certificate issuer is required");
         return false;
     }
+    if (provider_policy_fingerprint_list_contains(
+            context->revoked_fingerprints, context->credential_fingerprint))
+    {
+        provider_policy_set_auth_result(
+            result, PROVIDER_POLICY_AUTH_DENIED,
+            "provider credential fingerprint is revoked");
+        return false;
+    }
     if (!provider_policy_fingerprint_list_contains(
             context->allowed_fingerprints, context->credential_fingerprint))
     {
@@ -677,7 +725,9 @@ provider_policy_authorize(const struct provider_policy_auth_context *context,
                                     "authorized");
     if (result)
     {
-        result->policy_revision = PROVIDER_POLICY_STATIC_POLICY_REVISION;
+        result->policy_revision = context->policy_revision
+                                  ? context->policy_revision
+                                  : PROVIDER_POLICY_STATIC_POLICY_REVISION;
     }
     return true;
 }

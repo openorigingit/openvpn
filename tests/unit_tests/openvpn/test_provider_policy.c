@@ -279,6 +279,30 @@ test_provider_policy_fingerprint_allowlist(void **state)
 }
 
 static void
+test_provider_policy_runtime_revocation_list(void **state)
+{
+    (void)state;
+
+    struct provider_policy_fingerprint_list list = { 0 };
+    assert_true(provider_policy_fingerprint_list_add_runtime(&list,
+                                                             "SHA256:ABCD"));
+    assert_true(provider_policy_fingerprint_list_contains(&list,
+                                                          "sha256:abcd"));
+    assert_int_equal(list.count, 1);
+
+    assert_true(provider_policy_fingerprint_list_add_runtime(&list,
+                                                             "sha256:abcd"));
+    assert_int_equal(list.count, 1);
+
+    assert_false(provider_policy_fingerprint_list_add_runtime(&list,
+                                                              "bad value"));
+
+    provider_policy_fingerprint_list_free_runtime(&list);
+    assert_false(provider_policy_fingerprint_list_defined(&list));
+    assert_int_equal(list.count, 0);
+}
+
+static void
 test_provider_policy_authorize_fails_closed(void **state)
 {
     (void)state;
@@ -313,6 +337,45 @@ test_provider_policy_authorize_fails_closed(void **state)
 }
 
 static void
+test_provider_policy_authorize_rejects_revoked_fingerprint(void **state)
+{
+    (void)state;
+
+    struct provider_policy_fingerprint_entry allowed_entry = {
+        .credential_fingerprint = "SHA256:ABCD",
+    };
+    struct provider_policy_fingerprint_list allowed = {
+        .head = &allowed_entry,
+        .tail = &allowed_entry,
+        .count = 1,
+    };
+    struct provider_policy_fingerprint_entry revoked_entry = {
+        .credential_fingerprint = "sha256:abcd",
+    };
+    struct provider_policy_fingerprint_list revoked = {
+        .head = &revoked_entry,
+        .tail = &revoked_entry,
+        .count = 1,
+    };
+    struct provider_policy_auth_context context = {
+        .profile_mode = PROVIDER_POLICY_PROFILE_EAP_TLS,
+        .principal = "alice@example.test",
+        .credential_fingerprint = "SHA256:ABCD",
+        .cert_serial = "1234",
+        .cert_issuer = "CN=Example CA",
+        .allowed_fingerprints = &allowed,
+        .revoked_fingerprints = &revoked,
+        .policy_revision = 9,
+    };
+    struct provider_policy_auth_result result;
+
+    assert_false(provider_policy_authorize(&context, &result));
+    assert_int_equal(result.status, PROVIDER_POLICY_AUTH_DENIED);
+    assert_non_null(strstr(result.reason, "revoked"));
+    assert_int_equal(result.policy_revision, 0);
+}
+
+static void
 test_provider_policy_authorize_allowlisted_fingerprint(void **state)
 {
     (void)state;
@@ -332,12 +395,13 @@ test_provider_policy_authorize_allowlisted_fingerprint(void **state)
         .cert_serial = "1234",
         .cert_issuer = "CN=Example CA",
         .allowed_fingerprints = &list,
+        .policy_revision = 5,
     };
     struct provider_policy_auth_result result;
 
     assert_true(provider_policy_authorize(&context, &result));
     assert_int_equal(result.status, PROVIDER_POLICY_AUTH_AUTHORIZED);
-    assert_int_equal(result.policy_revision, 1);
+    assert_int_equal(result.policy_revision, 5);
     assert_string_equal(result.reason, "authorized");
 }
 
@@ -356,7 +420,9 @@ main(void)
         cmocka_unit_test(test_provider_policy_rejects_ambiguous_route_artifact),
         cmocka_unit_test(test_provider_policy_ignores_disabled_push_entry),
         cmocka_unit_test(test_provider_policy_fingerprint_allowlist),
+        cmocka_unit_test(test_provider_policy_runtime_revocation_list),
         cmocka_unit_test(test_provider_policy_authorize_fails_closed),
+        cmocka_unit_test(test_provider_policy_authorize_rejects_revoked_fingerprint),
         cmocka_unit_test(test_provider_policy_authorize_allowlisted_fingerprint),
     };
 
