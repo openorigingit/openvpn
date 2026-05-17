@@ -9269,20 +9269,47 @@ ikev2_helper_initial_cp_reply_ipv4_address(
 }
 
 static bool
+ikev2_helper_initial_cp_reply_ipv4_subnet(
+    const struct ikev2_helper_ike_sa *sa,
+    const struct ikev2_helper_child_sa_scaffold *child,
+    uint32_t *address,
+    uint32_t *netmask)
+{
+    if (!sa || !child || !child->ready || !address || !netmask
+        || !sa->initial_cp_request_ready
+        || child->xfrm_lease.address_family != AF_INET
+        || !(child->xfrm_lease.flags & PROVIDER_HELPER_XFRM_LEASE_IPV4)
+        || child->xfrm_lease.local_ts_start_ipv4
+               != child->xfrm_lease.local_ts_end_ipv4)
+    {
+        return false;
+    }
+
+    *address = child->xfrm_lease.local_ts_start_ipv4;
+    *netmask = 0xffffffffu;
+    return true;
+}
+
+static bool
 ikev2_helper_build_ipv4_cp_reply_payload(uint8_t *dst,
                                          size_t dst_size,
                                          uint8_t next_payload,
                                          uint32_t ipv4_address,
+                                         uint32_t subnet_address,
+                                         uint32_t subnet_netmask,
+                                         bool include_subnet,
                                          size_t *payload_len)
 {
     if (payload_len)
     {
         *payload_len = 0;
     }
-    const size_t attr_len = 4u + 4u;
+    const size_t address_attr_len = 4u + 4u;
+    const size_t subnet_attr_len = 4u + 8u;
     const size_t total_len = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
                              + PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE
-                             + attr_len;
+                             + address_attr_len
+                             + (include_subnet ? subnet_attr_len : 0u);
     if (!dst || !payload_len || total_len > UINT16_MAX
         || dst_size < total_len)
     {
@@ -9301,6 +9328,14 @@ ikev2_helper_build_ipv4_cp_reply_payload(uint8_t *dst,
         &pos, PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_ADDRESS);
     ikev2_helper_write_be16(&pos, 4);
     ikev2_helper_write_be32(&pos, ipv4_address);
+    if (include_subnet)
+    {
+        ikev2_helper_write_be16(
+            &pos, PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_SUBNET);
+        ikev2_helper_write_be16(&pos, 8);
+        ikev2_helper_write_be32(&pos, subnet_address);
+        ikev2_helper_write_be32(&pos, subnet_netmask);
+    }
     if ((size_t)(pos - dst) != total_len)
     {
         memset(dst, 0, dst_size);
@@ -9331,12 +9366,15 @@ ikev2_helper_build_final_auth_child_sa_plaintext(
 
     uint8_t auth_data[IKEV2_HELPER_PRF_SHA256_BYTES];
     uint8_t cp_payload[PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
-                       + PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE + 8];
+                       + PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE + 8 + 12];
     uint8_t child_payloads[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     size_t cp_payload_len = 0;
     size_t child_payloads_len = 0;
     bool include_cp = false;
     uint32_t cp_ipv4_address = 0;
+    uint32_t cp_ipv4_subnet_address = 0;
+    uint32_t cp_ipv4_subnet_netmask = 0;
+    bool include_cp_subnet = false;
     CLEAR(auth_data);
     CLEAR(cp_payload);
     CLEAR(child_payloads);
@@ -9358,9 +9396,15 @@ ikev2_helper_build_final_auth_child_sa_plaintext(
                                                        &cp_ipv4_address);
         if (include_cp)
         {
+            include_cp_subnet =
+                ikev2_helper_initial_cp_reply_ipv4_subnet(
+                    sa, child, &cp_ipv4_subnet_address,
+                    &cp_ipv4_subnet_netmask);
             include_cp = ikev2_helper_build_ipv4_cp_reply_payload(
                 cp_payload, sizeof(cp_payload),
                 PROVIDER_HELPER_IKEV2_PAYLOAD_SA, cp_ipv4_address,
+                cp_ipv4_subnet_address, cp_ipv4_subnet_netmask,
+                include_cp_subnet,
                 &cp_payload_len);
         }
     }

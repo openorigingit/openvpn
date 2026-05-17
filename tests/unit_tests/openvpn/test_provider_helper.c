@@ -1694,7 +1694,7 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
      + PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE + 4)
 #define TEST_IKEV2_CP_IPV4_REPLY_PAYLOAD_LEN \
     (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE \
-     + PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE + 8)
+     + PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE + 8 + 12)
 #define TEST_IKEV2_PRF_SHA256_BYTES 32
 #define TEST_IKEV2_AES_GCM_SALT_BYTES 4
 #define TEST_IKEV2_AES_GCM_IV_BYTES 8
@@ -6252,6 +6252,14 @@ test_recv_ikev2_encrypted_final_auth_child_sa_response(
     assert_int_equal(test_read_be16(packet + cp_attr + 2), 4);
     assert_int_equal(test_read_be32(packet + cp_attr + 4),
                      lease->remote_ts_start_ipv4);
+    const size_t cp_subnet_attr = cp_attr + 8;
+    assert_int_equal(test_read_be16(packet + cp_subnet_attr),
+                     PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_SUBNET);
+    assert_int_equal(test_read_be16(packet + cp_subnet_attr + 2), 8);
+    assert_int_equal(test_read_be32(packet + cp_subnet_attr + 4),
+                     lease->local_ts_start_ipv4);
+    assert_int_equal(test_read_be32(packet + cp_subnet_attr + 8),
+                     0xffffffffu);
 
     struct provider_helper_ikev2_child_sa_selection selected;
     assert_int_equal(provider_helper_ikev2_select_child_sa_proposal(
