@@ -251,14 +251,17 @@ provider_xfrm_linux_add_mark_and_if_id(
     uint32_t mark_mask,
     uint32_t if_id)
 {
-    const struct xfrm_mark mark = {
-        .v = mark_value,
-        .m = mark_mask,
-    };
-    if (!provider_xfrm_linux_message_add_attr(message, XFRMA_MARK, &mark,
-                                              sizeof(mark)))
+    if (mark_mask)
     {
-        return false;
+        const struct xfrm_mark mark = {
+            .v = mark_value,
+            .m = mark_mask,
+        };
+        if (!provider_xfrm_linux_message_add_attr(message, XFRMA_MARK, &mark,
+                                                  sizeof(mark)))
+        {
+            return false;
+        }
     }
     return !if_id
            || provider_xfrm_linux_message_add_attr(message, XFRMA_IF_ID,
@@ -272,8 +275,7 @@ provider_xfrm_linux_state_identity_valid(
 {
     return state && state->direction == direction && state->src_outer_ipv4
            && state->dst_outer_ipv4 && state->src_outer_port
-           && state->dst_outer_port && state->spi && state->reqid
-           && state->mark_mask;
+           && state->dst_outer_port && state->spi && state->reqid;
 }
 
 static bool
@@ -422,13 +424,15 @@ provider_xfrm_linux_tmpl_from_state(
 {
     CLEAR(*tmpl);
     tmpl->id.daddr.a4 = htonl(state->dst_outer_ipv4);
-    tmpl->id.spi = htonl(state->spi);
     tmpl->id.proto = IPPROTO_ESP;
     tmpl->family = AF_INET;
     tmpl->saddr.a4 = htonl(state->src_outer_ipv4);
     tmpl->reqid = state->reqid;
     tmpl->mode = XFRM_MODE_TUNNEL;
-    tmpl->share = XFRM_SHARE_UNIQUE;
+    tmpl->share = XFRM_SHARE_ANY;
+    tmpl->aalgos = 0xffffffffu;
+    tmpl->ealgos = 0xffffffffu;
+    tmpl->calgos = 0xffffffffu;
 }
 
 static bool
@@ -456,7 +460,7 @@ provider_xfrm_linux_policy_message_build(
     policy.priority = PROVIDER_XFRM_LINUX_DEFAULT_PRIORITY;
     policy.dir = dir;
     policy.action = XFRM_POLICY_ALLOW;
-    policy.share = XFRM_SHARE_UNIQUE;
+    policy.share = XFRM_SHARE_ANY;
 
     if (!provider_xfrm_linux_message_start(message, XFRM_MSG_NEWPOLICY,
                                            &policy, sizeof(policy)))

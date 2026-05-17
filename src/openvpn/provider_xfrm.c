@@ -297,13 +297,13 @@ provider_xfrm_lease_build(struct provider_xfrm_lease *lease,
         }
         return false;
     }
-    if (!spec->mark_mask || !spec->reqid)
+    if (!spec->reqid)
     {
         if (result)
         {
             result->ok = false;
             snprintf(result->reason, sizeof(result->reason),
-                     "mark mask and reqid are required");
+                     "reqid is required");
         }
         return false;
     }
@@ -471,11 +471,11 @@ provider_xfrm_child_sa_plan_build(struct provider_xfrm_child_sa_plan *plan,
     }
 
     if (!spec->lease_id || !spec->provider_session_id
-        || !spec->policy_revision || !spec->reqid || !spec->mark_mask)
+        || !spec->policy_revision || !spec->reqid)
     {
         provider_xfrm_set_error(
             result,
-            "lease id, provider session id, policy revision, reqid, and mark mask are required");
+            "lease id, provider session id, policy revision, and reqid are required");
         return false;
     }
 

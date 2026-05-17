@@ -164,6 +164,9 @@ test_provider_session_xfrm_lease_storage(void **state)
     assert_false(provider_session_get_xfrm_lease(session, &output));
 
     struct provider_session_xfrm_lease input = default_xfrm_lease(session->id);
+    input.mark_value = 0;
+    input.mark_mask = 0;
+    input.if_id = 0;
     assert_true(provider_session_set_xfrm_lease(session, &input));
     assert_true(provider_session_get_xfrm_lease(session, &output));
     assert_memory_equal(&output, &input, sizeof(output));
@@ -172,7 +175,7 @@ test_provider_session_xfrm_lease_storage(void **state)
 
     input.mark_value = 0x1000003u;
     assert_true(provider_session_get_xfrm_lease(session, &output));
-    assert_int_equal(output.mark_value, 0x1000002u);
+    assert_int_equal(output.mark_value, 0);
 
     assert_true(provider_session_kill_by_cid(&table, session->management_cid,
                                              "test cleanup"));
@@ -204,10 +207,6 @@ test_provider_session_xfrm_lease_validation(void **state)
 
     lease = default_xfrm_lease(session->id);
     lease.policy_revision = 8;
-    assert_false(provider_session_set_xfrm_lease(session, &lease));
-
-    lease = default_xfrm_lease(session->id);
-    lease.mark_mask = 0;
     assert_false(provider_session_set_xfrm_lease(session, &lease));
 
     lease = default_xfrm_lease(session->id);

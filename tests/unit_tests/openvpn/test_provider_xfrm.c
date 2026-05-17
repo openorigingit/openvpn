@@ -510,6 +510,31 @@ test_provider_xfrm_linux_builds_child_sa_messages(void **state)
     assert_int_equal(in_pol->dir, XFRM_POLICY_IN);
     assert_int_equal(fwd_pol->dir, XFRM_POLICY_FWD);
     assert_int_equal(out_pol->dir, XFRM_POLICY_OUT);
+    assert_int_equal(in_pol->share, XFRM_SHARE_ANY);
+    assert_int_equal(fwd_pol->share, XFRM_SHARE_ANY);
+    assert_int_equal(out_pol->share, XFRM_SHARE_ANY);
+
+    const struct rtattr *in_tmpl_attr = test_provider_xfrm_linux_find_attr(
+        &messages.messages[2], sizeof(*in_pol), XFRMA_TMPL);
+    assert_non_null(in_tmpl_attr);
+    const struct xfrm_user_tmpl *in_tmpl = RTA_DATA(in_tmpl_attr);
+    assert_int_equal(in_tmpl->id.spi, 0);
+    assert_int_equal(in_tmpl->reqid, spec.reqid);
+    assert_int_equal(in_tmpl->share, XFRM_SHARE_ANY);
+    assert_int_equal(in_tmpl->aalgos, 0xffffffffu);
+    assert_int_equal(in_tmpl->ealgos, 0xffffffffu);
+    assert_int_equal(in_tmpl->calgos, 0xffffffffu);
+
+    const struct rtattr *out_tmpl_attr = test_provider_xfrm_linux_find_attr(
+        &messages.messages[4], sizeof(*out_pol), XFRMA_TMPL);
+    assert_non_null(out_tmpl_attr);
+    const struct xfrm_user_tmpl *out_tmpl = RTA_DATA(out_tmpl_attr);
+    assert_int_equal(out_tmpl->id.spi, 0);
+    assert_int_equal(out_tmpl->reqid, spec.reqid);
+    assert_int_equal(out_tmpl->share, XFRM_SHARE_ANY);
+    assert_int_equal(out_tmpl->aalgos, 0xffffffffu);
+    assert_int_equal(out_tmpl->ealgos, 0xffffffffu);
+    assert_int_equal(out_tmpl->calgos, 0xffffffffu);
 
     provider_xfrm_linux_message_plan_clear(&messages);
     provider_xfrm_child_sa_plan_clear(&plan);

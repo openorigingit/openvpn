@@ -41,6 +41,12 @@
 #include <sched.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#ifndef UDP_ENCAP
+#define UDP_ENCAP 100
+#endif
+#ifndef UDP_ENCAP_ESPINUDP
+#define UDP_ENCAP_ESPINUDP 2
+#endif
 #endif
 
 static const char *noop_helper_path;
@@ -1050,6 +1056,9 @@ test_provider_helper_xfrm_lease_roundtrip(void **state)
     assert_int_equal(output.remote_ts_end_port, input.remote_ts_end_port);
     assert_int_equal(output.ip_protocol_id, input.ip_protocol_id);
 
+    input.mark_mask = 0;
+    assert_true(provider_helper_xfrm_lease_valid(&input, reason, sizeof(reason)));
+    input.mark_mask = 0xffff;
     input.reqid = 0;
     assert_false(provider_helper_xfrm_lease_valid(&input, reason, sizeof(reason)));
     assert_non_null(strstr(reason, "reqid"));
@@ -7829,6 +7838,64 @@ test_create_udp_sender(uint32_t source_addr)
     return fd;
 }
 
+static uint16_t
+test_udp_local_port(int fd)
+{
+    struct sockaddr_in addr;
+    socklen_t addr_len = sizeof(addr);
+    CLEAR(addr);
+    assert_int_equal(getsockname(fd, (struct sockaddr *)&addr, &addr_len), 0);
+    assert_int_equal(addr.sin_family, AF_INET);
+    assert_true(ntohs(addr.sin_port) > 0);
+    return ntohs(addr.sin_port);
+}
+
+#if defined(TARGET_LINUX)
+static void
+test_assert_udp_encap_espinudp(int fd)
+{
+    int encap = 0;
+    socklen_t encap_len = sizeof(encap);
+    assert_int_equal(getsockopt(fd, IPPROTO_UDP, UDP_ENCAP, &encap,
+                                &encap_len), 0);
+    assert_int_equal(encap, UDP_ENCAP_ESPINUDP);
+}
+#endif
+
+#if defined(TARGET_LINUX)
+static void
+test_assert_xfrm_natt_encap_ports(uint16_t local_port, uint16_t remote_port)
+{
+    FILE *pipe = popen("ip xfrm state", "r");
+    assert_non_null(pipe);
+
+    char output[8192];
+    size_t used = 0;
+    while (used + 1 < sizeof(output))
+    {
+        const size_t n = fread(output + used, 1, sizeof(output) - used - 1, pipe);
+        used += n;
+        if (n == 0)
+        {
+            break;
+        }
+    }
+    output[used] = '\0';
+    assert_int_equal(pclose(pipe), 0);
+
+    char inbound[128];
+    char outbound[128];
+    assert_true(snprintf(inbound, sizeof(inbound),
+                         "encap type espinudp sport %u dport %u",
+                         remote_port, local_port) < (int)sizeof(inbound));
+    assert_true(snprintf(outbound, sizeof(outbound),
+                         "encap type espinudp sport %u dport %u",
+                         local_port, remote_port) < (int)sizeof(outbound));
+    assert_non_null(strstr(output, inbound));
+    assert_non_null(strstr(output, outbound));
+}
+#endif
+
 static void
 write_helper_header_fd(int fd, uint32_t type, uint64_t sequence,
                        uint64_t correlation_id)
@@ -8017,6 +8084,9 @@ test_provider_helper_spawn_ikev2_natt_listener(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.last_rx_sequence, 3);
+#if defined(TARGET_LINUX)
+    test_assert_udp_encap_espinudp(listener_fd);
+#endif
 
     int response_fd = test_create_udp_sender(0x7f000006u);
     test_send_ikev2_natt_datagram_from(response_fd, port,
@@ -12256,6 +12326,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
 
     int response_fd = test_create_udp_sender(0x7f000009u);
     int migrated_fd = test_create_udp_sender(0x7f00000au);
+    const uint16_t response_port = test_udp_local_port(response_fd);
     const uint64_t initiator_spi = 0x8877665544332211ull;
     test_send_ikev2_datagram_from(response_fd, port, initiator_spi);
     usleep(10000);
@@ -12301,6 +12372,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
                      1);
     assert_int_equal(supervisor.runtime_stats.ike_create_child_response_tx, 1);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
+    test_assert_xfrm_natt_encap_ports(natt_port, response_port);
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     assert_true(provider_helper_supervisor_send_xfrm_lease(&supervisor,

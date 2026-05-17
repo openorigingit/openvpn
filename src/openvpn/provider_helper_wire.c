@@ -310,10 +310,10 @@ provider_helper_xfrm_lease_valid(const struct provider_helper_xfrm_lease *lease,
                                       "XFRM lease identity fields must be nonzero");
         return false;
     }
-    if (!lease->mark_mask || !lease->reqid)
+    if (!lease->reqid)
     {
         provider_helper_config_reason(reason, reason_size,
-                                      "XFRM lease mark mask and reqid must be nonzero");
+                                      "XFRM lease reqid must be nonzero");
         return false;
     }
     if (lease->expires && lease->rekey_deadline

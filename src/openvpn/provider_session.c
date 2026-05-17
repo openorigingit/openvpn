@@ -258,7 +258,7 @@ provider_session_set_xfrm_lease(struct provider_session *session,
     }
 
     if (!lease->lease_id || !lease->provider_session_id || !lease->policy_revision
-        || !lease->mark_mask || !lease->reqid || !lease->address_family
+        || !lease->reqid || !lease->address_family
         || !lease->flags || lease->provider_session_id != session->id
         || lease->reserved)
     {

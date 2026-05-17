@@ -181,6 +181,15 @@
 #define IKEV2_HELPER_CAN_DRAIN_LISTENER 0
 #endif
 
+#if defined(TARGET_LINUX)
+#ifndef UDP_ENCAP
+#define UDP_ENCAP 100
+#endif
+#ifndef UDP_ENCAP_ESPINUDP
+#define UDP_ENCAP_ESPINUDP 2
+#endif
+#endif
+
 static volatile sig_atomic_t helper_stop;
 static volatile sig_atomic_t helper_fatal;
 
@@ -2774,6 +2783,30 @@ ikev2_helper_enable_listener_pktinfo(
     }
 
     return false;
+}
+
+static bool
+ikev2_helper_enable_listener_udp_encap(
+    const struct provider_helper_listener_fd *listener,
+    int fd)
+{
+    if (!listener || fd < 0
+        || !(listener->flags & PROVIDER_HELPER_LISTENER_FD_NATT))
+    {
+        return true;
+    }
+
+#if defined(TARGET_LINUX)
+    if (listener->family != AF_INET && listener->family != AF_INET6)
+    {
+        return false;
+    }
+
+    const int encap = UDP_ENCAP_ESPINUDP;
+    return setsockopt(fd, IPPROTO_UDP, UDP_ENCAP, &encap, sizeof(encap)) == 0;
+#else
+    return true;
+#endif
 }
 
 static void
@@ -13180,9 +13213,18 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
 
             if (natt_migrated)
             {
+                if (!local_endpoint_ready)
+                {
+                    ++counters->ike_auth_unsupported;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
                 sa->listener_id = listener->descriptor.listener_id;
                 sa->peer = peer;
                 sa->peer_len = peer_len;
+                sa->local_endpoint = local_endpoint;
+                sa->local_endpoint_len = local_endpoint_len;
+                sa->local_endpoint_ready = true;
                 ++counters->ike_auth_natt_migrated;
             }
             sa->message_id = header.message_id;
@@ -14108,6 +14150,8 @@ ikev2_helper_loop(int fd)
                         listeners, listener_count, listener.listener_id)
                     || !ikev2_helper_enable_listener_pktinfo(&listener,
                                                              listener_fd)
+                    || !ikev2_helper_enable_listener_udp_encap(&listener,
+                                                               listener_fd)
                     || !ikev2_helper_send_header(fd, PROVIDER_HELPER_MSG_LISTENER_FD_ACK,
                                                  tx_sequence++, header.sequence))
                 {

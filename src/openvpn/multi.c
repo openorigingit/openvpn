@@ -1116,9 +1116,9 @@ multi_ikev2_helper_build_xfrm_lease(
     lease->lease_id = session->id;
     lease->provider_session_id = session->id;
     lease->policy_revision = policy_revision;
-    lease->mark_value = xfrm_id;
-    lease->mark_mask = 0xffffffffu;
-    lease->if_id = xfrm_id;
+    lease->mark_value = 0;
+    lease->mark_mask = 0;
+    lease->if_id = 0;
     lease->reqid = xfrm_id;
     lease->address_family = AF_INET;
     lease->flags = PROVIDER_HELPER_XFRM_LEASE_IPV4;
