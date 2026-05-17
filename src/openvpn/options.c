@@ -438,6 +438,8 @@ static const char usage_message[] =
     "                  provider client credential fingerprint. Repeatable.\n"
     "--experimental-ikev2-helper-apply-xfrm : Allow the experimental IKEv2\n"
     "                  helper to install OpenVPN-issued Linux XFRM state.\n"
+    "--experimental-ikev2-helper-full-tunnel : Test-only mode authorizing\n"
+    "                  IPv4 0.0.0.0/0 traffic selectors for IKEv2 clients.\n"
     "--push \"option\" : Push a config file option back to the peer for remote\n"
     "                  execution.  Peer must specify --pull in its config file.\n"
     "--push-reset    : Don't inherit global push list for specific\n"
@@ -1805,6 +1807,7 @@ show_settings(const struct options *o)
     SHOW_STR(ikev2_helper_path);
     SHOW_STR(ikev2_helper_server_id);
     SHOW_BOOL(ikev2_helper_apply_xfrm);
+    SHOW_BOOL(ikev2_helper_full_tunnel);
 
     show_dns_options(&o->dns_options);
 
@@ -2517,6 +2520,7 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
 #ifdef _WIN32
         if (options->ikev2_helper_path || options->ikev2_helper_server_id
             || options->ikev2_helper_apply_xfrm
+            || options->ikev2_helper_full_tunnel
             || provider_policy_fingerprint_list_defined(
                 &options->ikev2_helper_allowed_fingerprints))
         {
@@ -2541,6 +2545,12 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
         {
             msg(M_USAGE,
                 "--experimental-ikev2-helper-apply-xfrm requires --experimental-ikev2-helper");
+        }
+        if (options->ikev2_helper_full_tunnel
+            && !options->ikev2_helper_apply_xfrm)
+        {
+            msg(M_USAGE,
+                "--experimental-ikev2-helper-full-tunnel requires --experimental-ikev2-helper-apply-xfrm");
         }
         if (options->ikev2_helper_path && !options->ikev2_helper_server_id)
         {
@@ -2681,6 +2691,8 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
                       "experimental-ikev2-helper-server-id");
         MUST_BE_FALSE(options->ikev2_helper_apply_xfrm,
                       "experimental-ikev2-helper-apply-xfrm");
+        MUST_BE_FALSE(options->ikev2_helper_full_tunnel,
+                      "experimental-ikev2-helper-full-tunnel");
         MUST_BE_FALSE(provider_policy_fingerprint_list_defined(
                           &options->ikev2_helper_allowed_fingerprints),
                       "experimental-ikev2-helper-allow-fingerprint");
@@ -7348,6 +7360,11 @@ add_option(struct options *options, char *p[], bool is_inline, const char *file,
     {
         VERIFY_PERMISSION(OPT_P_GENERAL);
         options->ikev2_helper_apply_xfrm = true;
+    }
+    else if (streq(p[0], "experimental-ikev2-helper-full-tunnel") && !p[1])
+    {
+        VERIFY_PERMISSION(OPT_P_GENERAL);
+        options->ikev2_helper_full_tunnel = true;
     }
     else if (streq(p[0], "push") && p[1] && !p[2])
     {

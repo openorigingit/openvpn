@@ -1103,6 +1103,7 @@ multi_ikev2_helper_build_xfrm_lease(
     uint64_t policy_revision,
     in_addr_t local_ipv4,
     in_addr_t remote_ipv4,
+    bool full_tunnel,
     struct provider_session_xfrm_lease *lease)
 {
     uint32_t xfrm_id = 0;
@@ -1122,8 +1123,8 @@ multi_ikev2_helper_build_xfrm_lease(
     lease->reqid = xfrm_id;
     lease->address_family = AF_INET;
     lease->flags = PROVIDER_HELPER_XFRM_LEASE_IPV4;
-    lease->local_ts_start_ipv4 = local_ipv4;
-    lease->local_ts_end_ipv4 = local_ipv4;
+    lease->local_ts_start_ipv4 = full_tunnel ? 0 : local_ipv4;
+    lease->local_ts_end_ipv4 = full_tunnel ? UINT32_MAX : local_ipv4;
     lease->local_ts_start_port = 0;
     lease->local_ts_end_port = 65535;
     lease->remote_ts_start_ipv4 = remote_ipv4;
@@ -1209,10 +1210,13 @@ multi_ikev2_helper_authorize_session(
     const char *assigned_address = print_in_addr_t(pool_remote, 0, &gc);
     const char *local_selector = print_in_addr_t(local_ts, 0, &gc);
     const char *remote_selector = print_in_addr_t(pool_remote, 0, &gc);
+    const bool full_tunnel = m->top.options.ikev2_helper_full_tunnel;
     char authorized_selectors[PROVIDER_POLICY_SELECTOR_SIZE];
     const int selector_len =
         snprintf(authorized_selectors, sizeof(authorized_selectors),
-                 "%s/32<->%s/32", local_selector, remote_selector);
+                 full_tunnel ? "0.0.0.0/0<->%s/32" : "%s/32<->%s/32",
+                 full_tunnel ? remote_selector : local_selector,
+                 remote_selector);
     if (selector_len < 0
         || (size_t)selector_len >= sizeof(authorized_selectors))
     {
@@ -1250,7 +1254,8 @@ multi_ikev2_helper_authorize_session(
     struct provider_session_xfrm_lease session_lease;
     struct provider_helper_xfrm_lease helper_lease;
     if (!multi_ikev2_helper_build_xfrm_lease(
-            session, policy_revision, local_ts, pool_remote, &session_lease)
+            session, policy_revision, local_ts, pool_remote, full_tunnel,
+            &session_lease)
         || !provider_session_set_xfrm_lease(session, &session_lease))
     {
         multi_ikev2_helper_release_session_address(m, session, true);

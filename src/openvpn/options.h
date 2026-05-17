@@ -478,6 +478,7 @@ struct options
     const char *ikev2_helper_path;
     const char *ikev2_helper_server_id;
     bool ikev2_helper_apply_xfrm;
+    bool ikev2_helper_full_tunnel;
     struct provider_policy_fingerprint_list ikev2_helper_allowed_fingerprints;
 
     bool server_bridge_proxy_dhcp;
