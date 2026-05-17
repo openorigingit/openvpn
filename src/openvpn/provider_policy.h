@@ -122,6 +122,17 @@ bool provider_policy_fingerprint_list_add_runtime(
     const char *credential_fingerprint);
 void provider_policy_fingerprint_list_free_runtime(
     struct provider_policy_fingerprint_list *list);
+bool provider_policy_fingerprint_list_load_runtime(
+    struct provider_policy_fingerprint_list *list,
+    const char *path,
+    char *reason,
+    size_t reason_size,
+    size_t *loaded_count);
+bool provider_policy_fingerprint_list_append_file(
+    const char *path,
+    const char *credential_fingerprint,
+    char *reason,
+    size_t reason_size);
 
 bool provider_policy_push_option_supported(const char *option);
 

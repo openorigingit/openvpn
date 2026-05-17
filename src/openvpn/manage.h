@@ -185,6 +185,9 @@ struct management_callback
     bool (*kill_by_cid)(void *arg, const unsigned long cid, const char *kill_msg);
     bool (*provider_revoke_by_cid)(void *arg, const unsigned long cid,
                                    const char *reason);
+    bool (*provider_revoke_by_fingerprint)(void *arg,
+                                           const char *credential_fingerprint,
+                                           const char *reason);
     bool (*client_auth)(void *arg, const unsigned long cid, const unsigned int mda_key_id,
                         const bool auth, const char *reason, const char *client_reason,
                         struct buffer_list *cc_config); /* ownership transferred */

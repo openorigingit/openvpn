@@ -21,6 +21,7 @@
 #include "manage.h"
 #include "options.h"
 #include "plugin.h"
+#include "platform.h"
 #include "provider_policy.h"
 #include "pushlist.h"
 
@@ -135,6 +136,21 @@ provider_policy_plugin_defined(const struct plugin_list *plugins, int plugin_typ
     }
 #endif
     return false;
+}
+
+static void
+provider_policy_set_reason(char *reason, size_t reason_size, const char *fmt,
+                           ...)
+{
+    if (!reason || !reason_size)
+    {
+        return;
+    }
+
+    va_list arglist;
+    va_start(arglist, fmt);
+    vsnprintf(reason, reason_size, fmt, arglist);
+    va_end(arglist);
 }
 
 static void
@@ -298,6 +314,248 @@ provider_policy_fingerprint_list_free_runtime(
         entry = next;
     }
     CLEAR(*list);
+}
+
+static char *
+provider_policy_trim_revocation_line(char *line)
+{
+    char *start = line;
+    while (*start == ' ' || *start == '\t')
+    {
+        ++start;
+    }
+
+    char *comment = strchr(start, '#');
+    if (comment)
+    {
+        *comment = '\0';
+    }
+
+    char *end = start + strlen(start);
+    while (end > start
+           && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r'
+               || end[-1] == '\n'))
+    {
+        --end;
+    }
+    *end = '\0';
+    return start;
+}
+
+bool
+provider_policy_fingerprint_list_load_runtime(
+    struct provider_policy_fingerprint_list *list,
+    const char *path,
+    char *reason,
+    size_t reason_size,
+    size_t *loaded_count)
+{
+    if (loaded_count)
+    {
+        *loaded_count = 0;
+    }
+    provider_policy_set_reason(reason, reason_size, "ok");
+
+    if (!list || !path || !*path)
+    {
+        provider_policy_set_reason(reason, reason_size,
+                                   "missing revocation file path");
+        return false;
+    }
+
+    FILE *fp = platform_fopen(path, "r");
+    if (!fp)
+    {
+        const int open_errno = errno;
+        if (open_errno == ENOENT)
+        {
+            return true;
+        }
+
+        provider_policy_set_reason(reason, reason_size,
+                                   "could not open revocation file '%s': %s",
+                                   path, strerror(open_errno));
+        return false;
+    }
+
+    char line[512];
+    size_t line_number = 0;
+    struct provider_policy_fingerprint_list loaded = { 0 };
+    while (fgets(line, sizeof(line), fp))
+    {
+        ++line_number;
+        const size_t len = strlen(line);
+        if (len && line[len - 1] != '\n' && !feof(fp))
+        {
+            provider_policy_set_reason(reason, reason_size,
+                                       "revocation file '%s' line %zu is too long",
+                                       path, line_number);
+            provider_policy_fingerprint_list_free_runtime(&loaded);
+            fclose(fp);
+            return false;
+        }
+
+        const char *fingerprint = provider_policy_trim_revocation_line(line);
+        if (!*fingerprint)
+        {
+            continue;
+        }
+
+        if (!provider_policy_fingerprint_valid(fingerprint))
+        {
+            provider_policy_set_reason(
+                reason, reason_size,
+                "revocation file '%s' line %zu has invalid fingerprint",
+                path, line_number);
+            provider_policy_fingerprint_list_free_runtime(&loaded);
+            fclose(fp);
+            return false;
+        }
+
+        if (!provider_policy_fingerprint_list_add_runtime(&loaded,
+                                                          fingerprint))
+        {
+            provider_policy_set_reason(
+                reason, reason_size,
+                "revocation file '%s' line %zu could not be loaded",
+                path, line_number);
+            provider_policy_fingerprint_list_free_runtime(&loaded);
+            fclose(fp);
+            return false;
+        }
+    }
+
+    if (ferror(fp))
+    {
+        const int read_errno = errno;
+        provider_policy_set_reason(reason, reason_size,
+                                   "could not read revocation file '%s': %s",
+                                   path, strerror(read_errno));
+        provider_policy_fingerprint_list_free_runtime(&loaded);
+        fclose(fp);
+        return false;
+    }
+
+    if (fclose(fp) != 0)
+    {
+        const int close_errno = errno;
+        provider_policy_set_reason(reason, reason_size,
+                                   "could not close revocation file '%s': %s",
+                                   path, strerror(close_errno));
+        provider_policy_fingerprint_list_free_runtime(&loaded);
+        return false;
+    }
+
+    for (const struct provider_policy_fingerprint_entry *entry = loaded.head;
+         entry;
+         entry = entry->next)
+    {
+        const size_t old_count = list->count;
+        if (!provider_policy_fingerprint_list_add_runtime(
+                list, entry->credential_fingerprint))
+        {
+            provider_policy_set_reason(
+                reason, reason_size,
+                "revocation file '%s' entry could not be loaded",
+                path);
+            provider_policy_fingerprint_list_free_runtime(&loaded);
+            return false;
+        }
+        if (loaded_count && list->count != old_count)
+        {
+            ++*loaded_count;
+        }
+    }
+    provider_policy_fingerprint_list_free_runtime(&loaded);
+    return true;
+}
+
+bool
+provider_policy_fingerprint_list_append_file(
+    const char *path,
+    const char *credential_fingerprint,
+    char *reason,
+    size_t reason_size)
+{
+    provider_policy_set_reason(reason, reason_size, "ok");
+    if (!path || !*path)
+    {
+        provider_policy_set_reason(reason, reason_size,
+                                   "missing revocation file path");
+        return false;
+    }
+    if (!provider_policy_fingerprint_valid(credential_fingerprint))
+    {
+        provider_policy_set_reason(reason, reason_size,
+                                   "invalid provider credential fingerprint");
+        return false;
+    }
+
+#ifdef _WIN32
+    FILE *fp = platform_fopen(path, "a");
+    if (!fp)
+    {
+        const int open_errno = errno;
+        provider_policy_set_reason(reason, reason_size,
+                                   "could not open revocation file '%s': %s",
+                                   path, strerror(open_errno));
+        return false;
+    }
+#else
+    int fd = platform_open(path, O_CREAT | O_APPEND | O_WRONLY | O_BINARY,
+                           S_IRUSR | S_IWUSR);
+    if (fd < 0)
+    {
+        const int open_errno = errno;
+        provider_policy_set_reason(reason, reason_size,
+                                   "could not open revocation file '%s': %s",
+                                   path, strerror(open_errno));
+        return false;
+    }
+
+    FILE *fp = fdopen(fd, "a");
+    if (!fp)
+    {
+        const int fdopen_errno = errno;
+        close(fd);
+        provider_policy_set_reason(reason, reason_size,
+                                   "could not stream revocation file '%s': %s",
+                                   path, strerror(fdopen_errno));
+        return false;
+    }
+#endif
+
+    if (fprintf(fp, "%s\n", credential_fingerprint) < 0 || fflush(fp) != 0)
+    {
+        const int write_errno = errno;
+        fclose(fp);
+        provider_policy_set_reason(reason, reason_size,
+                                   "could not write revocation file '%s': %s",
+                                   path, strerror(write_errno));
+        return false;
+    }
+
+#ifndef _WIN32
+    if (fsync(fd) != 0)
+    {
+        const int fsync_errno = errno;
+        fclose(fp);
+        provider_policy_set_reason(reason, reason_size,
+                                   "could not sync revocation file '%s': %s",
+                                   path, strerror(fsync_errno));
+        return false;
+    }
+#endif
+
+    if (fclose(fp) != 0)
+    {
+        const int close_errno = errno;
+        provider_policy_set_reason(reason, reason_size,
+                                   "could not close revocation file '%s': %s",
+                                   path, strerror(close_errno));
+        return false;
+    }
+    return true;
 }
 
 const char *

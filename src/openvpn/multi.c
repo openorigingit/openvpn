@@ -1496,6 +1496,32 @@ multi_init(struct context *t)
     provider_session_table_init(&m->provider_sessions);
     m->provider_policy_revision =
         MULTI_IKEV2_HELPER_INITIAL_POLICY_REVISION;
+    if (t->options.ikev2_helper_revocation_file)
+    {
+        char reason[PROVIDER_POLICY_REASON_SIZE];
+        size_t loaded_count = 0;
+        if (!provider_policy_fingerprint_list_load_runtime(
+                &m->provider_revoked_fingerprints,
+                t->options.ikev2_helper_revocation_file,
+                reason, sizeof(reason), &loaded_count))
+        {
+            msg(M_FATAL,
+                "IKEv2 helper revocation file load failed: %s", reason);
+        }
+        if (UINT64_MAX - m->provider_policy_revision < loaded_count)
+        {
+            m->provider_policy_revision = UINT64_MAX;
+        }
+        else
+        {
+            m->provider_policy_revision += loaded_count;
+        }
+        msg(M_INFO,
+            "IKEv2 helper loaded %zu revoked credential fingerprint%s from %s, policy revision %" PRIu64,
+            loaded_count, loaded_count == 1 ? "" : "s",
+            t->options.ikev2_helper_revocation_file,
+            m->provider_policy_revision);
+    }
 
     /*
      * Real address hash table (source port number is
@@ -5254,6 +5280,68 @@ management_kill_by_cid(void *arg, const unsigned long cid, const char *kill_msg)
 }
 
 static bool
+management_provider_revoke_fingerprint(void *arg,
+                                       const char *credential_fingerprint,
+                                       const char *reason)
+{
+    struct multi_context *m = (struct multi_context *)arg;
+    if (!provider_policy_fingerprint_valid(credential_fingerprint))
+    {
+        return false;
+    }
+
+    const bool already_revoked =
+        provider_policy_fingerprint_list_contains(
+            &m->provider_revoked_fingerprints, credential_fingerprint);
+    if (!already_revoked
+        && m->top.options.ikev2_helper_revocation_file)
+    {
+        char file_reason[PROVIDER_POLICY_REASON_SIZE];
+        if (!provider_policy_fingerprint_list_append_file(
+                m->top.options.ikev2_helper_revocation_file,
+                credential_fingerprint, file_reason, sizeof(file_reason)))
+        {
+            msg(M_WARN,
+                "MANAGEMENT: provider credential fingerprint revocation was not persisted: %s",
+                file_reason);
+            return false;
+        }
+    }
+
+    if (!provider_policy_fingerprint_list_add_runtime(
+            &m->provider_revoked_fingerprints, credential_fingerprint))
+    {
+        return false;
+    }
+    if (!already_revoked && m->provider_policy_revision < UINT64_MAX)
+    {
+        ++m->provider_policy_revision;
+    }
+
+    const char *revoke_reason =
+        reason && *reason ? reason : "provider credential revoked";
+    unsigned int killed = 0;
+    for (struct provider_session *session = m->provider_sessions.head; session;)
+    {
+        struct provider_session *next = session->next;
+        const unsigned long cid = session->management_cid;
+        if (session->credential_fingerprint
+            && strcasecmp(session->credential_fingerprint,
+                          credential_fingerprint) == 0
+            && management_kill_provider_session_by_cid(m, cid, revoke_reason))
+        {
+            ++killed;
+        }
+        session = next;
+    }
+
+    msg(M_INFO,
+        "MANAGEMENT: provider credential fingerprint revoked, killed %u active provider session%s, policy revision %" PRIu64,
+        killed, killed == 1 ? "" : "s", m->provider_policy_revision);
+    return true;
+}
+
+static bool
 management_provider_revoke_by_cid(void *arg, const unsigned long cid,
                                   const char *reason)
 {
@@ -5275,28 +5363,12 @@ management_provider_revoke_by_cid(void *arg, const unsigned long cid,
         return false;
     }
 
-    const bool already_revoked =
-        provider_policy_fingerprint_list_contains(
-            &m->provider_revoked_fingerprints, credential_fingerprint);
-    if (!provider_policy_fingerprint_list_add_runtime(
-            &m->provider_revoked_fingerprints, credential_fingerprint))
-    {
-        return false;
-    }
-    if (!already_revoked)
-    {
-        if (m->provider_policy_revision < UINT64_MAX)
-        {
-            ++m->provider_policy_revision;
-        }
-    }
-
-    const char *revoke_reason =
-        reason && *reason ? reason : "provider credential revoked";
     msg(M_INFO,
-        "MANAGEMENT: provider credential fingerprint revoked for CID %lu, policy revision %" PRIu64,
-        cid, m->provider_policy_revision);
-    return management_kill_provider_session_by_cid(m, cid, revoke_reason);
+        "MANAGEMENT: provider credential fingerprint revoke requested for CID %lu",
+        cid);
+    return management_provider_revoke_fingerprint(
+        arg, credential_fingerprint,
+        reason && *reason ? reason : "provider credential revoked");
 }
 
 static bool
@@ -5407,6 +5479,8 @@ init_management_callback_multi(struct multi_context *m)
         cb.n_clients = management_callback_n_clients;
         cb.kill_by_cid = management_kill_by_cid;
         cb.provider_revoke_by_cid = management_provider_revoke_by_cid;
+        cb.provider_revoke_by_fingerprint =
+            management_provider_revoke_fingerprint;
         cb.client_auth = management_client_auth;
         cb.client_pending_auth = management_client_pending_auth;
         cb.get_peer_info = management_get_peer_info;

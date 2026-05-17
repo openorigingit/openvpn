@@ -436,6 +436,8 @@ static const char usage_message[] =
     "                  advertised by the experimental IKEv2 helper.\n"
     "--experimental-ikev2-helper-allow-fingerprint fp : Authorize an IKEv2\n"
     "                  provider client credential fingerprint. Repeatable.\n"
+    "--experimental-ikev2-helper-revocation-file file : Persistently revoke\n"
+    "                  IKEv2 credential fingerprints, one fingerprint per line.\n"
     "--experimental-ikev2-helper-apply-xfrm : Allow the experimental IKEv2\n"
     "                  helper to install OpenVPN-issued Linux XFRM state.\n"
     "--experimental-ikev2-helper-full-tunnel : Test-only mode authorizing\n"
@@ -2519,6 +2521,7 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
         }
 #ifdef _WIN32
         if (options->ikev2_helper_path || options->ikev2_helper_server_id
+            || options->ikev2_helper_revocation_file
             || options->ikev2_helper_apply_xfrm
             || options->ikev2_helper_full_tunnel
             || provider_policy_fingerprint_list_defined(
@@ -2561,6 +2564,11 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
         {
             msg(M_USAGE,
                 "--experimental-ikev2-helper-server-id requires --experimental-ikev2-helper");
+        }
+        if (options->ikev2_helper_revocation_file && !options->ikev2_helper_path)
+        {
+            msg(M_USAGE,
+                "--experimental-ikev2-helper-revocation-file requires --experimental-ikev2-helper");
         }
         if (provider_policy_fingerprint_list_defined(
                 &options->ikev2_helper_allowed_fingerprints)
@@ -2689,6 +2697,8 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
         MUST_BE_UNDEF(ikev2_helper_path, "experimental-ikev2-helper");
         MUST_BE_UNDEF(ikev2_helper_server_id,
                       "experimental-ikev2-helper-server-id");
+        MUST_BE_UNDEF(ikev2_helper_revocation_file,
+                      "experimental-ikev2-helper-revocation-file");
         MUST_BE_FALSE(options->ikev2_helper_apply_xfrm,
                       "experimental-ikev2-helper-apply-xfrm");
         MUST_BE_FALSE(options->ikev2_helper_full_tunnel,
@@ -7343,6 +7353,12 @@ add_option(struct options *options, char *p[], bool is_inline, const char *file,
     {
         VERIFY_PERMISSION(OPT_P_GENERAL);
         options->ikev2_helper_server_id = p[1];
+    }
+    else if (streq(p[0], "experimental-ikev2-helper-revocation-file")
+             && p[1] && !p[2])
+    {
+        VERIFY_PERMISSION(OPT_P_GENERAL);
+        options->ikev2_helper_revocation_file = p[1];
     }
     else if (streq(p[0], "experimental-ikev2-helper-allow-fingerprint")
              && p[1] && !p[2])

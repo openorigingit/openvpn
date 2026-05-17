@@ -29,6 +29,9 @@
 #include "pushlist.h"
 #include "test_common.h"
 
+static const char test_revocation_fingerprint[] =
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 static struct push_entry
 push_entry(const char *option)
 {
@@ -303,6 +306,112 @@ test_provider_policy_runtime_revocation_list(void **state)
 }
 
 static void
+test_provider_policy_revocation_file_missing(void **state)
+{
+    (void)state;
+
+    struct provider_policy_fingerprint_list list = { 0 };
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    size_t loaded_count = 99;
+    char path[] = "provider-policy-missing-revocations-XXXXXX";
+    const int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    close(fd);
+    assert_int_equal(unlink(path), 0);
+
+    assert_true(provider_policy_fingerprint_list_load_runtime(
+        &list, path, reason, sizeof(reason), &loaded_count));
+    assert_int_equal(loaded_count, 0);
+    assert_false(provider_policy_fingerprint_list_defined(&list));
+    assert_string_equal(reason, "ok");
+}
+
+static void
+test_provider_policy_revocation_file_load(void **state)
+{
+    (void)state;
+
+    char path[] = "provider-policy-revocations-XXXXXX";
+    const int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    FILE *fp = fdopen(fd, "w");
+    assert_non_null(fp);
+    assert_true(fprintf(fp,
+                        "# comment\n"
+                        "\n"
+                        "  %s  # inline comment\n"
+                        "SHA256:ABCD\n"
+                        "sha256:abcd\n",
+                        test_revocation_fingerprint) > 0);
+    assert_int_equal(fclose(fp), 0);
+
+    struct provider_policy_fingerprint_list list = { 0 };
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    size_t loaded_count = 0;
+    assert_true(provider_policy_fingerprint_list_load_runtime(
+        &list, path, reason, sizeof(reason), &loaded_count));
+    assert_int_equal(loaded_count, 2);
+    assert_true(provider_policy_fingerprint_list_contains(
+        &list, test_revocation_fingerprint));
+    assert_true(provider_policy_fingerprint_list_contains(&list,
+                                                          "sha256:abcd"));
+    assert_string_equal(reason, "ok");
+
+    provider_policy_fingerprint_list_free_runtime(&list);
+    assert_int_equal(unlink(path), 0);
+}
+
+static void
+test_provider_policy_revocation_file_rejects_invalid(void **state)
+{
+    (void)state;
+
+    char path[] = "provider-policy-bad-revocations-XXXXXX";
+    const int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    FILE *fp = fdopen(fd, "w");
+    assert_non_null(fp);
+    assert_true(fprintf(fp, "sha256:has spaces\n") > 0);
+    assert_int_equal(fclose(fp), 0);
+
+    struct provider_policy_fingerprint_list list = { 0 };
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    assert_false(provider_policy_fingerprint_list_load_runtime(
+        &list, path, reason, sizeof(reason), NULL));
+    assert_non_null(strstr(reason, "invalid fingerprint"));
+    assert_false(provider_policy_fingerprint_list_defined(&list));
+
+    assert_int_equal(unlink(path), 0);
+}
+
+static void
+test_provider_policy_revocation_file_append(void **state)
+{
+    (void)state;
+
+    char path[] = "provider-policy-append-revocations-XXXXXX";
+    const int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    close(fd);
+
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    assert_true(provider_policy_fingerprint_list_append_file(
+        path, test_revocation_fingerprint, reason, sizeof(reason)));
+    assert_string_equal(reason, "ok");
+
+    struct provider_policy_fingerprint_list list = { 0 };
+    size_t loaded_count = 0;
+    assert_true(provider_policy_fingerprint_list_load_runtime(
+        &list, path, reason, sizeof(reason), &loaded_count));
+    assert_int_equal(loaded_count, 1);
+    assert_true(provider_policy_fingerprint_list_contains(
+        &list, test_revocation_fingerprint));
+
+    provider_policy_fingerprint_list_free_runtime(&list);
+    assert_int_equal(unlink(path), 0);
+}
+
+static void
 test_provider_policy_authorize_fails_closed(void **state)
 {
     (void)state;
@@ -421,6 +530,10 @@ main(void)
         cmocka_unit_test(test_provider_policy_ignores_disabled_push_entry),
         cmocka_unit_test(test_provider_policy_fingerprint_allowlist),
         cmocka_unit_test(test_provider_policy_runtime_revocation_list),
+        cmocka_unit_test(test_provider_policy_revocation_file_missing),
+        cmocka_unit_test(test_provider_policy_revocation_file_load),
+        cmocka_unit_test(test_provider_policy_revocation_file_rejects_invalid),
+        cmocka_unit_test(test_provider_policy_revocation_file_append),
         cmocka_unit_test(test_provider_policy_authorize_fails_closed),
         cmocka_unit_test(test_provider_policy_authorize_rejects_revoked_fingerprint),
         cmocka_unit_test(test_provider_policy_authorize_allowlisted_fingerprint),

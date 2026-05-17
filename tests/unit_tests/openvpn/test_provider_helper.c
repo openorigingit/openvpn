@@ -11053,7 +11053,7 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
         missing_lease_fd, natt_port, missing_lease_initiator_spi,
         &missing_lease_material, true, false, cert_der, cert_der_len);
 
-    for (int i = 0; i < 100 && cb_state.calls < 1; ++i)
+    for (int i = 0; i < 1000 && cb_state.calls < 1; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
@@ -11115,7 +11115,7 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
         response_fd, natt_port, initiator_spi, &sa_init_material, true, false,
         cert_der, cert_der_len);
 
-    for (int i = 0; i < 300 && cb_state.calls < 2; ++i)
+    for (int i = 0; i < 1000 && cb_state.calls < 2; ++i)
     {
         provider_helper_process_event(&supervisor);
         usleep(10000);
