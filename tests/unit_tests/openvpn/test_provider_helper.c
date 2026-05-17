@@ -1686,6 +1686,9 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
     (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE \
      + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE \
      + PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE)
+#define TEST_IKEV2_TS_MIXED_IPV6_IPV4_PAYLOAD_LEN \
+    (TEST_IKEV2_TS_IPV4_PAYLOAD_LEN \
+     + PROVIDER_HELPER_IKEV2_TS_IPV6_SELECTOR_SIZE)
 #define TEST_IKEV2_CP_IPV4_REQUEST_PAYLOAD_LEN \
     (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE \
      + PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE + 4)
@@ -1725,6 +1728,52 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
 #define TEST_IKEV2_TLS_HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE 12
 #define TEST_IKEV2_TLS_HANDSHAKE_TYPE_CERTIFICATE_REQUEST 13
 #define TEST_IKEV2_TLS_HANDSHAKE_TYPE_SERVER_HELLO_DONE 14
+
+static size_t
+test_write_ikev2_ts_ipv6_selector(uint8_t *body, size_t pos)
+{
+    body[pos] = PROVIDER_HELPER_IKEV2_TS_IPV6_ADDR_RANGE;
+    body[pos + 1] = 0;
+    test_write_be16(body + pos + 2,
+                    PROVIDER_HELPER_IKEV2_TS_IPV6_SELECTOR_SIZE);
+    test_write_be16(body + pos + 4, 0);
+    test_write_be16(body + pos + 6, 65535);
+    memset(body + pos + 8, 0, 16);
+    memset(body + pos + 24, 0xff, 16);
+    return pos + PROVIDER_HELPER_IKEV2_TS_IPV6_SELECTOR_SIZE;
+}
+
+static size_t
+test_write_ikev2_ts_ipv4_selector(uint8_t *body, size_t pos,
+                                  uint32_t start_ipv4, uint32_t end_ipv4)
+{
+    body[pos] = PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE;
+    body[pos + 1] = 0;
+    test_write_be16(body + pos + 2,
+                    PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
+    test_write_be16(body + pos + 4, 0);
+    test_write_be16(body + pos + 6, 65535);
+    test_write_be32(body + pos + 8, start_ipv4);
+    test_write_be32(body + pos + 12, end_ipv4);
+    return pos + PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE;
+}
+
+static size_t
+test_write_ikev2_ts_payload_body(uint8_t *body, bool mixed_ipv6_ipv4,
+                                 uint32_t start_ipv4, uint32_t end_ipv4)
+{
+    body[0] = mixed_ipv6_ipv4 ? 2 : 1;
+    body[1] = 0;
+    body[2] = 0;
+    body[3] = 0;
+
+    size_t pos = PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+    if (mixed_ipv6_ipv4)
+    {
+        pos = test_write_ikev2_ts_ipv6_selector(body, pos);
+    }
+    return test_write_ikev2_ts_ipv4_selector(body, pos, start_ipv4, end_ipv4);
+}
 #define TEST_IKEV2_TLS_HANDSHAKE_TYPE_CERTIFICATE_VERIFY 15
 #define TEST_IKEV2_TLS_HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE 16
 #define TEST_IKEV2_TLS_HANDSHAKE_TYPE_FINISHED 20
@@ -2943,7 +2992,8 @@ test_make_encrypted_ike_auth_message_id_flags_packet(
     size_t cert_der_len,
     uint8_t eap_code,
     uint8_t eap_flags,
-    uint32_t message_id)
+    uint32_t message_id,
+    bool mixed_traffic_selectors)
 {
     uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     CLEAR(plaintext);
@@ -3018,9 +3068,13 @@ test_make_encrypted_ike_auth_message_id_flags_packet(
     }
     else
     {
+        const uint16_t ts_payload_len =
+            mixed_traffic_selectors
+            ? TEST_IKEV2_TS_MIXED_IPV6_IPV4_PAYLOAD_LEN
+            : TEST_IKEV2_TS_IPV4_PAYLOAD_LEN;
         assert_true(plaintext_len + TEST_IKEV2_CP_IPV4_REQUEST_PAYLOAD_LEN
                     + TEST_IKEV2_CHILD_SA_PAYLOAD_LEN
-                    + (2 * TEST_IKEV2_TS_IPV4_PAYLOAD_LEN) + 1
+                    + (2 * ts_payload_len) + 1
                     <= sizeof(plaintext));
         plaintext_len = test_add_ikev2_payload(
             plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_SA,
@@ -3061,31 +3115,25 @@ test_make_encrypted_ike_auth_message_id_flags_packet(
 
         plaintext_len = test_add_ikev2_payload(
             plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_TSR,
-            TEST_IKEV2_TS_IPV4_PAYLOAD_LEN, 0);
-        const size_t tsi_body = plaintext_len - TEST_IKEV2_TS_IPV4_PAYLOAD_LEN
+            ts_payload_len, 0);
+        const size_t tsi_body = plaintext_len - ts_payload_len
                                 + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
-        plaintext[tsi_body] = 1;
-        const size_t tsi = tsi_body + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
-        plaintext[tsi] = PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE;
-        test_write_be16(plaintext + tsi + 2,
-                        PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
-        test_write_be16(plaintext + tsi + 6, 65535);
-        test_write_be32(plaintext + tsi + 8, 0x00000000);
-        test_write_be32(plaintext + tsi + 12, 0xffffffffu);
+        assert_int_equal(test_write_ikev2_ts_payload_body(
+                             plaintext + tsi_body, mixed_traffic_selectors,
+                             0x00000000, 0xffffffffu),
+                         ts_payload_len
+                         - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE);
 
         plaintext_len = test_add_ikev2_payload(
             plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
-            TEST_IKEV2_TS_IPV4_PAYLOAD_LEN, 0);
-        const size_t tsr_body = plaintext_len - TEST_IKEV2_TS_IPV4_PAYLOAD_LEN
+            ts_payload_len, 0);
+        const size_t tsr_body = plaintext_len - ts_payload_len
                                 + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
-        plaintext[tsr_body] = 1;
-        const size_t tsr = tsr_body + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
-        plaintext[tsr] = PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE;
-        test_write_be16(plaintext + tsr + 2,
-                        PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
-        test_write_be16(plaintext + tsr + 6, 65535);
-        test_write_be32(plaintext + tsr + 8, 0x00000000);
-        test_write_be32(plaintext + tsr + 12, 0xffffffffu);
+        assert_int_equal(test_write_ikev2_ts_payload_body(
+                             plaintext + tsr_body, mixed_traffic_selectors,
+                             0x00000000, 0xffffffffu),
+                         ts_payload_len
+                         - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE);
     }
     plaintext[plaintext_len++] = 0; /* Pad Length. */
 
@@ -3121,7 +3169,7 @@ test_make_encrypted_ike_auth_message_id_packet(
 {
     return test_make_encrypted_ike_auth_message_id_flags_packet(
         packet, packet_size, initiator_spi, material, natt, malformed_inner,
-        cert_der, cert_der_len, eap_code, 0x80, message_id);
+        cert_der, cert_der_len, eap_code, 0x80, message_id, false);
 }
 
 static size_t
@@ -3138,6 +3186,19 @@ test_make_encrypted_ike_auth_packet(
     return test_make_encrypted_ike_auth_message_id_packet(
         packet, packet_size, initiator_spi, material, natt, malformed_inner,
         cert_der, cert_der_len, TEST_IKEV2_EAP_CODE_RESPONSE, 1);
+}
+
+static size_t
+test_make_encrypted_ike_auth_mixed_ts_packet(
+    uint8_t *packet,
+    size_t packet_size,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt)
+{
+    return test_make_encrypted_ike_auth_message_id_flags_packet(
+        packet, packet_size, initiator_spi, material, natt, false, NULL, 0,
+        TEST_IKEV2_EAP_CODE_RESPONSE, 0x80, 1, true);
 }
 
 static size_t
@@ -3544,6 +3605,29 @@ test_send_ikev2_encrypted_ike_auth_datagram_from(
 }
 
 static void
+test_send_ikev2_encrypted_ike_auth_mixed_ts_datagram_from(
+    int fd,
+    uint16_t port,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt)
+{
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t packet_len = test_make_encrypted_ike_auth_mixed_ts_packet(
+        packet, sizeof(packet), initiator_spi, material, natt);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    assert_int_equal(sendto(fd, packet, packet_len, 0,
+                            (struct sockaddr *)&addr, sizeof(addr)),
+                     packet_len);
+}
+
+static void
 test_send_ikev2_encrypted_ike_auth_eap_response_fragment_datagram_from(
     int fd,
     uint16_t port,
@@ -3726,7 +3810,7 @@ test_send_ikev2_encrypted_ike_auth_eap_flags_datagram_from(
         test_make_encrypted_ike_auth_message_id_flags_packet(
             packet, sizeof(packet), initiator_spi, material, natt, false,
             cert_der, cert_der_len, TEST_IKEV2_EAP_CODE_RESPONSE, eap_flags,
-            1);
+            1, false);
 
     struct sockaddr_in addr;
     CLEAR(addr);
@@ -6531,6 +6615,65 @@ test_provider_helper_ikev2_payload_parser(void **state)
     assert_int_equal(summary.tsr_len,
                      PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE
                      + PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
+
+    packet_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE
+                 + (2 * TEST_IKEV2_TS_MIXED_IPV6_IPV4_PAYLOAD_LEN);
+    memset(packet, 0, sizeof(packet));
+    test_make_ikev2_header(packet, false,
+                           PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH,
+                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+                           0x8877665544332211ull, (uint32_t)packet_len);
+    packet[16] = PROVIDER_HELPER_IKEV2_PAYLOAD_TSI;
+    ts_pos = PROVIDER_HELPER_IKEV2_HEADER_SIZE;
+    const size_t mixed_tsi_body =
+        ts_pos + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    ts_pos = test_add_ikev2_payload(
+        packet, ts_pos, PROVIDER_HELPER_IKEV2_PAYLOAD_TSR,
+        TEST_IKEV2_TS_MIXED_IPV6_IPV4_PAYLOAD_LEN, 0);
+    assert_int_equal(test_write_ikev2_ts_payload_body(
+                         packet + mixed_tsi_body, true, 0x0a580002,
+                         0x0a580002),
+                     TEST_IKEV2_TS_MIXED_IPV6_IPV4_PAYLOAD_LEN
+                     - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE);
+    const size_t mixed_tsr_body =
+        ts_pos + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
+    ts_pos = test_add_ikev2_payload(
+        packet, ts_pos, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+        TEST_IKEV2_TS_MIXED_IPV6_IPV4_PAYLOAD_LEN, 0);
+    assert_int_equal(test_write_ikev2_ts_payload_body(
+                         packet + mixed_tsr_body, true, 0x0a580001,
+                         0x0a580001),
+                     TEST_IKEV2_TS_MIXED_IPV6_IPV4_PAYLOAD_LEN
+                     - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE);
+    assert_int_equal(ts_pos, packet_len);
+    assert_int_equal(provider_helper_ikev2_parse_header(
+                         packet, packet_len,
+                         PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE, false,
+                         &header),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_int_equal(provider_helper_ikev2_parse_payloads(
+                         packet, packet_len, &header, &summary),
+                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    assert_true(summary.saw_tsi);
+    assert_true(summary.saw_tsr);
+    assert_int_equal(summary.tsi_count, 1);
+    assert_int_equal(summary.tsr_count, 1);
+    assert_int_equal(summary.tsi_offset, mixed_tsi_body);
+    assert_int_equal(summary.tsr_offset, mixed_tsr_body);
+    assert_int_equal(summary.tsi_len,
+                     TEST_IKEV2_TS_MIXED_IPV6_IPV4_PAYLOAD_LEN
+                     - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE);
+    assert_int_equal(summary.tsr_len,
+                     TEST_IKEV2_TS_MIXED_IPV6_IPV4_PAYLOAD_LEN
+                     - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE);
+    assert_int_equal(packet[mixed_tsi_body], 2);
+    assert_int_equal(
+        packet[mixed_tsi_body + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE],
+        PROVIDER_HELPER_IKEV2_TS_IPV6_ADDR_RANGE);
+    assert_int_equal(
+        packet[mixed_tsi_body + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE
+               + PROVIDER_HELPER_IKEV2_TS_IPV6_SELECTOR_SIZE],
+        PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE);
 
     packet_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE
                  + TEST_IKEV2_CHILD_SA_PAYLOAD_LEN;
@@ -9800,9 +9943,8 @@ test_provider_helper_spawn_ikev2_eap_tls_auth_allow_success(void **state)
     assert_true(test_recv_ikev2_sa_init_response_material(
                     response_fd, initiator_spi, &sa_init_material) != 0);
 
-    test_send_ikev2_encrypted_ike_auth_datagram_from(
-        response_fd, natt_port, initiator_spi, &sa_init_material, true, false,
-        NULL, 0);
+    test_send_ikev2_encrypted_ike_auth_mixed_ts_datagram_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true);
     for (int i = 0; i < 100 && sign_state.calls < 1; ++i)
     {
         provider_helper_process_event(&supervisor);
