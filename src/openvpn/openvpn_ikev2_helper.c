@@ -5909,8 +5909,7 @@ ikev2_helper_validate_ike_rekey_sa_payload(const uint8_t *body,
 static enum provider_helper_ikev2_parse_result
 ikev2_helper_validate_child_ts_payload(const uint8_t *body, size_t body_len)
 {
-    if (!body || body_len < PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE
-                           + PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE)
+    if (!body || body_len < PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE)
     {
         return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
     }
@@ -5926,7 +5925,7 @@ ikev2_helper_validate_child_ts_payload(const uint8_t *body, size_t body_len)
     size_t pos = PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
     for (uint8_t i = 0; i < selector_count; ++i)
     {
-        if (body_len - pos < PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE)
+        if (body_len - pos < 8)
         {
             return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
         }
@@ -5935,11 +5934,33 @@ ikev2_helper_validate_child_ts_payload(const uint8_t *body, size_t body_len)
         const uint16_t selector_len = ikev2_helper_read_be16(body + pos + 2);
         const uint16_t start_port = ikev2_helper_read_be16(body + pos + 4);
         const uint16_t end_port = ikev2_helper_read_be16(body + pos + 6);
-        const uint32_t start_addr = ikev2_helper_read_be32(body + pos + 8);
-        const uint32_t end_addr = ikev2_helper_read_be32(body + pos + 12);
-        if (ts_type != PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE
-            || selector_len != PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE
-            || start_port > end_port || start_addr > end_addr)
+        if (selector_len > body_len - pos || start_port > end_port)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        if (ts_type == PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE)
+        {
+            if (selector_len != PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+            const uint32_t start_addr = ikev2_helper_read_be32(body + pos + 8);
+            const uint32_t end_addr = ikev2_helper_read_be32(body + pos + 12);
+            if (start_addr > end_addr)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+        }
+        else if (ts_type == PROVIDER_HELPER_IKEV2_TS_IPV6_ADDR_RANGE)
+        {
+            if (selector_len != PROVIDER_HELPER_IKEV2_TS_IPV6_SELECTOR_SIZE
+                || memcmp(body + pos + 8, body + pos + 24, 16) > 0)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+        }
+        else
         {
             return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
         }
@@ -5965,29 +5986,47 @@ ikev2_helper_read_single_ipv4_ts_range(
     struct ikev2_helper_ipv4_ts_range *range)
 {
     if (!body || !range
-        || body_len != PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE
-                       + PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE
-        || body[0] != 1 || body[1] || body[2] || body[3])
+        || body_len < PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE
+        || !body[0] || body[0] > PROVIDER_HELPER_IKEV2_MAX_TS_SELECTORS
+        || body[1] || body[2] || body[3])
     {
         return false;
     }
 
-    const size_t pos = PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
-    if (body[pos] != PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE
-        || ikev2_helper_read_be16(body + pos + 2)
-               != PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE)
+    size_t pos = PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE;
+    for (uint8_t i = 0; i < body[0]; ++i)
     {
-        return false;
+        if (body_len - pos < 8)
+        {
+            return false;
+        }
+        const uint8_t ts_type = body[pos];
+        const uint16_t selector_len = ikev2_helper_read_be16(body + pos + 2);
+        if (selector_len < 8 || selector_len > body_len - pos)
+        {
+            return false;
+        }
+        if (ts_type != PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE)
+        {
+            pos += selector_len;
+            continue;
+        }
+        if (selector_len != PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE)
+        {
+            return false;
+        }
+
+        CLEAR(*range);
+        range->ip_protocol_id = body[pos + 1];
+        range->start_port = ikev2_helper_read_be16(body + pos + 4);
+        range->end_port = ikev2_helper_read_be16(body + pos + 6);
+        range->start_addr = ikev2_helper_read_be32(body + pos + 8);
+        range->end_addr = ikev2_helper_read_be32(body + pos + 12);
+        return range->start_port <= range->end_port
+               && range->start_addr <= range->end_addr;
     }
 
-    CLEAR(*range);
-    range->ip_protocol_id = body[pos + 1];
-    range->start_port = ikev2_helper_read_be16(body + pos + 4);
-    range->end_port = ikev2_helper_read_be16(body + pos + 6);
-    range->start_addr = ikev2_helper_read_be32(body + pos + 8);
-    range->end_addr = ikev2_helper_read_be32(body + pos + 12);
-    return range->start_port <= range->end_port
-           && range->start_addr <= range->end_addr;
+    return false;
 }
 
 static bool
