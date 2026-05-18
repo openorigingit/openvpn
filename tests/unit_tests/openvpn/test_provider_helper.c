@@ -499,6 +499,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_informational_empty_response_tx = 56,
         .ike_informational_empty_response_failed = 57,
         .ike_informational_delete_rx = 58,
+        .ike_informational_delete_request_tx = 112,
+        .ike_informational_delete_request_failed = 113,
         .ike_informational_delete_response_tx = 59,
         .ike_informational_delete_response_failed = 60,
         .ike_create_child_unsupported_rx = 61,
@@ -651,6 +653,10 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_informational_empty_response_failed);
     assert_int_equal(output.ike_informational_delete_rx,
                      input.ike_informational_delete_rx);
+    assert_int_equal(output.ike_informational_delete_request_tx,
+                     input.ike_informational_delete_request_tx);
+    assert_int_equal(output.ike_informational_delete_request_failed,
+                     input.ike_informational_delete_request_failed);
     assert_int_equal(output.ike_informational_delete_response_tx,
                      input.ike_informational_delete_response_tx);
     assert_int_equal(output.ike_informational_delete_response_failed,
@@ -968,6 +974,8 @@ test_provider_helper_status_output(void **state)
     supervisor.runtime_stats.xfrm_leases_stale = 5;
     supervisor.runtime_stats.ike_sa_active = 3;
     supervisor.runtime_stats.ike_response_ignored = 6;
+    supervisor.runtime_stats.ike_informational_delete_request_tx = 7;
+    supervisor.runtime_stats.ike_informational_delete_request_failed = 8;
     supervisor.runtime_stats.ike_child_sa_xfrm_active = 4;
     supervisor.runtime_stats.ike_create_child_xfrm_install_failed = 1;
     supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok = 2;
@@ -1000,6 +1008,12 @@ test_provider_helper_status_output(void **state)
                            "PROVIDER_HELPER_STAT,ike_sa_active,3"));
     assert_non_null(strstr(capture.data,
                            "PROVIDER_HELPER_STAT,ike_response_ignored,6"));
+    assert_non_null(strstr(capture.data,
+                           "PROVIDER_HELPER_STAT,"
+                           "ike_informational_delete_request_tx,7"));
+    assert_non_null(strstr(capture.data,
+                           "PROVIDER_HELPER_STAT,"
+                           "ike_informational_delete_request_failed,8"));
     assert_non_null(strstr(capture.data,
                            "PROVIDER_HELPER_STAT,ike_child_sa_xfrm_active,4"));
     assert_non_null(strstr(
@@ -11581,6 +11595,10 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     assert_int_equal(supervisor.runtime_stats.xfrm_leases_active, 0);
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_deleted, 1);
     assert_true(supervisor.runtime_stats.ike_sa_xfrm_lease_revoked >= 1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_informational_delete_request_tx, 1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_informational_delete_request_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
 
@@ -12081,6 +12099,10 @@ test_provider_helper_spawn_ikev2_lease_deadline_fails_closed(void **state)
     test_recv_ikev2_encrypted_ike_delete_request(response_fd, initiator_spi,
                                                  &sa_init_material, 0, true);
     assert_int_equal(supervisor.runtime_stats.xfrm_leases_stale, 1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_informational_delete_request_tx, 1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_informational_delete_request_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
     assert_true(supervisor.runtime_stats.ike_sa_expired >= 1);
@@ -12918,6 +12940,10 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_replaced, 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_xfrm_lease_revoked, 1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_informational_delete_request_tx, 1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_informational_delete_request_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 3);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_active, 0);

@@ -8514,15 +8514,24 @@ static void
 ikev2_helper_maybe_send_ike_sa_delete_request(
     const struct ikev2_helper_listener *listeners,
     size_t listener_count,
-    const struct ikev2_helper_ike_sa *sa)
+    const struct ikev2_helper_ike_sa *sa,
+    struct provider_helper_runtime_stats *counters)
 {
     const struct ikev2_helper_listener *listener =
         sa ? ikev2_helper_find_listener(listeners, listener_count,
                                         sa->listener_id)
            : NULL;
-    if (listener)
+    if (listener
+        && ikev2_helper_send_encrypted_ike_sa_delete_request(listener, sa))
     {
-        (void)ikev2_helper_send_encrypted_ike_sa_delete_request(listener, sa);
+        if (counters)
+        {
+            ++counters->ike_informational_delete_request_tx;
+        }
+    }
+    else if (counters)
+    {
+        ++counters->ike_informational_delete_request_failed;
     }
 }
 
@@ -9005,7 +9014,8 @@ ikev2_helper_clear_ike_sas_for_xfrm_lease(
         if (ikev2_helper_ike_sa_uses_xfrm_lease(sa, lease))
         {
             ikev2_helper_maybe_send_ike_sa_delete_request(listeners,
-                                                          listener_count, sa);
+                                                          listener_count, sa,
+                                                          counters);
             if (ikev2_helper_clear_ike_sa_with_session_close(
                     table, sa, counters, ipc_fd, tx_sequence, reason))
             {
@@ -12994,7 +13004,8 @@ ikev2_helper_expire_authorized_ike_sas(
         }
 
         ikev2_helper_maybe_send_ike_sa_delete_request(listeners,
-                                                      listener_count, sa);
+                                                      listener_count, sa,
+                                                      counters);
         if (!ikev2_helper_clear_ike_sa_with_session_close(
                 table, sa, counters, ipc_fd, tx_sequence, reason))
         {

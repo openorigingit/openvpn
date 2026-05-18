@@ -36,7 +36,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 60
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  936
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  952
 #ifndef PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX
 #define PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX 4
 #endif
@@ -519,6 +519,8 @@ struct provider_helper_runtime_stats {
     uint64_t ike_informational_empty_response_tx;
     uint64_t ike_informational_empty_response_failed;
     uint64_t ike_informational_delete_rx;
+    uint64_t ike_informational_delete_request_tx;
+    uint64_t ike_informational_delete_request_failed;
     uint64_t ike_informational_delete_response_tx;
     uint64_t ike_informational_delete_response_failed;
     uint64_t ike_create_child_unsupported_rx;
