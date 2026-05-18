@@ -13586,7 +13586,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
         ++counters->datagrams_parsed;
         if (header.flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE)
         {
-            ++counters->datagrams_malformed;
+            ++counters->ike_response_ignored;
             counters->ike_sa_active = sa_table->active;
             return;
         }

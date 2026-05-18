@@ -366,6 +366,7 @@ provider_helper_print_status_counters(
         { "xfrm_lease_deleted", stats->xfrm_lease_deleted },
         { "ike_sa_active", stats->ike_sa_active },
         { "ike_sa_expired", stats->ike_sa_expired },
+        { "ike_response_ignored", stats->ike_response_ignored },
         { "ike_auth_rx", stats->ike_auth_rx },
         { "ike_auth_malformed", stats->ike_auth_malformed },
         { "ike_auth_no_state", stats->ike_auth_no_state },

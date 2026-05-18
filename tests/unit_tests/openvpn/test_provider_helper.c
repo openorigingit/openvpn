@@ -467,6 +467,7 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .xfrm_lease_replaced = 53,
         .xfrm_lease_deleted = 54,
         .ike_exchange_unsupported = 44,
+        .ike_response_ignored = 111,
         .ike_sa_init_accepted = 5,
         .ike_sa_init_cookie_required = 4,
         .ike_sa_init_cookie_present = 11,
@@ -590,6 +591,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
     assert_int_equal(output.xfrm_lease_deleted, input.xfrm_lease_deleted);
     assert_int_equal(output.ike_exchange_unsupported,
                      input.ike_exchange_unsupported);
+    assert_int_equal(output.ike_response_ignored,
+                     input.ike_response_ignored);
     assert_int_equal(output.ike_sa_init_accepted, input.ike_sa_init_accepted);
     assert_int_equal(output.ike_sa_init_cookie_required,
                      input.ike_sa_init_cookie_required);
@@ -964,6 +967,7 @@ test_provider_helper_status_output(void **state)
     supervisor.runtime_stats.datagrams_rx = 11;
     supervisor.runtime_stats.xfrm_leases_stale = 5;
     supervisor.runtime_stats.ike_sa_active = 3;
+    supervisor.runtime_stats.ike_response_ignored = 6;
     supervisor.runtime_stats.ike_child_sa_xfrm_active = 4;
     supervisor.runtime_stats.ike_create_child_xfrm_install_failed = 1;
     supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok = 2;
@@ -994,6 +998,8 @@ test_provider_helper_status_output(void **state)
                            "PROVIDER_HELPER_STAT,xfrm_leases_stale,5"));
     assert_non_null(strstr(capture.data,
                            "PROVIDER_HELPER_STAT,ike_sa_active,3"));
+    assert_non_null(strstr(capture.data,
+                           "PROVIDER_HELPER_STAT,ike_response_ignored,6"));
     assert_non_null(strstr(capture.data,
                            "PROVIDER_HELPER_STAT,ike_child_sa_xfrm_active,4"));
     assert_non_null(strstr(
@@ -8897,6 +8903,7 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     assert_true(supervisor.runtime_stats.datagrams_parsed >= 16);
     assert_true(supervisor.runtime_stats.ike_exchange_unsupported >= 2);
     assert_true(supervisor.runtime_stats.ike_exchange_pre_auth_dropped >= 7);
+    assert_int_equal(supervisor.runtime_stats.ike_response_ignored, 2);
     assert_int_equal(supervisor.runtime_stats.ike_informational_empty_rx, 0);
     assert_int_equal(supervisor.runtime_stats.ike_informational_empty_response_tx,
                      0);
@@ -8948,6 +8955,7 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     assert_int_equal(supervisor.runtime_stats.datagrams_parsed, 7);
     assert_int_equal(supervisor.runtime_stats.ike_exchange_unsupported, 2);
     assert_int_equal(supervisor.runtime_stats.ike_exchange_pre_auth_dropped, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_response_ignored, 2);
     assert_int_equal(supervisor.runtime_stats.ike_informational_empty_rx, 0);
     assert_int_equal(supervisor.runtime_stats.ike_informational_empty_response_tx,
                      0);
@@ -8995,9 +9003,9 @@ test_provider_helper_spawn_ikev2_unsupported_exchange(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
 #endif
 #if defined(ENABLE_CRYPTO_OPENSSL)
-    assert_int_equal(supervisor.runtime_stats.datagrams_malformed, 4);
+    assert_int_equal(supervisor.runtime_stats.datagrams_malformed, 2);
 #else
-    assert_int_equal(supervisor.runtime_stats.datagrams_malformed, 4);
+    assert_int_equal(supervisor.runtime_stats.datagrams_malformed, 2);
 #endif
 
     provider_helper_supervisor_stop(&supervisor);

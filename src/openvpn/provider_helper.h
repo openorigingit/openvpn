@@ -36,7 +36,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 60
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  928
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  936
 #ifndef PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX
 #define PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX 4
 #endif
@@ -487,6 +487,7 @@ struct provider_helper_runtime_stats {
     uint64_t xfrm_lease_replaced;
     uint64_t xfrm_lease_deleted;
     uint64_t ike_exchange_unsupported;
+    uint64_t ike_response_ignored;
     uint64_t ike_sa_init_accepted;
     uint64_t ike_sa_init_cookie_required;
     uint64_t ike_sa_init_cookie_present;
