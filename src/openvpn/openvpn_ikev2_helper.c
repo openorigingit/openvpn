@@ -7258,7 +7258,11 @@ ikev2_helper_child_sa_zero_key_material(
     child->sk_ei_len = 0;
     ikev2_helper_secure_zero(child->sk_er, sizeof(child->sk_er));
     child->sk_er_len = 0;
-    provider_xfrm_child_sa_plan_zero_key_material(&child->xfrm_plan);
+    /* Keep XFRM plan keys only while installed so MOBIKE can rebind the SA. */
+    if (!child->xfrm_applied)
+    {
+        provider_xfrm_child_sa_plan_zero_key_material(&child->xfrm_plan);
+    }
 }
 
 static bool
@@ -7278,6 +7282,7 @@ ikev2_helper_delete_child_sa_xfrm(
     if (ret)
     {
         child->xfrm_applied = false;
+        ikev2_helper_child_sa_zero_key_material(child);
         if (counters)
         {
             ++counters->ike_child_sa_xfrm_delete_ok;
@@ -7290,6 +7295,160 @@ ikev2_helper_delete_child_sa_xfrm(
         ++counters->ike_child_sa_xfrm_delete_failed;
     }
     return false;
+}
+
+static bool
+ikev2_helper_sockaddr_ipv4_endpoint(const struct sockaddr_storage *addr,
+                                    socklen_t addr_len,
+                                    uint32_t *host_ipv4,
+                                    uint16_t *host_port);
+
+enum ikev2_helper_child_sa_xfrm_migrate_result {
+    IKEV2_HELPER_CHILD_SA_XFRM_MIGRATE_OK = 0,
+    IKEV2_HELPER_CHILD_SA_XFRM_MIGRATE_FAILED_UNCHANGED,
+    IKEV2_HELPER_CHILD_SA_XFRM_MIGRATE_FAILED_CLOSED,
+};
+
+static bool
+ikev2_helper_build_migrated_child_sa_xfrm_plan(
+    const struct ikev2_helper_ike_sa *sa,
+    const struct ikev2_helper_child_sa_scaffold *child,
+    struct provider_xfrm_child_sa_plan *plan,
+    struct provider_xfrm_result *result)
+{
+    if (!sa || !child || !child->ready || !child->xfrm_applied || !plan
+        || !child->xfrm_plan.inbound.key_len
+        || !child->xfrm_plan.outbound.key_len)
+    {
+        provider_xfrm_result_init(result);
+        if (result)
+        {
+            result->ok = false;
+            snprintf(result->reason, sizeof(result->reason),
+                     "missing retained XFRM key material for MOBIKE");
+        }
+        return false;
+    }
+
+    uint32_t local_outer_ipv4 = 0;
+    uint32_t remote_outer_ipv4 = 0;
+    uint16_t local_outer_port = 0;
+    uint16_t remote_outer_port = 0;
+    if (!ikev2_helper_sockaddr_ipv4_endpoint(&sa->local_endpoint,
+                                             sa->local_endpoint_len,
+                                             &local_outer_ipv4,
+                                             &local_outer_port)
+        || !ikev2_helper_sockaddr_ipv4_endpoint(&sa->peer, sa->peer_len,
+                                                &remote_outer_ipv4,
+                                                &remote_outer_port))
+    {
+        provider_xfrm_result_init(result);
+        if (result)
+        {
+            result->ok = false;
+            snprintf(result->reason, sizeof(result->reason),
+                     "invalid MOBIKE outer endpoints");
+        }
+        return false;
+    }
+
+    const struct provider_helper_xfrm_lease *lease = &child->xfrm_lease;
+    const struct provider_xfrm_child_sa_spec spec = {
+        .lease_id = child->xfrm_lease_id,
+        .provider_session_id = child->provider_session_id,
+        .policy_revision = child->policy_revision,
+        .mark_value = lease->mark_value,
+        .mark_mask = lease->mark_mask,
+        .if_id = lease->if_id,
+        .reqid = lease->reqid,
+        .local_outer_ipv4 = local_outer_ipv4,
+        .remote_outer_ipv4 = remote_outer_ipv4,
+        .local_outer_port = local_outer_port,
+        .remote_outer_port = remote_outer_port,
+        .local_ts = child->xfrm_plan.outbound.src_ts,
+        .remote_ts = child->xfrm_plan.outbound.dst_ts,
+        .initiator_inbound_spi = child->initiator_spi,
+        .responder_inbound_spi = child->responder_spi,
+        .cipher = child->xfrm_plan.inbound.cipher,
+        .key_bits = child->xfrm_plan.inbound.key_bits,
+        .initiator_to_responder_key = child->xfrm_plan.inbound.key,
+        .initiator_to_responder_key_len = child->xfrm_plan.inbound.key_len,
+        .responder_to_initiator_key = child->xfrm_plan.outbound.key,
+        .responder_to_initiator_key_len = child->xfrm_plan.outbound.key_len,
+    };
+
+    return provider_xfrm_child_sa_plan_build(plan, &spec, result);
+}
+
+static enum ikev2_helper_child_sa_xfrm_migrate_result
+ikev2_helper_migrate_child_sa_xfrm(
+    struct ikev2_helper_ike_sa *sa,
+    struct provider_helper_runtime_stats *counters,
+    time_t now)
+{
+    if (!sa || !sa->active || !sa->child_sa.ready
+        || !sa->child_sa.xfrm_applied)
+    {
+        return IKEV2_HELPER_CHILD_SA_XFRM_MIGRATE_FAILED_UNCHANGED;
+    }
+
+    struct provider_xfrm_child_sa_plan old_plan = sa->child_sa.xfrm_plan;
+    struct provider_xfrm_child_sa_plan new_plan;
+    struct provider_xfrm_linux_message_plan messages;
+    struct provider_xfrm_result result;
+    CLEAR(new_plan);
+    CLEAR(messages);
+
+    enum ikev2_helper_child_sa_xfrm_migrate_result ret =
+        IKEV2_HELPER_CHILD_SA_XFRM_MIGRATE_FAILED_UNCHANGED;
+
+    if (!ikev2_helper_build_migrated_child_sa_xfrm_plan(
+            sa, &sa->child_sa, &new_plan, &result)
+        || !provider_xfrm_linux_child_sa_messages_build(&messages, &new_plan,
+                                                        &result))
+    {
+        goto done;
+    }
+
+    if (!provider_xfrm_linux_child_sa_reconcile_delete(&old_plan, &result))
+    {
+        if (counters)
+        {
+            ++counters->ike_child_sa_xfrm_delete_failed;
+        }
+        goto done;
+    }
+    if (counters)
+    {
+        ++counters->ike_child_sa_xfrm_delete_ok;
+    }
+    sa->child_sa.xfrm_applied = false;
+
+    if (!provider_xfrm_linux_message_plan_apply(&messages, &result))
+    {
+        if (counters)
+        {
+            ++counters->ike_create_child_xfrm_install_failed;
+        }
+        ikev2_helper_child_sa_zero_key_material(&sa->child_sa);
+        ret = IKEV2_HELPER_CHILD_SA_XFRM_MIGRATE_FAILED_CLOSED;
+        goto done;
+    }
+
+    if (counters)
+    {
+        ++counters->ike_create_child_xfrm_install_ok;
+    }
+    sa->child_sa.xfrm_plan = new_plan;
+    sa->child_sa.xfrm_applied = true;
+    sa->child_sa.updated = now;
+    ret = IKEV2_HELPER_CHILD_SA_XFRM_MIGRATE_OK;
+
+done:
+    provider_xfrm_linux_message_plan_clear(&messages);
+    ikev2_helper_secure_zero(&old_plan, sizeof(old_plan));
+    ikev2_helper_secure_zero(&new_plan, sizeof(new_plan));
+    return ret;
 }
 
 static bool
@@ -13471,45 +13630,71 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         const socklen_t old_peer_len = sa->peer_len;
                         const bool peer_update =
                             !peer_matches || peer_migration_candidate;
+                        bool xfrm_migrated = false;
+                        bool close_fail_closed = false;
                         ++counters->ike_mobike_update_rx;
-                        if (peer_update && sa->child_sa.ready
-                            && sa->child_sa.xfrm_applied)
-                        {
-                            ++counters->ike_mobike_unexpected_peer_dropped;
-                            sa->peer = peer;
-                            sa->peer_len = peer_len;
-                            if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
-                                    listener, sa, header.exchange_type,
-                                    header.message_id,
-                                    PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
-                            {
-                                ++counters->ike_mobike_update_response_tx;
-                                sa->message_id = header.message_id;
-                            }
-                            else
-                            {
-                                ++counters->ike_mobike_update_response_failed;
-                            }
-                            sa->peer = old_peer;
-                            sa->peer_len = old_peer_len;
-                            if (!ikev2_helper_send_session_close(
-                                    ipc_fd, tx_sequence, sa,
-                                    "MOBIKE migration unsupported"))
-                            {
-                                ikev2_helper_note_fatal_ipc_failure();
-                            }
-                            (void)ikev2_helper_clear_ike_sa(sa_table, sa,
-                                                            counters);
-                            ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
-                            counters->ike_sa_active = sa_table->active;
-                            counters->ike_child_sa_scaffold_active =
-                                ikev2_helper_count_child_sa_scaffolds(sa_table);
-                            return;
-                        }
                         if (peer_update)
                         {
                             sa->peer = peer;
                             sa->peer_len = peer_len;
+                            if (sa->child_sa.ready && sa->child_sa.xfrm_applied)
+                            {
+                                const enum ikev2_helper_child_sa_xfrm_migrate_result
+                                    migrate_result =
+                                        ikev2_helper_migrate_child_sa_xfrm(
+                                            sa, counters, exchange_now);
+                                if (migrate_result
+                                    == IKEV2_HELPER_CHILD_SA_XFRM_MIGRATE_OK)
+                                {
+                                    xfrm_migrated = true;
+                                }
+                                else
+                                {
+                                    close_fail_closed =
+                                        migrate_result
+                                        == IKEV2_HELPER_CHILD_SA_XFRM_MIGRATE_FAILED_CLOSED;
+                                    if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
+                                            listener, sa, header.exchange_type,
+                                            header.message_id,
+                                            PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE))
+                                    {
+                                        ++counters
+                                              ->ike_mobike_update_response_tx;
+                                        sa->message_id = header.message_id;
+                                    }
+                                    else
+                                    {
+                                        ++counters
+                                              ->ike_mobike_update_response_failed;
+                                    }
+                                    if (close_fail_closed)
+                                    {
+                                        if (!ikev2_helper_send_session_close(
+                                                ipc_fd, tx_sequence, sa,
+                                                "MOBIKE XFRM migration failed"))
+                                        {
+                                            ikev2_helper_note_fatal_ipc_failure();
+                                        }
+                                        (void)ikev2_helper_clear_ike_sa(
+                                            sa_table, sa, counters);
+                                    }
+                                    else
+                                    {
+                                        sa->peer = old_peer;
+                                        sa->peer_len = old_peer_len;
+                                    }
+                                    ikev2_helper_secure_zero(
+                                        plaintext, sizeof(plaintext));
+                                    counters->ike_sa_active = sa_table->active;
+                                    counters->ike_child_sa_scaffold_active =
+                                        ikev2_helper_count_child_sa_scaffolds(
+                                            sa_table);
+                                    counters->ike_child_sa_xfrm_active =
+                                        ikev2_helper_count_child_sa_xfrm_active(
+                                            sa_table);
+                                    return;
+                                }
+                            }
                         }
                         if (ikev2_helper_send_cached_encrypted_empty_response(
                                 listener, sa, header.exchange_type,
@@ -13522,11 +13707,40 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             }
                             sa->updated = exchange_now;
                             sa->message_id = header.message_id;
+                            if (xfrm_migrated
+                                && !ikev2_helper_send_session_update(
+                                    ipc_fd, tx_sequence, sa,
+                                    PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE,
+                                    "ike-authorized", "migrated"))
+                            {
+                                ikev2_helper_note_fatal_ipc_failure();
+                            }
                         }
                         else
                         {
                             ++counters->ike_mobike_update_response_failed;
-                            if (peer_update)
+                            if (xfrm_migrated)
+                            {
+                                if (!ikev2_helper_send_session_close(
+                                        ipc_fd, tx_sequence, sa,
+                                        "MOBIKE response failed"))
+                                {
+                                    ikev2_helper_note_fatal_ipc_failure();
+                                }
+                                (void)ikev2_helper_clear_ike_sa(sa_table, sa,
+                                                                counters);
+                                ikev2_helper_secure_zero(plaintext,
+                                                         sizeof(plaintext));
+                                counters->ike_sa_active = sa_table->active;
+                                counters->ike_child_sa_scaffold_active =
+                                    ikev2_helper_count_child_sa_scaffolds(
+                                        sa_table);
+                                counters->ike_child_sa_xfrm_active =
+                                    ikev2_helper_count_child_sa_xfrm_active(
+                                        sa_table);
+                                return;
+                            }
+                            else if (peer_update)
                             {
                                 sa->peer = old_peer;
                                 sa->peer_len = old_peer_len;
@@ -13534,6 +13748,8 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         }
                         ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
                         counters->ike_sa_active = sa_table->active;
+                        counters->ike_child_sa_xfrm_active =
+                            ikev2_helper_count_child_sa_xfrm_active(sa_table);
                         return;
                     }
                     if (!peer_matches || peer_migration_candidate)

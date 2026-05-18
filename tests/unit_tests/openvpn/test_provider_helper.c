@@ -4498,10 +4498,23 @@ test_recv_ikev2_sa_init_response_material_impl(
     const ssize_t n = recvfrom(fd, response, sizeof(response), 0,
                                (struct sockaddr *)&from, &from_len);
     assert_true(n > 0);
-    assert_int_equal(provider_helper_ikev2_parse_header(
-                         response, (size_t)n, PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE,
-                         expect_natt, &header),
-                     PROVIDER_HELPER_IKEV2_PARSE_OK);
+    const enum provider_helper_ikev2_parse_result parse_result =
+        provider_helper_ikev2_parse_header(
+            response, (size_t)n, PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE,
+            expect_natt, &header);
+    if (parse_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+    {
+        fprintf(stderr,
+                "SA_INIT response parse failed: result=%s len=%zd expect_natt=%d"
+                " expected_spi=%" PRIx64 " first=%02x:%02x:%02x:%02x\n",
+                provider_helper_ikev2_parse_result_name(parse_result), n,
+                expect_natt, initiator_spi,
+                n > 0 ? response[0] : 0,
+                n > 1 ? response[1] : 0,
+                n > 2 ? response[2] : 0,
+                n > 3 ? response[3] : 0);
+    }
+    assert_int_equal(parse_result, PROVIDER_HELPER_IKEV2_PARSE_OK);
     assert_int_equal(header.natt, expect_natt);
     if (expect_natt)
     {
@@ -12376,6 +12389,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     int response_fd = test_create_udp_sender(0x7f000009u);
     int migrated_fd = test_create_udp_sender(0x7f00000au);
     const uint16_t response_port = test_udp_local_port(response_fd);
+    const uint16_t migrated_port = test_udp_local_port(migrated_fd);
     const uint64_t initiator_spi = 0x8877665544332211ull;
     test_send_ikev2_datagram_from(response_fd, port, initiator_spi);
     usleep(10000);
@@ -12578,6 +12592,8 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     assert_memory_equal(close_state.session_close.reason,
                         "XFRM lease replaced",
                         strlen("XFRM lease replaced"));
+    test_recv_ikev2_encrypted_ike_delete_request(response_fd, initiator_spi,
+                                                 &sa_init_material, 0, true);
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
@@ -12693,14 +12709,47 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
         migrated_fd, natt_port, mobike_initiator_spi, &sa_init_material, true,
         3);
     usleep(10000);
-    test_recv_ikev2_encrypted_notify_exchange_response(
+    test_recv_ikev2_encrypted_empty_exchange_response(
         migrated_fd, mobike_initiator_spi, &sa_init_material,
-        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 3,
-        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
+        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 3, true);
 
     target_rx_sequence = supervisor.last_rx_sequence + 2;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
                            supervisor.next_tx_sequence++, 113);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(close_state.calls, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_mobike_update_rx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_mobike_update_response_tx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_mobike_peer_migrated, 1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_mobike_unexpected_peer_dropped, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_informational_empty_rx, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 4);
+    assert_int_equal(supervisor.runtime_stats.ike_create_child_xfrm_install_ok,
+                     5);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_active, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
+    test_assert_xfrm_natt_encap_ports(natt_port, migrated_port);
+
+    test_send_ikev2_encrypted_ike_delete_from(
+        migrated_fd, natt_port, mobike_initiator_spi, &sa_init_material, true,
+        4);
+    usleep(10000);
+    test_recv_ikev2_encrypted_empty_exchange_response(
+        migrated_fd, mobike_initiator_spi, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 4, true);
+
+    target_rx_sequence = supervisor.last_rx_sequence + 2;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 114);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -12714,15 +12763,12 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     assert_int_equal(close_state.session_close.xfrm_lease_id, 202);
     assert_int_equal(close_state.session_close.policy_revision, 303);
     assert_memory_equal(close_state.session_close.reason,
-                        "MOBIKE migration unsupported",
-                        strlen("MOBIKE migration unsupported"));
-    assert_int_equal(supervisor.runtime_stats.ike_mobike_update_rx, 1);
-    assert_int_equal(supervisor.runtime_stats.ike_mobike_update_response_tx, 1);
-    assert_int_equal(supervisor.runtime_stats.ike_mobike_peer_migrated, 0);
+                        "IKE SA deleted by peer",
+                        strlen("IKE SA deleted by peer"));
+    assert_int_equal(supervisor.runtime_stats.ike_informational_delete_rx, 2);
     assert_int_equal(
-        supervisor.runtime_stats.ike_mobike_unexpected_peer_dropped, 2);
-    assert_int_equal(supervisor.runtime_stats.ike_informational_empty_rx, 0);
-    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 4);
+        supervisor.runtime_stats.ike_informational_delete_response_tx, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 5);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
@@ -12763,7 +12809,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
 
     target_rx_sequence = supervisor.last_rx_sequence + 3;
     write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           supervisor.next_tx_sequence++, 114);
+                           supervisor.next_tx_sequence++, 115);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -12772,10 +12818,10 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
         usleep(10000);
     }
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
-    assert_int_equal(supervisor.runtime_stats.ike_informational_delete_rx, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_informational_delete_rx, 3);
     assert_int_equal(
-        supervisor.runtime_stats.ike_informational_delete_response_tx, 2);
-    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 5);
+        supervisor.runtime_stats.ike_informational_delete_response_tx, 3);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 6);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
