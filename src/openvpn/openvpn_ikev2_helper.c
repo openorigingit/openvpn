@@ -7218,6 +7218,21 @@ ikev2_helper_extract_x509_metadata_from_der(
 #endif
 }
 
+#if defined(OPENVPN_FUZZ_STANDALONE)
+bool
+ikev2_helper_fuzz_extract_x509_metadata_from_der(const uint8_t *cert_der,
+                                                 size_t cert_der_len)
+{
+    struct ikev2_helper_ike_sa sa;
+    CLEAR(sa);
+
+    const bool ret = ikev2_helper_extract_x509_metadata_from_der(
+        &sa, cert_der, cert_der_len);
+    ikev2_helper_clear_credential_metadata(&sa);
+    return ret;
+}
+#endif
+
 static bool
 ikev2_helper_extract_credential_metadata(
     struct ikev2_helper_ike_sa *sa,
@@ -15962,6 +15977,7 @@ done:
     return ret;
 }
 
+#if !defined(OPENVPN_FUZZ_STANDALONE)
 int
 main(void)
 {
@@ -15977,11 +15993,14 @@ main(void)
 
     return ikev2_helper_loop(fd);
 }
+#endif
 
 #else  /* ifndef _WIN32 */
+#if !defined(OPENVPN_FUZZ_STANDALONE)
 int
 main(void)
 {
     return 77;
 }
+#endif
 #endif /* ifndef _WIN32 */
