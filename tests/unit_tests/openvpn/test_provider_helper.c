@@ -7333,6 +7333,98 @@ test_provider_helper_ikev2_payload_parser(void **state)
 }
 
 static void
+test_provider_helper_exercise_ikev2_parser_input(const uint8_t *packet,
+                                                 size_t packet_len,
+                                                 bool expect_natt)
+{
+    struct provider_helper_ikev2_header header;
+    CLEAR(header);
+
+    if (provider_helper_ikev2_parse_header(
+            packet, packet_len, PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE,
+            expect_natt, &header) != PROVIDER_HELPER_IKEV2_PARSE_OK)
+    {
+        return;
+    }
+
+    struct provider_helper_ikev2_payload_summary summary;
+    CLEAR(summary);
+    if (provider_helper_ikev2_parse_payloads(packet, packet_len, &header,
+                                             &summary)
+        != PROVIDER_HELPER_IKEV2_PARSE_OK)
+    {
+        return;
+    }
+
+    if (header.exchange_type == PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT)
+    {
+        if (provider_helper_ikev2_validate_ike_sa_init_request(
+                packet, packet_len, &header, &summary)
+            == PROVIDER_HELPER_IKEV2_PARSE_OK)
+        {
+            struct provider_helper_ikev2_sa_selection selection;
+            CLEAR(selection);
+            (void)provider_helper_ikev2_select_ike_sa_init_proposal(
+                packet, packet_len, &summary, &selection);
+        }
+    }
+    else if (header.exchange_type == PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH)
+    {
+        (void)provider_helper_ikev2_validate_ike_auth_request(
+            packet, packet_len, &header, &summary);
+    }
+}
+
+static void
+test_provider_helper_mutate_ikev2_parser_input(const uint8_t *base,
+                                               size_t base_len,
+                                               bool expect_natt)
+{
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    assert_true(base_len <= sizeof(packet));
+
+    for (size_t len = 0; len <= base_len; ++len)
+    {
+        memcpy(packet, base, base_len);
+        test_provider_helper_exercise_ikev2_parser_input(packet, len,
+                                                         expect_natt);
+    }
+
+    for (size_t i = 0; i < base_len; ++i)
+    {
+        for (uint8_t bit = 1; bit; bit <<= 1)
+        {
+            memcpy(packet, base, base_len);
+            packet[i] ^= bit;
+            test_provider_helper_exercise_ikev2_parser_input(packet, base_len,
+                                                             expect_natt);
+        }
+    }
+}
+
+static void
+test_provider_helper_ikev2_parser_mutation_regression(void **state)
+{
+    (void)state;
+
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+
+    size_t packet_len = test_make_ike_sa_init_packet(packet, sizeof(packet));
+    test_provider_helper_mutate_ikev2_parser_input(packet, packet_len, false);
+
+    packet_len = test_make_natt_ike_sa_init_packet(packet, sizeof(packet));
+    test_provider_helper_mutate_ikev2_parser_input(packet, packet_len, true);
+
+    packet_len = test_make_empty_ike_sa_init_packet(packet, sizeof(packet));
+    test_provider_helper_mutate_ikev2_parser_input(packet, packet_len, false);
+
+    packet_len = test_make_ike_auth_packet(packet, sizeof(packet),
+                                           0x1122334455667788ull,
+                                           0x8877665544332211ull, false);
+    test_provider_helper_mutate_ikev2_parser_input(packet, packet_len, false);
+}
+
+static void
 test_provider_helper_ikev2_cookie_response(void **state)
 {
     (void)state;
@@ -13571,6 +13663,8 @@ main(void)
         cmocka_unit_test(test_provider_helper_server_sign_response_roundtrip),
         cmocka_unit_test(test_provider_helper_ikev2_parser),
         cmocka_unit_test(test_provider_helper_ikev2_payload_parser),
+        cmocka_unit_test(
+            test_provider_helper_ikev2_parser_mutation_regression),
         cmocka_unit_test(test_provider_helper_ikev2_cookie_response),
         cmocka_unit_test(test_provider_helper_ikev2_sa_init_response),
         cmocka_unit_test(
