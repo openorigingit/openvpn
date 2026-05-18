@@ -1696,6 +1696,12 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
      + TEST_IKEV2_DH_TRANSFORM_LEN)
 #define TEST_IKEV2_SA_PAYLOAD_LEN \
     (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + TEST_IKEV2_SA_PROPOSAL_LEN)
+#define TEST_IKEV2_IKE_REKEY_SPI_SIZE 8
+#define TEST_IKEV2_IKE_REKEY_SA_PROPOSAL_LEN \
+    (TEST_IKEV2_SA_PROPOSAL_LEN + TEST_IKEV2_IKE_REKEY_SPI_SIZE)
+#define TEST_IKEV2_IKE_REKEY_SA_PAYLOAD_LEN \
+    (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE \
+     + TEST_IKEV2_IKE_REKEY_SA_PROPOSAL_LEN)
 #define TEST_IKEV2_CHILD_SA_PROPOSAL_LEN \
     (PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE + 4 \
      + TEST_IKEV2_ENCR_TRANSFORM_LEN)
@@ -4126,7 +4132,7 @@ test_send_ikev2_encrypted_ike_sa_rekey_from(
     uint32_t message_id)
 {
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
-    uint8_t plaintext[TEST_IKEV2_SA_PAYLOAD_LEN
+    uint8_t plaintext[TEST_IKEV2_IKE_REKEY_SA_PAYLOAD_LEN
                       + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
                       + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE
                       + PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES
@@ -4137,15 +4143,20 @@ test_send_ikev2_encrypted_ike_sa_rekey_from(
 
     plaintext_len = test_add_ikev2_payload(
         plaintext, plaintext_len, PROVIDER_HELPER_IKEV2_PAYLOAD_KE,
-        TEST_IKEV2_SA_PAYLOAD_LEN, 0);
+        TEST_IKEV2_IKE_REKEY_SA_PAYLOAD_LEN, 0);
     const size_t proposal = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
-    test_write_be16(plaintext + proposal + 2, TEST_IKEV2_SA_PROPOSAL_LEN);
+    test_write_be16(plaintext + proposal + 2,
+                    TEST_IKEV2_IKE_REKEY_SA_PROPOSAL_LEN);
     plaintext[proposal + 4] = 1;
     plaintext[proposal + 5] = PROVIDER_HELPER_IKEV2_PROTOCOL_IKE;
-    plaintext[proposal + 6] = 0;
+    plaintext[proposal + 6] = TEST_IKEV2_IKE_REKEY_SPI_SIZE;
     plaintext[proposal + 7] = 3;
+    test_write_be64(
+        plaintext + proposal + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE,
+        0x0102030405060708ull);
 
-    size_t transform = proposal + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE;
+    size_t transform = proposal + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                       + TEST_IKEV2_IKE_REKEY_SPI_SIZE;
     plaintext[transform] = PROVIDER_HELPER_IKEV2_TRANSFORM_MORE;
     test_write_be16(plaintext + transform + 2, TEST_IKEV2_ENCR_TRANSFORM_LEN);
     plaintext[transform + 4] = PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR;

@@ -165,6 +165,7 @@
 #define IKEV2_HELPER_POLL_TIMEOUT_MS 1000
 #define IKEV2_HELPER_IKE_SA_INIT_MESSAGE_ID 0
 #define IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID 1
+#define IKEV2_HELPER_IKE_REKEY_SPI_SIZE 8
 #define IKEV2_HELPER_AUTH_METHOD_SHARED_KEY_MIC 2
 #define IKEV2_HELPER_AUTH_KEY_PAD "Key Pad for IKEv2"
 #define IKEV2_HELPER_AUTH_KEY_PAD_BYTES 17
@@ -5868,6 +5869,7 @@ ikev2_helper_validate_ike_rekey_sa_payload(const uint8_t *body,
                                            size_t body_len)
 {
     if (!body || body_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                          + IKEV2_HELPER_IKE_REKEY_SPI_SIZE
                           + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
     {
         return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
@@ -5906,7 +5908,8 @@ ikev2_helper_validate_ike_rekey_sa_payload(const uint8_t *body,
             || (proposal_count == 1 && proposal_number != 1)
             || proposal_number < previous_proposal_number
             || protocol_id != PROVIDER_HELPER_IKEV2_PROTOCOL_IKE
-            || spi_size != 0 || !transform_count)
+            || spi_size != IKEV2_HELPER_IKE_REKEY_SPI_SIZE
+            || !transform_count)
         {
             return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
         }
