@@ -20,11 +20,6 @@
 
 #include "provider_helper.h"
 
-#define PROVIDER_HELPER_EXPECT_CLOSED_FD_ENV \
-    "OPENVPN_PROVIDER_HELPER_EXPECT_CLOSED_FD"
-#define PROVIDER_HELPER_EXPECT_NO_SUPP_GROUPS_ENV \
-    "OPENVPN_PROVIDER_HELPER_EXPECT_NO_SUPP_GROUPS"
-
 static bool
 noop_write_header(int fd, uint32_t type, uint64_t sequence, uint64_t correlation_id)
 {
@@ -70,8 +65,27 @@ noop_read_all(int fd, uint8_t *data, size_t len)
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
+    int expected_closed_fd = -1;
+    bool expect_no_supp_groups = false;
+
+    for (int i = 1; i < argc; ++i)
+    {
+        if (strcmp(argv[i], "--expect-closed-fd") == 0 && i + 1 < argc)
+        {
+            expected_closed_fd = atoi(argv[++i]);
+        }
+        else if (strcmp(argv[i], "--expect-no-supp-groups") == 0)
+        {
+            expect_no_supp_groups = true;
+        }
+        else
+        {
+            return 20;
+        }
+    }
+
     const char *fd_env = getenv(PROVIDER_HELPER_FD_ENV);
     if (!fd_env)
     {
@@ -84,22 +98,20 @@ main(void)
         return 3;
     }
 
-    const char *closed_fd_env = getenv(PROVIDER_HELPER_EXPECT_CLOSED_FD_ENV);
-    if (closed_fd_env)
+    if (expected_closed_fd >= 0)
     {
-        const int closed_fd = atoi(closed_fd_env);
         errno = 0;
-        if (closed_fd >= 0 && fcntl(closed_fd, F_GETFD) >= 0)
+        if (fcntl(expected_closed_fd, F_GETFD) >= 0)
         {
             return 10;
         }
-        if (closed_fd >= 0 && errno != EBADF)
+        if (errno != EBADF)
         {
             return 11;
         }
     }
 
-    if (getenv(PROVIDER_HELPER_EXPECT_NO_SUPP_GROUPS_ENV))
+    if (expect_no_supp_groups)
     {
 #if defined(HAVE_SETGROUPS)
         if (getgroups(0, NULL) != 0)

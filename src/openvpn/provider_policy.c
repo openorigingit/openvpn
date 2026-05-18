@@ -27,6 +27,16 @@
 
 #define PROVIDER_POLICY_MAX_PUSH_TOKENS 4
 #define PROVIDER_POLICY_STATIC_POLICY_REVISION 1
+#define PROVIDER_POLICY_SHA256_FINGERPRINT_PREFIX "sha256:"
+#define PROVIDER_POLICY_SHA256_HEX_LEN 64
+
+static bool
+provider_policy_hex_digest_char(char ch)
+{
+    return (ch >= '0' && ch <= '9')
+           || (ch >= 'a' && ch <= 'f')
+           || (ch >= 'A' && ch <= 'F');
+}
 
 static const char *
 provider_policy_skip_spaces(const char *str)
@@ -191,15 +201,23 @@ provider_policy_fingerprint_valid(const char *fingerprint)
     }
 
     const size_t len = strlen(fingerprint);
-    if (len >= PROVIDER_POLICY_FINGERPRINT_SIZE)
+    const size_t prefix_len =
+        strlen(PROVIDER_POLICY_SHA256_FINGERPRINT_PREFIX);
+    if (len != prefix_len + PROVIDER_POLICY_SHA256_HEX_LEN
+        || len >= PROVIDER_POLICY_FINGERPRINT_SIZE)
     {
         return false;
     }
 
-    for (const char *pos = fingerprint; *pos; ++pos)
+    if (strncasecmp(fingerprint, PROVIDER_POLICY_SHA256_FINGERPRINT_PREFIX,
+                    prefix_len) != 0)
     {
-        const unsigned char ch = (unsigned char)*pos;
-        if (ch <= ' ' || ch >= 0x7f)
+        return false;
+    }
+
+    for (const char *pos = fingerprint + prefix_len; *pos; ++pos)
+    {
+        if (!provider_policy_hex_digest_char(*pos))
         {
             return false;
         }

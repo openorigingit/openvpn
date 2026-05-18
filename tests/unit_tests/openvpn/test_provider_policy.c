@@ -31,6 +31,14 @@
 
 static const char test_revocation_fingerprint[] =
     "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+static const char test_fingerprint_a[] =
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+static const char test_fingerprint_a_upper[] =
+    "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+static const char test_fingerprint_b[] =
+    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+static const char test_fingerprint_b_upper[] =
+    "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
 static const char test_revocation_principal[] = "alice@example.test";
 static const char test_revocation_cert_serial[] = "01AB";
 static const char test_revocation_cert_issuer[] = "CN=Example CA,O=OpenVPN Test";
@@ -262,21 +270,22 @@ test_provider_policy_fingerprint_allowlist(void **state)
 {
     (void)state;
 
-    assert_true(provider_policy_fingerprint_valid("SHA256:ABCD"));
+    assert_true(provider_policy_fingerprint_valid(test_fingerprint_a_upper));
     assert_false(provider_policy_fingerprint_valid(""));
     assert_false(provider_policy_fingerprint_valid("SHA256:AB CD"));
+    assert_false(provider_policy_fingerprint_valid("sha256:abcd"));
 
     struct gc_arena gc = gc_new();
     struct provider_policy_fingerprint_list list = { 0 };
     assert_false(provider_policy_fingerprint_list_defined(&list));
-    assert_true(provider_policy_fingerprint_list_add(&list, "SHA256:ABCD",
+    assert_true(provider_policy_fingerprint_list_add(&list, test_fingerprint_a_upper,
                                                      &gc));
     assert_true(provider_policy_fingerprint_list_defined(&list));
     assert_int_equal(list.count, 1);
     assert_true(provider_policy_fingerprint_list_contains(&list,
-                                                          "sha256:abcd"));
+                                                          test_fingerprint_a));
 
-    assert_true(provider_policy_fingerprint_list_add(&list, "sha256:abcd",
+    assert_true(provider_policy_fingerprint_list_add(&list, test_fingerprint_a,
                                                      &gc));
     assert_int_equal(list.count, 1);
     assert_false(provider_policy_fingerprint_list_add(&list, "bad value",
@@ -291,13 +300,13 @@ test_provider_policy_runtime_revocation_list(void **state)
 
     struct provider_policy_fingerprint_list list = { 0 };
     assert_true(provider_policy_fingerprint_list_add_runtime(&list,
-                                                             "SHA256:ABCD"));
+                                                             test_fingerprint_a_upper));
     assert_true(provider_policy_fingerprint_list_contains(&list,
-                                                          "sha256:abcd"));
+                                                          test_fingerprint_a));
     assert_int_equal(list.count, 1);
 
     assert_true(provider_policy_fingerprint_list_add_runtime(&list,
-                                                             "sha256:abcd"));
+                                                             test_fingerprint_a));
     assert_int_equal(list.count, 1);
 
     assert_false(provider_policy_fingerprint_list_add_runtime(&list,
@@ -315,11 +324,11 @@ test_provider_policy_runtime_fingerprint_list_copy(void **state)
 
     struct gc_arena gc = gc_new();
     struct provider_policy_fingerprint_list source = { 0 };
-    assert_true(provider_policy_fingerprint_list_add(&source, "SHA256:ABCD",
+    assert_true(provider_policy_fingerprint_list_add(&source, test_fingerprint_a_upper,
                                                      &gc));
-    assert_true(provider_policy_fingerprint_list_add(&source, "sha256:abcd",
+    assert_true(provider_policy_fingerprint_list_add(&source, test_fingerprint_a,
                                                      &gc));
-    assert_true(provider_policy_fingerprint_list_add(&source, "SHA256:DCBA",
+    assert_true(provider_policy_fingerprint_list_add(&source, test_fingerprint_b_upper,
                                                      &gc));
     assert_int_equal(source.count, 2);
 
@@ -328,13 +337,13 @@ test_provider_policy_runtime_fingerprint_list_copy(void **state)
                                                               &source));
     assert_int_equal(copy.count, 2);
     assert_true(provider_policy_fingerprint_list_contains(&copy,
-                                                          "sha256:abcd"));
+                                                          test_fingerprint_a));
     assert_true(provider_policy_fingerprint_list_contains(&copy,
-                                                          "sha256:dcba"));
+                                                          test_fingerprint_b));
 
     gc_free(&gc);
     assert_true(provider_policy_fingerprint_list_contains(&copy,
-                                                          "sha256:abcd"));
+                                                          test_fingerprint_a));
     provider_policy_fingerprint_list_free_runtime(&copy);
     assert_false(provider_policy_fingerprint_list_defined(&copy));
 }
@@ -354,12 +363,12 @@ test_provider_policy_runtime_fingerprint_list_copy_rejects_invalid(void **state)
     };
     struct provider_policy_fingerprint_list dest = { 0 };
     assert_true(provider_policy_fingerprint_list_add_runtime(&dest,
-                                                             "SHA256:KEEP"));
+                                                             test_fingerprint_b_upper));
     assert_false(provider_policy_fingerprint_list_copy_runtime(&dest,
                                                                &source));
     assert_int_equal(dest.count, 1);
     assert_true(provider_policy_fingerprint_list_contains(&dest,
-                                                          "sha256:keep"));
+                                                          test_fingerprint_b));
 
     provider_policy_fingerprint_list_free_runtime(&dest);
 }
@@ -399,9 +408,10 @@ test_provider_policy_revocation_file_load(void **state)
                         "# comment\n"
                         "\n"
                         "  %s  # inline comment\n"
-                        "SHA256:ABCD\n"
-                        "sha256:abcd\n",
-                        test_revocation_fingerprint) > 0);
+                        "%s\n"
+                        "%s\n",
+                        test_revocation_fingerprint,
+                        test_fingerprint_a_upper, test_fingerprint_a) > 0);
     assert_int_equal(fclose(fp), 0);
 
     struct provider_policy_fingerprint_list list = { 0 };
@@ -413,7 +423,7 @@ test_provider_policy_revocation_file_load(void **state)
     assert_true(provider_policy_fingerprint_list_contains(
         &list, test_revocation_fingerprint));
     assert_true(provider_policy_fingerprint_list_contains(&list,
-                                                          "sha256:abcd"));
+                                                          test_fingerprint_a));
     assert_string_equal(reason, "ok");
 
     provider_policy_fingerprint_list_free_runtime(&list);
@@ -809,7 +819,7 @@ test_provider_policy_authorize_fails_closed(void **state)
     assert_int_equal(result.status, PROVIDER_POLICY_AUTH_DENIED);
     assert_non_null(strstr(result.reason, "fingerprint"));
 
-    context.credential_fingerprint = "sha256:abcd";
+    context.credential_fingerprint = test_fingerprint_a;
     assert_false(provider_policy_authorize(&context, &result));
     assert_int_equal(result.status, PROVIDER_POLICY_AUTH_DENIED);
     assert_non_null(strstr(result.reason, "serial"));
@@ -831,7 +841,7 @@ test_provider_policy_authorize_rejects_revoked_cert(void **state)
     (void)state;
 
     struct provider_policy_fingerprint_entry allowed_entry = {
-        .credential_fingerprint = "SHA256:ABCD",
+        .credential_fingerprint = test_fingerprint_a_upper,
     };
     struct provider_policy_fingerprint_list allowed = {
         .head = &allowed_entry,
@@ -850,7 +860,7 @@ test_provider_policy_authorize_rejects_revoked_cert(void **state)
     struct provider_policy_auth_context context = {
         .profile_mode = PROVIDER_POLICY_PROFILE_EAP_TLS,
         .principal = "alice@example.test",
-        .credential_fingerprint = "SHA256:ABCD",
+        .credential_fingerprint = test_fingerprint_a_upper,
         .cert_serial = "01ab",
         .cert_issuer = test_revocation_cert_issuer,
         .allowed_fingerprints = &allowed,
@@ -872,7 +882,7 @@ test_provider_policy_authorize_rejects_revoked_principal(void **state)
     (void)state;
 
     struct provider_policy_fingerprint_entry allowed_entry = {
-        .credential_fingerprint = "SHA256:ABCD",
+        .credential_fingerprint = test_fingerprint_a_upper,
     };
     struct provider_policy_fingerprint_list allowed = {
         .head = &allowed_entry,
@@ -890,7 +900,7 @@ test_provider_policy_authorize_rejects_revoked_principal(void **state)
     struct provider_policy_auth_context context = {
         .profile_mode = PROVIDER_POLICY_PROFILE_EAP_TLS,
         .principal = test_revocation_principal,
-        .credential_fingerprint = "SHA256:ABCD",
+        .credential_fingerprint = test_fingerprint_a_upper,
         .cert_serial = "1234",
         .cert_issuer = "CN=Example CA",
         .allowed_fingerprints = &allowed,
@@ -912,7 +922,7 @@ test_provider_policy_authorize_rejects_revoked_fingerprint(void **state)
     (void)state;
 
     struct provider_policy_fingerprint_entry allowed_entry = {
-        .credential_fingerprint = "SHA256:ABCD",
+        .credential_fingerprint = test_fingerprint_a_upper,
     };
     struct provider_policy_fingerprint_list allowed = {
         .head = &allowed_entry,
@@ -920,7 +930,7 @@ test_provider_policy_authorize_rejects_revoked_fingerprint(void **state)
         .count = 1,
     };
     struct provider_policy_fingerprint_entry revoked_entry = {
-        .credential_fingerprint = "sha256:abcd",
+        .credential_fingerprint = test_fingerprint_a,
     };
     struct provider_policy_fingerprint_list revoked = {
         .head = &revoked_entry,
@@ -930,7 +940,7 @@ test_provider_policy_authorize_rejects_revoked_fingerprint(void **state)
     struct provider_policy_auth_context context = {
         .profile_mode = PROVIDER_POLICY_PROFILE_EAP_TLS,
         .principal = "alice@example.test",
-        .credential_fingerprint = "SHA256:ABCD",
+        .credential_fingerprint = test_fingerprint_a_upper,
         .cert_serial = "1234",
         .cert_issuer = "CN=Example CA",
         .allowed_fingerprints = &allowed,
@@ -951,7 +961,7 @@ test_provider_policy_authorize_allowlisted_fingerprint(void **state)
     (void)state;
 
     struct provider_policy_fingerprint_entry entry = {
-        .credential_fingerprint = "SHA256:ABCD",
+        .credential_fingerprint = test_fingerprint_a_upper,
     };
     struct provider_policy_fingerprint_list list = {
         .head = &entry,
@@ -961,7 +971,7 @@ test_provider_policy_authorize_allowlisted_fingerprint(void **state)
     struct provider_policy_auth_context context = {
         .profile_mode = PROVIDER_POLICY_PROFILE_EAP_TLS,
         .principal = "alice@example.test",
-        .credential_fingerprint = "sha256:abcd",
+        .credential_fingerprint = test_fingerprint_a,
         .cert_serial = "1234",
         .cert_issuer = "CN=Example CA",
         .allowed_fingerprints = &list,

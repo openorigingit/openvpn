@@ -41,6 +41,7 @@
 #include <dirent.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 
 #ifndef MSG_NOSIGNAL
@@ -56,6 +57,66 @@ provider_helper_disable_sigpipe(int fd)
 #else
     (void)fd;
 #endif
+}
+#endif
+
+#ifndef _WIN32
+static bool
+provider_helper_supervisor_helper_path_valid(const char *path, char *reason,
+                                             size_t reason_size)
+{
+    if (!path || !*path)
+    {
+        snprintf(reason, reason_size, "helper path is empty");
+        return false;
+    }
+    if (path[0] != '/')
+    {
+        snprintf(reason, reason_size, "helper path must be absolute");
+        return false;
+    }
+
+    struct stat st;
+    if (lstat(path, &st) != 0)
+    {
+        const int err = errno;
+        snprintf(reason, reason_size, "helper path lstat failed: %s",
+                 strerror(err));
+        return false;
+    }
+    if (S_ISLNK(st.st_mode))
+    {
+        snprintf(reason, reason_size, "helper path must not be a symlink");
+        return false;
+    }
+    if (!S_ISREG(st.st_mode))
+    {
+        snprintf(reason, reason_size, "helper path is not a regular file");
+        return false;
+    }
+    if ((st.st_mode & (S_IWGRP | S_IWOTH)) != 0)
+    {
+        snprintf(reason, reason_size,
+                 "helper path must not be group/world writable");
+        return false;
+    }
+
+    const uid_t euid = geteuid();
+    if (st.st_uid != 0 && st.st_uid != euid)
+    {
+        snprintf(reason, reason_size,
+                 "helper path owner must be root or the OpenVPN euid");
+        return false;
+    }
+    if (access(path, X_OK) != 0)
+    {
+        const int err = errno;
+        snprintf(reason, reason_size, "helper path is not executable: %s",
+                 strerror(err));
+        return false;
+    }
+    snprintf(reason, reason_size, "ok");
+    return true;
 }
 #endif
 
@@ -1147,6 +1208,14 @@ provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
     }
 #endif
     char reason[128];
+#ifndef _WIN32
+    if (!provider_helper_supervisor_helper_path_valid(path, reason,
+                                                      sizeof(reason)))
+    {
+        msg(M_WARN, "provider-helper: invalid helper path: %s", reason);
+        return false;
+    }
+#endif
     if (!provider_helper_runtime_config_valid(&supervisor->runtime_config, reason,
                                               sizeof(reason)))
     {
@@ -1171,15 +1240,16 @@ provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
             close(fds[1]);
         }
 
-        char fd_env[16];
-        snprintf(fd_env, sizeof(fd_env), "%d", PROVIDER_HELPER_CHILD_FD);
-        setenv(PROVIDER_HELPER_FD_ENV, fd_env, 1);
+        char fd_env[sizeof(PROVIDER_HELPER_FD_ENV) + 1 + 16];
+        snprintf(fd_env, sizeof(fd_env), "%s=%d", PROVIDER_HELPER_FD_ENV,
+                 PROVIDER_HELPER_CHILD_FD);
+        char *const envp[] = { fd_env, NULL };
         if (!provider_helper_child_drop_supplementary_groups())
         {
             _exit(126);
         }
         provider_helper_child_close_fds_except(PROVIDER_HELPER_CHILD_FD);
-        execv(path, argv);
+        execve(path, argv, envp);
         _exit(127);
     }
     else if (pid < 0)

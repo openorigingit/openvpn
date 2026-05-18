@@ -37,6 +37,10 @@
 #include "status.h"
 #include "test_common.h"
 
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
+
 #if defined(TARGET_LINUX)
 #include <sched.h>
 #include <sys/ioctl.h>
@@ -51,11 +55,6 @@
 
 static const char *noop_helper_path;
 static const char *ikev2_helper_path;
-
-#define PROVIDER_HELPER_EXPECT_CLOSED_FD_ENV \
-    "OPENVPN_PROVIDER_HELPER_EXPECT_CLOSED_FD"
-#define PROVIDER_HELPER_EXPECT_NO_SUPP_GROUPS_ENV \
-    "OPENVPN_PROVIDER_HELPER_EXPECT_NO_SUPP_GROUPS"
 
 static const char *find_executable(const char *const *paths);
 
@@ -8047,6 +8046,54 @@ test_provider_helper_spawn_rejects_live_child_pid(void **state)
 }
 
 static void
+test_provider_helper_spawn_rejects_relative_path(void **state)
+{
+    (void)state;
+
+#ifdef _WIN32
+    skip();
+#else
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+
+    char *const argv[] = { (char *)"openvpn-provider-helper-noop", NULL };
+    assert_false(provider_helper_supervisor_spawn(
+        &supervisor, "openvpn-provider-helper-noop", argv));
+    assert_int_equal(supervisor.pid, 0);
+    assert_int_equal(supervisor.ipc_fd, -1);
+
+    provider_helper_supervisor_free(&supervisor);
+#endif
+}
+
+static void
+test_provider_helper_spawn_rejects_writable_path(void **state)
+{
+    (void)state;
+
+#ifdef _WIN32
+    skip();
+#else
+    char path[] = "/tmp/openvpn-provider-helper-writable-XXXXXX";
+    const int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    close(fd);
+    assert_int_equal(chmod(path, 0777), 0);
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+
+    char *const argv[] = { path, NULL };
+    assert_false(provider_helper_supervisor_spawn(&supervisor, path, argv));
+    assert_int_equal(supervisor.pid, 0);
+    assert_int_equal(supervisor.ipc_fd, -1);
+
+    provider_helper_supervisor_free(&supervisor);
+    assert_int_equal(unlink(path), 0);
+#endif
+}
+
+static void
 test_provider_helper_spawn_closes_unlisted_child_fds(void **state)
 {
     (void)state;
@@ -8063,18 +8110,20 @@ test_provider_helper_spawn_closes_unlisted_child_fds(void **state)
     assert_int_equal(pipe(inherited_fds), 0);
     assert_true(inherited_fds[1] != PROVIDER_HELPER_CHILD_FD);
 
-    char fd_env[16];
-    snprintf(fd_env, sizeof(fd_env), "%d", inherited_fds[1]);
-    assert_int_equal(setenv(PROVIDER_HELPER_EXPECT_CLOSED_FD_ENV, fd_env, 1),
-                     0);
+    char fd_arg[16];
+    snprintf(fd_arg, sizeof(fd_arg), "%d", inherited_fds[1]);
 
     struct provider_helper_supervisor supervisor;
     provider_helper_supervisor_init(&supervisor);
 
-    char *const argv[] = { (char *)noop_helper_path, NULL };
+    char *const argv[] = {
+        (char *)noop_helper_path,
+        (char *)"--expect-closed-fd",
+        fd_arg,
+        NULL
+    };
     assert_true(
         provider_helper_supervisor_spawn(&supervisor, noop_helper_path, argv));
-    unsetenv(PROVIDER_HELPER_EXPECT_CLOSED_FD_ENV);
     close(inherited_fds[0]);
     close(inherited_fds[1]);
 
@@ -8111,12 +8160,13 @@ test_provider_helper_spawn_drops_root_supplementary_groups(void **state)
     struct provider_helper_supervisor supervisor;
     provider_helper_supervisor_init(&supervisor);
 
-    assert_int_equal(setenv(PROVIDER_HELPER_EXPECT_NO_SUPP_GROUPS_ENV, "1", 1),
-                     0);
-    char *const argv[] = { (char *)noop_helper_path, NULL };
+    char *const argv[] = {
+        (char *)noop_helper_path,
+        (char *)"--expect-no-supp-groups",
+        NULL
+    };
     const bool spawned =
         provider_helper_supervisor_spawn(&supervisor, noop_helper_path, argv);
-    unsetenv(PROVIDER_HELPER_EXPECT_NO_SUPP_GROUPS_ENV);
     assert_true(spawned);
 
     for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY; ++i)
@@ -13619,7 +13669,12 @@ find_executable(const char *const *paths)
     {
         if (access(paths[i], X_OK) == 0)
         {
+#ifdef _WIN32
             return paths[i];
+#else
+            char *resolved = realpath(paths[i], NULL);
+            return resolved ? resolved : paths[i];
+#endif
         }
     }
     return NULL;
@@ -13680,6 +13735,8 @@ main(void)
         cmocka_unit_test(test_provider_helper_spawn_noop),
         cmocka_unit_test(test_provider_helper_restart_count_tracks_respawn),
         cmocka_unit_test(test_provider_helper_spawn_rejects_live_child_pid),
+        cmocka_unit_test(test_provider_helper_spawn_rejects_relative_path),
+        cmocka_unit_test(test_provider_helper_spawn_rejects_writable_path),
         cmocka_unit_test(
             test_provider_helper_spawn_closes_unlisted_child_fds),
         cmocka_unit_test(
