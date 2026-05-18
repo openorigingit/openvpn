@@ -833,6 +833,88 @@ Immediately kill a client instance by CID.
 CID -- client ID.  See documentation for ">CLIENT:" notification for more
 info.
 
+COMMAND -- provider-allow-fingerprint  (experimental IKEv2 provider)
+--------------------------------------------------------------------
+
+Authorize an IKEv2 provider credential fingerprint without restarting
+OpenVPN.
+
+  provider-allow-fingerprint {FINGERPRINT} ["reason-text"]
+
+FINGERPRINT -- provider credential SHA-256 fingerprint.
+
+If --experimental-ikev2-helper-allow-fingerprint-file is configured, OpenVPN
+persists the fingerprint before updating the runtime allowlist. The command
+fails if the fingerprint is invalid or currently revoked. A successful command
+increments the provider policy revision and affects subsequent IKEv2 provider
+authorization requests.
+
+COMMAND -- provider-revoke  (experimental IKEv2 provider)
+--------------------------------------------------------
+
+Revoke the credential fingerprint associated with an active provider session
+and kill that provider session.
+
+  provider-revoke {CID} ["reason-text"]
+
+CID -- provider session management CID. Use the "status" command to see active
+provider sessions and their management CIDs.
+
+If --experimental-ikev2-helper-revocation-file is configured, OpenVPN persists
+the credential fingerprint revocation before terminating matching provider
+state. The command fails closed if the revocation cannot be persisted.
+
+COMMAND -- provider-revoke-cert  (experimental IKEv2 provider)
+-------------------------------------------------------------
+
+Revoke the certificate identity associated with an active provider session and
+kill matching provider sessions.
+
+  provider-revoke-cert {CID} ["reason-text"]
+
+CID -- provider session management CID. OpenVPN persists the certificate
+issuer/serial revocation to --experimental-ikev2-helper-cert-revocation-file
+when that file is configured.
+
+COMMAND -- provider-revoke-fingerprint  (experimental IKEv2 provider)
+--------------------------------------------------------------------
+
+Revoke a provider credential fingerprint and kill all active provider sessions
+using that fingerprint.
+
+  provider-revoke-fingerprint {FINGERPRINT} ["reason-text"]
+
+FINGERPRINT -- provider credential SHA-256 fingerprint.
+
+If --experimental-ikev2-helper-revocation-file is configured, OpenVPN persists
+the revocation before updating runtime policy and terminating matching provider
+state.
+
+COMMAND -- provider-revoke-principal  (experimental IKEv2 provider)
+------------------------------------------------------------------
+
+Revoke a provider principal and kill all active provider sessions using that
+principal.
+
+  provider-revoke-principal {PRINCIPAL} ["reason-text"]
+
+PRINCIPAL -- provider principal string as recorded in provider status output.
+
+If --experimental-ikev2-helper-principal-revocation-file is configured,
+OpenVPN persists the revocation before updating runtime policy and terminating
+matching provider state.
+
+Provider sessions in status output
+----------------------------------
+
+When the experimental IKEv2 helper is active, "status" includes provider helper
+and provider session sections. Version 2/3 status output uses PROVIDER_HELPER,
+PROVIDER_HELPER_STAT, and PROVIDER_SESSION records. Provider sessions have
+OpenVPN-owned management CIDs, principals, credential fingerprints, assigned
+addresses, authorized selectors, helper state, CHILD SA state, policy revision,
+and XFRM lease ID. These CIDs are distinct from ordinary OpenVPN TLS client
+CIDs but are intentionally controlled through the same management interface.
+
 COMMAND -- remote-entry-count (OpenVPN 2.6+ management version > 3)
 -------------------------------------------------------------------
 

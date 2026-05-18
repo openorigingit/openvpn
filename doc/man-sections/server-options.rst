@@ -170,6 +170,60 @@ fast hardware. SSL/TLS authentication must be used in this mode.
   effect. Packets are always sent to the tunnel interface and then
   routed based on the system routing table.
 
+--experimental-ikev2-helper path
+  Start the experimental IKEv2 helper process in server mode. This feature
+  is disabled by default and is intended for the native IKEv2/IPsec provider
+  work. Ordinary OpenVPN protocol clients and DCO behavior are unchanged when
+  this option is not present.
+
+  The helper is supervised by OpenVPN and receives only OpenVPN-authorized
+  runtime policy over a private helper IPC channel. The existing OpenVPN
+  plugin ABI is not used as the IKEv2 protocol boundary.
+
+  This option currently requires the OpenSSL TLS backend. Runtime IPsec/XFRM
+  installation additionally requires Linux and
+  ``--experimental-ikev2-helper-apply-xfrm``.
+
+--experimental-ikev2-helper-server-id fqdn
+  Configure the FQDN identity advertised by the experimental IKEv2 helper.
+  This option is required when ``--experimental-ikev2-helper`` is enabled.
+
+--experimental-ikev2-helper-allow-fingerprint fp
+  Authorize an IKEv2 client credential fingerprint at startup. The fingerprint
+  must use the provider policy SHA-256 fingerprint form.
+
+--experimental-ikev2-helper-allow-fingerprint-file file
+  Load persistently authorized IKEv2 credential fingerprints from ``file``.
+  The management command ``provider-allow-fingerprint`` appends to this file
+  when it is configured.
+
+--experimental-ikev2-helper-revocation-file file
+  Load persistently revoked IKEv2 credential fingerprints from ``file``.
+  The management commands ``provider-revoke`` and
+  ``provider-revoke-fingerprint`` append to this file when it is configured.
+
+--experimental-ikev2-helper-principal-revocation-file file
+  Load persistently revoked IKEv2 principals from ``file``. The management
+  command ``provider-revoke-principal`` appends to this file when it is
+  configured.
+
+--experimental-ikev2-helper-cert-revocation-file file
+  Load persistently revoked IKEv2 certificate identities from ``file``. The
+  management command ``provider-revoke-cert`` appends to this file when it is
+  configured.
+
+--experimental-ikev2-helper-apply-xfrm
+  Allow the experimental IKEv2 helper to install OpenVPN-authorized Linux XFRM
+  state and policy for IKEv2 provider sessions. Without this option, the helper
+  may complete control-plane tests but does not install kernel IPsec data-plane
+  state.
+
+--experimental-ikev2-helper-full-tunnel
+  Enable test-only full-tunnel IKEv2 policy for the helper. This requires
+  ``--experimental-ikev2-helper-apply-xfrm`` and is not a substitute for the
+  production VPN DMZ, firewall, and application gateway policy described by
+  the deployment profile.
+
 --disable
   Disable a particular client (based on the common name) from connecting.
   Don't use this option to disable a client due to key or password
