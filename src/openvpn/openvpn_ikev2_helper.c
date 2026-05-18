@@ -7805,6 +7805,27 @@ ikev2_helper_count_child_sa_scaffolds(
     return active;
 }
 
+static uint32_t
+ikev2_helper_count_child_sa_xfrm_active(
+    const struct ikev2_helper_ike_sa_table *table)
+{
+    if (!table)
+    {
+        return 0;
+    }
+
+    uint32_t active = 0;
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        const struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        if (sa->active && sa->child_sa.ready && sa->child_sa.xfrm_applied)
+        {
+            ++active;
+        }
+    }
+    return active;
+}
+
 static bool
 ikev2_helper_sockaddr_ipv4_endpoint(const struct sockaddr_storage *addr,
                                     socklen_t addr_len,
@@ -14237,6 +14258,8 @@ ikev2_helper_loop(int fd)
                 counters.ike_sa_active = sa_table->active;
                 counters.ike_child_sa_scaffold_active =
                     ikev2_helper_count_child_sa_scaffolds(sa_table);
+                counters.ike_child_sa_xfrm_active =
+                    ikev2_helper_count_child_sa_xfrm_active(sa_table);
                 break;
             }
 
@@ -14269,6 +14292,8 @@ ikev2_helper_loop(int fd)
                 counters.ike_sa_active = sa_table->active;
                 counters.ike_child_sa_scaffold_active =
                     ikev2_helper_count_child_sa_scaffolds(sa_table);
+                counters.ike_child_sa_xfrm_active =
+                    ikev2_helper_count_child_sa_xfrm_active(sa_table);
                 break;
             }
 
@@ -14356,6 +14381,9 @@ ikev2_helper_loop(int fd)
                 counters.ike_sa_active = sa_table->active;
                 counters.ike_child_sa_scaffold_active =
                     ikev2_helper_count_child_sa_scaffolds(sa_table);
+                counters.ike_child_sa_xfrm_active =
+                    ikev2_helper_count_child_sa_xfrm_active(sa_table);
+                counters.xfrm_leases_active = xfrm_lease_count;
                 counters.xfrm_leases_stale =
                     ikev2_helper_count_stale_xfrm_leases(
                         xfrm_leases, xfrm_lease_count, time(NULL));

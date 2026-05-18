@@ -36,7 +36,7 @@
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 60
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  920
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  928
 #ifndef PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX
 #define PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX 4
 #endif
@@ -585,6 +585,7 @@ struct provider_helper_runtime_stats {
     uint64_t ike_create_child_scaffolded;
     uint64_t ike_create_child_scaffold_failed;
     uint64_t ike_child_sa_scaffold_active;
+    uint64_t ike_child_sa_xfrm_active;
     uint64_t ike_create_child_keymat_ready;
     uint64_t ike_create_child_xfrm_install_ok;
     uint64_t ike_create_child_xfrm_install_failed;

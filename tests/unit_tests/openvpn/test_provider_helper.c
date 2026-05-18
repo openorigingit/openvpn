@@ -565,13 +565,14 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_create_child_scaffolded = 86,
         .ike_create_child_scaffold_failed = 87,
         .ike_child_sa_scaffold_active = 88,
-        .ike_create_child_keymat_ready = 89,
-        .ike_create_child_xfrm_install_ok = 90,
-        .ike_create_child_xfrm_install_failed = 91,
-        .ike_create_child_response_tx = 92,
-        .ike_create_child_response_failed = 93,
-        .ike_child_sa_xfrm_delete_ok = 94,
-        .ike_child_sa_xfrm_delete_failed = 95,
+        .ike_child_sa_xfrm_active = 89,
+        .ike_create_child_keymat_ready = 90,
+        .ike_create_child_xfrm_install_ok = 91,
+        .ike_create_child_xfrm_install_failed = 92,
+        .ike_create_child_response_tx = 93,
+        .ike_create_child_response_failed = 94,
+        .ike_child_sa_xfrm_delete_ok = 95,
+        .ike_child_sa_xfrm_delete_failed = 96,
     };
     struct provider_helper_runtime_stats output;
     uint8_t payload[PROVIDER_HELPER_RUNTIME_STATS_SIZE];
@@ -773,6 +774,8 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_create_child_scaffold_failed);
     assert_int_equal(output.ike_child_sa_scaffold_active,
                      input.ike_child_sa_scaffold_active);
+    assert_int_equal(output.ike_child_sa_xfrm_active,
+                     input.ike_child_sa_xfrm_active);
     assert_int_equal(output.ike_create_child_keymat_ready,
                      input.ike_create_child_keymat_ready);
     assert_int_equal(output.ike_create_child_xfrm_install_ok,
@@ -961,6 +964,7 @@ test_provider_helper_status_output(void **state)
     supervisor.runtime_stats.datagrams_rx = 11;
     supervisor.runtime_stats.xfrm_leases_stale = 5;
     supervisor.runtime_stats.ike_sa_active = 3;
+    supervisor.runtime_stats.ike_child_sa_xfrm_active = 4;
     supervisor.runtime_stats.ike_create_child_xfrm_install_failed = 1;
     supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok = 2;
 
@@ -990,6 +994,8 @@ test_provider_helper_status_output(void **state)
                            "PROVIDER_HELPER_STAT,xfrm_leases_stale,5"));
     assert_non_null(strstr(capture.data,
                            "PROVIDER_HELPER_STAT,ike_sa_active,3"));
+    assert_non_null(strstr(capture.data,
+                           "PROVIDER_HELPER_STAT,ike_child_sa_xfrm_active,4"));
     assert_non_null(strstr(
         capture.data,
         "PROVIDER_HELPER_STAT,ike_create_child_xfrm_install_failed,1"));
@@ -12434,6 +12440,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     assert_int_equal(supervisor.runtime_stats.ike_create_child_xfrm_install_ok,
                      1);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_active, 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
 
     test_send_ikev2_encrypted_create_child_from(
@@ -12461,6 +12468,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     assert_int_equal(
         supervisor.runtime_stats.ike_create_child_no_additional_sas_tx, 1);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_active, 1);
 
     test_send_ikev2_encrypted_create_child_rekey_from(
         response_fd, natt_port, initiator_spi, &sa_init_material, true, 4);
@@ -12487,6 +12495,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     assert_int_equal(supervisor.runtime_stats.ike_create_child_response_tx, 2);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 1);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_active, 1);
 
     test_send_ikev2_encrypted_child_delete_from(
         response_fd, natt_port, initiator_spi, &sa_init_material, true, 5,
@@ -12512,6 +12521,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
         supervisor.runtime_stats.ike_informational_delete_response_tx, 1);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 2);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
 
     test_send_ikev2_encrypted_create_child_from(
@@ -12535,6 +12545,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
                      3);
     assert_int_equal(supervisor.runtime_stats.ike_create_child_response_tx, 3);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_active, 1);
 
     struct provider_helper_xfrm_lease replaced_xfrm_lease = xfrm_lease;
     replaced_xfrm_lease.policy_revision = xfrm_lease.policy_revision + 1;
@@ -12572,6 +12583,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     assert_int_equal(supervisor.runtime_stats.ike_sa_xfrm_lease_revoked, 1);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 3);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
     assert_int_equal(supervisor.runtime_stats.xfrm_leases_active, 1);
 
@@ -12600,6 +12612,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 3);
     assert_int_equal(supervisor.runtime_stats.xfrm_lease_deleted, 1);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
 
     target_rx_sequence = supervisor.last_rx_sequence + 1;
@@ -12658,6 +12671,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
                      4);
     assert_int_equal(supervisor.runtime_stats.ike_create_child_response_tx, 4);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_active, 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
 
     test_send_ikev2_encrypted_protected_exchange_from(
@@ -12699,6 +12713,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
     assert_int_equal(supervisor.runtime_stats.ike_informational_empty_rx, 0);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 4);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
 
     const uint64_t delete_initiator_spi = 0x7766554433221100ull;
@@ -12751,6 +12766,7 @@ test_provider_helper_apply_xfrm_in_child_netns(void)
         supervisor.runtime_stats.ike_informational_delete_response_tx, 2);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 5);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);
     assert_int_equal(close_state.calls, 3);
     assert_memory_equal(close_state.session_close.reason,

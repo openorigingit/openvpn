@@ -387,6 +387,7 @@ provider_helper_print_status_counters(
         { "ike_create_child_scaffolded", stats->ike_create_child_scaffolded },
         { "ike_child_sa_scaffold_active",
           stats->ike_child_sa_scaffold_active },
+        { "ike_child_sa_xfrm_active", stats->ike_child_sa_xfrm_active },
         { "ike_create_child_xfrm_install_ok",
           stats->ike_create_child_xfrm_install_ok },
         { "ike_create_child_xfrm_install_failed",

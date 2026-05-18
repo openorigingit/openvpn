@@ -1347,6 +1347,7 @@ provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u64(
         &pos, stats->ike_create_child_scaffold_failed);
     provider_helper_wire_write_u64(&pos, stats->ike_child_sa_scaffold_active);
+    provider_helper_wire_write_u64(&pos, stats->ike_child_sa_xfrm_active);
     provider_helper_wire_write_u64(&pos, stats->ike_create_child_keymat_ready);
     provider_helper_wire_write_u64(&pos,
                                    stats->ike_create_child_xfrm_install_ok);
@@ -1529,6 +1530,8 @@ provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
     stats->ike_create_child_scaffold_failed =
         provider_helper_wire_read_u64(&pos);
     stats->ike_child_sa_scaffold_active =
+        provider_helper_wire_read_u64(&pos);
+    stats->ike_child_sa_xfrm_active =
         provider_helper_wire_read_u64(&pos);
     stats->ike_create_child_keymat_ready =
         provider_helper_wire_read_u64(&pos);
