@@ -38,7 +38,9 @@
 #include "memdbg.h"
 
 #ifndef _WIN32
+#include <dirent.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 
 #ifndef MSG_NOSIGNAL
@@ -237,6 +239,44 @@ provider_helper_child_drop_supplementary_groups(void)
 static void
 provider_helper_child_close_fds_except(int keep)
 {
+#if defined(SYS_close_range)
+    if (keep >= 3)
+    {
+        const bool closed_lower =
+            keep == 3
+            || syscall(SYS_close_range, 3U, (unsigned int)keep - 1U, 0) == 0;
+        const bool closed_upper =
+            keep == INT_MAX
+            || syscall(SYS_close_range, (unsigned int)keep + 1U, UINT_MAX, 0)
+                   == 0;
+        if (closed_lower && closed_upper)
+        {
+            return;
+        }
+    }
+#endif
+
+    DIR *dir = opendir("/proc/self/fd");
+    if (dir)
+    {
+        const int dir_fd = dirfd(dir);
+        struct dirent *entry;
+        while ((entry = readdir(dir)) != NULL)
+        {
+            char *end = NULL;
+            errno = 0;
+            const long fd = strtol(entry->d_name, &end, 10);
+            if (errno || !end || *end || fd < 3 || fd > INT_MAX
+                || fd == keep || fd == dir_fd)
+            {
+                continue;
+            }
+            close((int)fd);
+        }
+        closedir(dir);
+        return;
+    }
+
     long fd_limit = sysconf(_SC_OPEN_MAX);
     if (fd_limit < 0)
     {
