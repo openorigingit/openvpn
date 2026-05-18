@@ -477,6 +477,7 @@ struct options
 
     const char *ikev2_helper_path;
     const char *ikev2_helper_server_id;
+    const char *ikev2_helper_allow_file;
     const char *ikev2_helper_revocation_file;
     const char *ikev2_helper_principal_revocation_file;
     const char *ikev2_helper_cert_revocation_file;

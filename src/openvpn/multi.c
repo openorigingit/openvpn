@@ -1508,6 +1508,34 @@ multi_init(struct context *t)
     {
         msg(M_FATAL, "IKEv2 helper allowlist initialization failed");
     }
+    if (t->options.ikev2_helper_allow_file)
+    {
+        char reason[PROVIDER_POLICY_REASON_SIZE];
+        size_t loaded_count = 0;
+        if (!provider_policy_fingerprint_list_load_named_runtime(
+                &m->provider_allowed_fingerprints,
+                t->options.ikev2_helper_allow_file,
+                "allow fingerprint file", reason, sizeof(reason),
+                &loaded_count))
+        {
+            msg(M_FATAL,
+                "IKEv2 helper allow fingerprint file load failed: %s",
+                reason);
+        }
+        if (UINT64_MAX - m->provider_policy_revision < loaded_count)
+        {
+            m->provider_policy_revision = UINT64_MAX;
+        }
+        else
+        {
+            m->provider_policy_revision += loaded_count;
+        }
+        msg(M_INFO,
+            "IKEv2 helper loaded %zu allowed credential fingerprint%s from %s, policy revision %" PRIu64,
+            loaded_count, loaded_count == 1 ? "" : "s",
+            t->options.ikev2_helper_allow_file,
+            m->provider_policy_revision);
+    }
     if (t->options.ikev2_helper_revocation_file)
     {
         char reason[PROVIDER_POLICY_REASON_SIZE];
@@ -5433,6 +5461,20 @@ management_provider_allow_fingerprint(void *arg,
     const bool already_allowed =
         provider_policy_fingerprint_list_contains(
             &m->provider_allowed_fingerprints, credential_fingerprint);
+    if (!already_allowed && m->top.options.ikev2_helper_allow_file)
+    {
+        char file_reason[PROVIDER_POLICY_REASON_SIZE];
+        if (!provider_policy_fingerprint_list_append_named_file(
+                m->top.options.ikev2_helper_allow_file,
+                credential_fingerprint, "allow fingerprint file",
+                file_reason, sizeof(file_reason)))
+        {
+            msg(M_WARN,
+                "MANAGEMENT: provider credential fingerprint allow was not persisted: %s",
+                file_reason);
+            return false;
+        }
+    }
     if (!provider_policy_fingerprint_list_add_runtime(
             &m->provider_allowed_fingerprints, credential_fingerprint))
     {

@@ -159,9 +159,22 @@ bool provider_policy_fingerprint_list_load_runtime(
     char *reason,
     size_t reason_size,
     size_t *loaded_count);
+bool provider_policy_fingerprint_list_load_named_runtime(
+    struct provider_policy_fingerprint_list *list,
+    const char *path,
+    const char *file_label,
+    char *reason,
+    size_t reason_size,
+    size_t *loaded_count);
 bool provider_policy_fingerprint_list_append_file(
     const char *path,
     const char *credential_fingerprint,
+    char *reason,
+    size_t reason_size);
+bool provider_policy_fingerprint_list_append_named_file(
+    const char *path,
+    const char *credential_fingerprint,
+    const char *file_label,
     char *reason,
     size_t reason_size);
 bool provider_policy_principal_valid(const char *principal);

@@ -471,6 +471,87 @@ test_provider_policy_revocation_file_append(void **state)
 }
 
 static void
+test_provider_policy_named_fingerprint_file_load(void **state)
+{
+    (void)state;
+
+    char path[] = "provider-policy-allow-fingerprints-XXXXXX";
+    const int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    FILE *fp = fdopen(fd, "w");
+    assert_non_null(fp);
+    assert_true(fprintf(fp, "%s\n", test_revocation_fingerprint) > 0);
+    assert_int_equal(fclose(fp), 0);
+
+    struct provider_policy_fingerprint_list list = { 0 };
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    size_t loaded_count = 0;
+    assert_true(provider_policy_fingerprint_list_load_named_runtime(
+        &list, path, "allow fingerprint file", reason, sizeof(reason),
+        &loaded_count));
+    assert_int_equal(loaded_count, 1);
+    assert_true(provider_policy_fingerprint_list_contains(
+        &list, test_revocation_fingerprint));
+    assert_string_equal(reason, "ok");
+
+    provider_policy_fingerprint_list_free_runtime(&list);
+    assert_int_equal(unlink(path), 0);
+}
+
+static void
+test_provider_policy_named_fingerprint_file_rejects_invalid(void **state)
+{
+    (void)state;
+
+    char path[] = "provider-policy-bad-allow-fingerprints-XXXXXX";
+    const int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    FILE *fp = fdopen(fd, "w");
+    assert_non_null(fp);
+    assert_true(fprintf(fp, "sha256:has spaces\n") > 0);
+    assert_int_equal(fclose(fp), 0);
+
+    struct provider_policy_fingerprint_list list = { 0 };
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    assert_false(provider_policy_fingerprint_list_load_named_runtime(
+        &list, path, "allow fingerprint file", reason, sizeof(reason), NULL));
+    assert_non_null(strstr(reason, "allow fingerprint file"));
+    assert_non_null(strstr(reason, "invalid fingerprint"));
+    assert_false(provider_policy_fingerprint_list_defined(&list));
+
+    assert_int_equal(unlink(path), 0);
+}
+
+static void
+test_provider_policy_named_fingerprint_file_append(void **state)
+{
+    (void)state;
+
+    char path[] = "provider-policy-append-allow-fingerprints-XXXXXX";
+    const int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    close(fd);
+
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    assert_true(provider_policy_fingerprint_list_append_named_file(
+        path, test_revocation_fingerprint, "allow fingerprint file", reason,
+        sizeof(reason)));
+    assert_string_equal(reason, "ok");
+
+    struct provider_policy_fingerprint_list list = { 0 };
+    size_t loaded_count = 0;
+    assert_true(provider_policy_fingerprint_list_load_named_runtime(
+        &list, path, "allow fingerprint file", reason, sizeof(reason),
+        &loaded_count));
+    assert_int_equal(loaded_count, 1);
+    assert_true(provider_policy_fingerprint_list_contains(
+        &list, test_revocation_fingerprint));
+
+    provider_policy_fingerprint_list_free_runtime(&list);
+    assert_int_equal(unlink(path), 0);
+}
+
+static void
 test_provider_policy_principal_revocation_list(void **state)
 {
     (void)state;
@@ -917,6 +998,10 @@ main(void)
         cmocka_unit_test(test_provider_policy_revocation_file_load),
         cmocka_unit_test(test_provider_policy_revocation_file_rejects_invalid),
         cmocka_unit_test(test_provider_policy_revocation_file_append),
+        cmocka_unit_test(test_provider_policy_named_fingerprint_file_load),
+        cmocka_unit_test(
+            test_provider_policy_named_fingerprint_file_rejects_invalid),
+        cmocka_unit_test(test_provider_policy_named_fingerprint_file_append),
         cmocka_unit_test(test_provider_policy_principal_revocation_list),
         cmocka_unit_test(test_provider_policy_principal_revocation_file_load),
         cmocka_unit_test(

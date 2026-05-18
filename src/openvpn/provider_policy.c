@@ -375,10 +375,17 @@ provider_policy_trim_revocation_line(char *line)
     return start;
 }
 
+static const char *
+provider_policy_fingerprint_file_label(const char *file_label)
+{
+    return file_label && *file_label ? file_label : "fingerprint file";
+}
+
 bool
-provider_policy_fingerprint_list_load_runtime(
+provider_policy_fingerprint_list_load_named_runtime(
     struct provider_policy_fingerprint_list *list,
     const char *path,
+    const char *file_label,
     char *reason,
     size_t reason_size,
     size_t *loaded_count)
@@ -391,8 +398,9 @@ provider_policy_fingerprint_list_load_runtime(
 
     if (!list || !path || !*path)
     {
-        provider_policy_set_reason(reason, reason_size,
-                                   "missing revocation file path");
+        provider_policy_set_reason(reason, reason_size, "missing %s path",
+                                   provider_policy_fingerprint_file_label(
+                                       file_label));
         return false;
     }
 
@@ -406,7 +414,9 @@ provider_policy_fingerprint_list_load_runtime(
         }
 
         provider_policy_set_reason(reason, reason_size,
-                                   "could not open revocation file '%s': %s",
+                                   "could not open %s '%s': %s",
+                                   provider_policy_fingerprint_file_label(
+                                       file_label),
                                    path, strerror(open_errno));
         return false;
     }
@@ -421,7 +431,9 @@ provider_policy_fingerprint_list_load_runtime(
         if (len && line[len - 1] != '\n' && !feof(fp))
         {
             provider_policy_set_reason(reason, reason_size,
-                                       "revocation file '%s' line %zu is too long",
+                                       "%s '%s' line %zu is too long",
+                                       provider_policy_fingerprint_file_label(
+                                           file_label),
                                        path, line_number);
             provider_policy_fingerprint_list_free_runtime(&loaded);
             fclose(fp);
@@ -438,7 +450,8 @@ provider_policy_fingerprint_list_load_runtime(
         {
             provider_policy_set_reason(
                 reason, reason_size,
-                "revocation file '%s' line %zu has invalid fingerprint",
+                "%s '%s' line %zu has invalid fingerprint",
+                provider_policy_fingerprint_file_label(file_label),
                 path, line_number);
             provider_policy_fingerprint_list_free_runtime(&loaded);
             fclose(fp);
@@ -450,7 +463,8 @@ provider_policy_fingerprint_list_load_runtime(
         {
             provider_policy_set_reason(
                 reason, reason_size,
-                "revocation file '%s' line %zu could not be loaded",
+                "%s '%s' line %zu could not be loaded",
+                provider_policy_fingerprint_file_label(file_label),
                 path, line_number);
             provider_policy_fingerprint_list_free_runtime(&loaded);
             fclose(fp);
@@ -462,7 +476,9 @@ provider_policy_fingerprint_list_load_runtime(
     {
         const int read_errno = errno;
         provider_policy_set_reason(reason, reason_size,
-                                   "could not read revocation file '%s': %s",
+                                   "could not read %s '%s': %s",
+                                   provider_policy_fingerprint_file_label(
+                                       file_label),
                                    path, strerror(read_errno));
         provider_policy_fingerprint_list_free_runtime(&loaded);
         fclose(fp);
@@ -473,7 +489,9 @@ provider_policy_fingerprint_list_load_runtime(
     {
         const int close_errno = errno;
         provider_policy_set_reason(reason, reason_size,
-                                   "could not close revocation file '%s': %s",
+                                   "could not close %s '%s': %s",
+                                   provider_policy_fingerprint_file_label(
+                                       file_label),
                                    path, strerror(close_errno));
         provider_policy_fingerprint_list_free_runtime(&loaded);
         return false;
@@ -488,8 +506,8 @@ provider_policy_fingerprint_list_load_runtime(
                 list, entry->credential_fingerprint))
         {
             provider_policy_set_reason(
-                reason, reason_size,
-                "revocation file '%s' entry could not be loaded",
+                reason, reason_size, "%s '%s' entry could not be loaded",
+                provider_policy_fingerprint_file_label(file_label),
                 path);
             provider_policy_fingerprint_list_free_runtime(&loaded);
             return false;
@@ -504,17 +522,31 @@ provider_policy_fingerprint_list_load_runtime(
 }
 
 bool
-provider_policy_fingerprint_list_append_file(
+provider_policy_fingerprint_list_load_runtime(
+    struct provider_policy_fingerprint_list *list,
+    const char *path,
+    char *reason,
+    size_t reason_size,
+    size_t *loaded_count)
+{
+    return provider_policy_fingerprint_list_load_named_runtime(
+        list, path, "revocation file", reason, reason_size, loaded_count);
+}
+
+bool
+provider_policy_fingerprint_list_append_named_file(
     const char *path,
     const char *credential_fingerprint,
+    const char *file_label,
     char *reason,
     size_t reason_size)
 {
     provider_policy_set_reason(reason, reason_size, "ok");
     if (!path || !*path)
     {
-        provider_policy_set_reason(reason, reason_size,
-                                   "missing revocation file path");
+        provider_policy_set_reason(reason, reason_size, "missing %s path",
+                                   provider_policy_fingerprint_file_label(
+                                       file_label));
         return false;
     }
     if (!provider_policy_fingerprint_valid(credential_fingerprint))
@@ -530,7 +562,9 @@ provider_policy_fingerprint_list_append_file(
     {
         const int open_errno = errno;
         provider_policy_set_reason(reason, reason_size,
-                                   "could not open revocation file '%s': %s",
+                                   "could not open %s '%s': %s",
+                                   provider_policy_fingerprint_file_label(
+                                       file_label),
                                    path, strerror(open_errno));
         return false;
     }
@@ -541,7 +575,9 @@ provider_policy_fingerprint_list_append_file(
     {
         const int open_errno = errno;
         provider_policy_set_reason(reason, reason_size,
-                                   "could not open revocation file '%s': %s",
+                                   "could not open %s '%s': %s",
+                                   provider_policy_fingerprint_file_label(
+                                       file_label),
                                    path, strerror(open_errno));
         return false;
     }
@@ -552,7 +588,9 @@ provider_policy_fingerprint_list_append_file(
         const int fdopen_errno = errno;
         close(fd);
         provider_policy_set_reason(reason, reason_size,
-                                   "could not stream revocation file '%s': %s",
+                                   "could not stream %s '%s': %s",
+                                   provider_policy_fingerprint_file_label(
+                                       file_label),
                                    path, strerror(fdopen_errno));
         return false;
     }
@@ -563,7 +601,9 @@ provider_policy_fingerprint_list_append_file(
         const int write_errno = errno;
         fclose(fp);
         provider_policy_set_reason(reason, reason_size,
-                                   "could not write revocation file '%s': %s",
+                                   "could not write %s '%s': %s",
+                                   provider_policy_fingerprint_file_label(
+                                       file_label),
                                    path, strerror(write_errno));
         return false;
     }
@@ -574,7 +614,9 @@ provider_policy_fingerprint_list_append_file(
         const int fsync_errno = errno;
         fclose(fp);
         provider_policy_set_reason(reason, reason_size,
-                                   "could not sync revocation file '%s': %s",
+                                   "could not sync %s '%s': %s",
+                                   provider_policy_fingerprint_file_label(
+                                       file_label),
                                    path, strerror(fsync_errno));
         return false;
     }
@@ -584,11 +626,24 @@ provider_policy_fingerprint_list_append_file(
     {
         const int close_errno = errno;
         provider_policy_set_reason(reason, reason_size,
-                                   "could not close revocation file '%s': %s",
+                                   "could not close %s '%s': %s",
+                                   provider_policy_fingerprint_file_label(
+                                       file_label),
                                    path, strerror(close_errno));
         return false;
     }
     return true;
+}
+
+bool
+provider_policy_fingerprint_list_append_file(
+    const char *path,
+    const char *credential_fingerprint,
+    char *reason,
+    size_t reason_size)
+{
+    return provider_policy_fingerprint_list_append_named_file(
+        path, credential_fingerprint, "revocation file", reason, reason_size);
 }
 
 bool
