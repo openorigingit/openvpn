@@ -12,7 +12,7 @@
 MAINTAINERCLEANFILES = \
 	$(srcdir)/Makefile.in
 
-SUBDIRS = unit_tests
+SUBDIRS = unit_tests fuzz
 
 AM_TESTSUITE_SUMMARY_HEADER = ' for $(PACKAGE_STRING) System Tests'
 SH_LOG_DRIVER = $(SHELL) $(top_srcdir)/forked-test-driver

@@ -1402,6 +1402,7 @@ AC_CONFIG_FILES([
 	src/plugins/down-root/Makefile
 	src/tapctl/Makefile
 	tests/Makefile
+	tests/fuzz/Makefile
         tests/unit_tests/Makefile
         tests/unit_tests/example_test/Makefile
         tests/unit_tests/openvpn/Makefile
