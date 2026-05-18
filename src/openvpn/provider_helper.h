@@ -34,9 +34,9 @@
 #define PROVIDER_HELPER_FEATURE_SET_SIZE  16
 #define PROVIDER_HELPER_CHILD_FD          3
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
-#define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 60
+#define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 68
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
-#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  952
+#define PROVIDER_HELPER_RUNTIME_STATS_SIZE  1008
 #ifndef PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX
 #define PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX 4
 #endif
@@ -165,6 +165,8 @@
 #define PROVIDER_HELPER_DEFAULT_RETRANSMIT_LIMIT  5
 #define PROVIDER_HELPER_DEFAULT_WORKER_LIMIT      4
 #define PROVIDER_HELPER_DEFAULT_HALF_OPEN_TIMEOUT 30
+#define PROVIDER_HELPER_DEFAULT_DPD_IDLE_SECONDS  300
+#define PROVIDER_HELPER_DEFAULT_DPD_RETRY_SECONDS 30
 #define PROVIDER_HELPER_DEFAULT_MAX_SA_INIT_PER_SECOND        256
 #define PROVIDER_HELPER_DEFAULT_MAX_SA_INIT_PER_SOURCE_SECOND 32
 #define PROVIDER_HELPER_START_TIMEOUT_SECONDS     10
@@ -465,6 +467,8 @@ struct provider_helper_runtime_config {
     uint32_t max_half_open_sas_per_prefix;
     uint32_t max_ike_sa_init_per_second;
     uint32_t max_ike_sa_init_per_source_per_second;
+    uint32_t dpd_idle_seconds;
+    uint32_t dpd_retry_seconds;
 };
 
 struct provider_helper_listener_fd {
@@ -523,6 +527,13 @@ struct provider_helper_runtime_stats {
     uint64_t ike_informational_delete_request_failed;
     uint64_t ike_informational_delete_response_tx;
     uint64_t ike_informational_delete_response_failed;
+    uint64_t ike_dpd_request_tx;
+    uint64_t ike_dpd_request_failed;
+    uint64_t ike_dpd_response_rx;
+    uint64_t ike_dpd_response_malformed;
+    uint64_t ike_dpd_retransmit_tx;
+    uint64_t ike_dpd_retransmit_failed;
+    uint64_t ike_dpd_timeout;
     uint64_t ike_create_child_unsupported_rx;
     uint64_t ike_create_child_rekey_rx;
     uint64_t ike_create_child_no_additional_sas_tx;

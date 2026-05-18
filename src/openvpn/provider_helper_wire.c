@@ -65,6 +65,8 @@ provider_helper_runtime_config_default(struct provider_helper_runtime_config *co
         PROVIDER_HELPER_DEFAULT_MAX_SA_INIT_PER_SECOND;
     config->max_ike_sa_init_per_source_per_second =
         PROVIDER_HELPER_DEFAULT_MAX_SA_INIT_PER_SOURCE_SECOND;
+    config->dpd_idle_seconds = PROVIDER_HELPER_DEFAULT_DPD_IDLE_SECONDS;
+    config->dpd_retry_seconds = PROVIDER_HELPER_DEFAULT_DPD_RETRY_SECONDS;
 }
 
 static void
@@ -210,6 +212,18 @@ provider_helper_runtime_config_valid(const struct provider_helper_runtime_config
                                       "max_ike_sa_init_per_source_per_second "
                                       "must be nonzero and <= "
                                       "max_ike_sa_init_per_second");
+        return false;
+    }
+    if (config->dpd_idle_seconds == 0)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "dpd_idle_seconds must be nonzero");
+        return false;
+    }
+    if (config->dpd_retry_seconds == 0)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "dpd_retry_seconds must be nonzero");
         return false;
     }
 
@@ -1107,6 +1121,8 @@ provider_helper_ipc_encode_runtime_config(uint8_t *dst, size_t dst_len,
     provider_helper_wire_write_u32(&pos, config->max_ike_sa_init_per_second);
     provider_helper_wire_write_u32(&pos,
                                    config->max_ike_sa_init_per_source_per_second);
+    provider_helper_wire_write_u32(&pos, config->dpd_idle_seconds);
+    provider_helper_wire_write_u32(&pos, config->dpd_retry_seconds);
 
     return (size_t)(pos - dst) == PROVIDER_HELPER_RUNTIME_CONFIG_SIZE;
 }
@@ -1139,6 +1155,8 @@ provider_helper_ipc_decode_runtime_config(const uint8_t *src, size_t src_len,
     config->max_ike_sa_init_per_second = provider_helper_wire_read_u32(&pos);
     config->max_ike_sa_init_per_source_per_second =
         provider_helper_wire_read_u32(&pos);
+    config->dpd_idle_seconds = provider_helper_wire_read_u32(&pos);
+    config->dpd_retry_seconds = provider_helper_wire_read_u32(&pos);
 
     return (size_t)(pos - src) == PROVIDER_HELPER_RUNTIME_CONFIG_SIZE;
 }
@@ -1252,6 +1270,13 @@ provider_helper_ipc_encode_runtime_stats(uint8_t *dst, size_t dst_len,
         &pos, stats->ike_informational_delete_response_tx);
     provider_helper_wire_write_u64(
         &pos, stats->ike_informational_delete_response_failed);
+    provider_helper_wire_write_u64(&pos, stats->ike_dpd_request_tx);
+    provider_helper_wire_write_u64(&pos, stats->ike_dpd_request_failed);
+    provider_helper_wire_write_u64(&pos, stats->ike_dpd_response_rx);
+    provider_helper_wire_write_u64(&pos, stats->ike_dpd_response_malformed);
+    provider_helper_wire_write_u64(&pos, stats->ike_dpd_retransmit_tx);
+    provider_helper_wire_write_u64(&pos, stats->ike_dpd_retransmit_failed);
+    provider_helper_wire_write_u64(&pos, stats->ike_dpd_timeout);
     provider_helper_wire_write_u64(&pos,
                                    stats->ike_create_child_unsupported_rx);
     provider_helper_wire_write_u64(&pos, stats->ike_create_child_rekey_rx);
@@ -1438,6 +1463,13 @@ provider_helper_ipc_decode_runtime_stats(const uint8_t *src, size_t src_len,
         provider_helper_wire_read_u64(&pos);
     stats->ike_informational_delete_response_failed =
         provider_helper_wire_read_u64(&pos);
+    stats->ike_dpd_request_tx = provider_helper_wire_read_u64(&pos);
+    stats->ike_dpd_request_failed = provider_helper_wire_read_u64(&pos);
+    stats->ike_dpd_response_rx = provider_helper_wire_read_u64(&pos);
+    stats->ike_dpd_response_malformed = provider_helper_wire_read_u64(&pos);
+    stats->ike_dpd_retransmit_tx = provider_helper_wire_read_u64(&pos);
+    stats->ike_dpd_retransmit_failed = provider_helper_wire_read_u64(&pos);
+    stats->ike_dpd_timeout = provider_helper_wire_read_u64(&pos);
     stats->ike_create_child_unsupported_rx =
         provider_helper_wire_read_u64(&pos);
     stats->ike_create_child_rekey_rx = provider_helper_wire_read_u64(&pos);

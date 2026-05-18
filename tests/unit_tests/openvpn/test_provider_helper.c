@@ -271,6 +271,8 @@ test_provider_helper_runtime_config_roundtrip(void **state)
                      input.max_ike_sa_init_per_second);
     assert_int_equal(output.max_ike_sa_init_per_source_per_second,
                      input.max_ike_sa_init_per_source_per_second);
+    assert_int_equal(output.dpd_idle_seconds, input.dpd_idle_seconds);
+    assert_int_equal(output.dpd_retry_seconds, input.dpd_retry_seconds);
 
     input.flags |= PROVIDER_HELPER_CONFIG_APPLY_XFRM
                    | PROVIDER_HELPER_CONFIG_TEST_AUTH_CONTINUATION;
@@ -402,6 +404,17 @@ test_provider_helper_runtime_config_roundtrip(void **state)
                                                       sizeof(reason)));
     assert_non_null(strstr(reason,
                            "max_ike_sa_init_per_source_per_second"));
+    input.max_ike_sa_init_per_source_per_second =
+        PROVIDER_HELPER_DEFAULT_MAX_SA_INIT_PER_SOURCE_SECOND;
+    input.dpd_idle_seconds = 0;
+    assert_false(provider_helper_runtime_config_valid(&input, reason,
+                                                      sizeof(reason)));
+    assert_non_null(strstr(reason, "dpd_idle_seconds"));
+    input.dpd_idle_seconds = PROVIDER_HELPER_DEFAULT_DPD_IDLE_SECONDS;
+    input.dpd_retry_seconds = 0;
+    assert_false(provider_helper_runtime_config_valid(&input, reason,
+                                                      sizeof(reason)));
+    assert_non_null(strstr(reason, "dpd_retry_seconds"));
 }
 
 static void
@@ -503,6 +516,13 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
         .ike_informational_delete_request_failed = 113,
         .ike_informational_delete_response_tx = 59,
         .ike_informational_delete_response_failed = 60,
+        .ike_dpd_request_tx = 114,
+        .ike_dpd_request_failed = 115,
+        .ike_dpd_response_rx = 116,
+        .ike_dpd_response_malformed = 117,
+        .ike_dpd_retransmit_tx = 118,
+        .ike_dpd_retransmit_failed = 119,
+        .ike_dpd_timeout = 120,
         .ike_create_child_unsupported_rx = 61,
         .ike_create_child_rekey_rx = 75,
         .ike_create_child_no_additional_sas_tx = 76,
@@ -661,6 +681,17 @@ test_provider_helper_runtime_stats_roundtrip(void **state)
                      input.ike_informational_delete_response_tx);
     assert_int_equal(output.ike_informational_delete_response_failed,
                      input.ike_informational_delete_response_failed);
+    assert_int_equal(output.ike_dpd_request_tx, input.ike_dpd_request_tx);
+    assert_int_equal(output.ike_dpd_request_failed,
+                     input.ike_dpd_request_failed);
+    assert_int_equal(output.ike_dpd_response_rx, input.ike_dpd_response_rx);
+    assert_int_equal(output.ike_dpd_response_malformed,
+                     input.ike_dpd_response_malformed);
+    assert_int_equal(output.ike_dpd_retransmit_tx,
+                     input.ike_dpd_retransmit_tx);
+    assert_int_equal(output.ike_dpd_retransmit_failed,
+                     input.ike_dpd_retransmit_failed);
+    assert_int_equal(output.ike_dpd_timeout, input.ike_dpd_timeout);
     assert_int_equal(output.ike_create_child_unsupported_rx,
                      input.ike_create_child_unsupported_rx);
     assert_int_equal(output.ike_create_child_rekey_rx,
@@ -976,6 +1007,8 @@ test_provider_helper_status_output(void **state)
     supervisor.runtime_stats.ike_response_ignored = 6;
     supervisor.runtime_stats.ike_informational_delete_request_tx = 7;
     supervisor.runtime_stats.ike_informational_delete_request_failed = 8;
+    supervisor.runtime_stats.ike_dpd_request_tx = 9;
+    supervisor.runtime_stats.ike_dpd_response_rx = 10;
     supervisor.runtime_stats.ike_child_sa_xfrm_active = 4;
     supervisor.runtime_stats.ike_create_child_xfrm_install_failed = 1;
     supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok = 2;
@@ -1014,6 +1047,10 @@ test_provider_helper_status_output(void **state)
     assert_non_null(strstr(capture.data,
                            "PROVIDER_HELPER_STAT,"
                            "ike_informational_delete_request_failed,8"));
+    assert_non_null(strstr(capture.data,
+                           "PROVIDER_HELPER_STAT,ike_dpd_request_tx,9"));
+    assert_non_null(strstr(capture.data,
+                           "PROVIDER_HELPER_STAT,ike_dpd_response_rx,10"));
     assert_non_null(strstr(capture.data,
                            "PROVIDER_HELPER_STAT,ike_child_sa_xfrm_active,4"));
     assert_non_null(strstr(
@@ -3071,13 +3108,14 @@ test_tls12_prf_sha256(const uint8_t *secret, size_t secret_len,
 }
 
 static size_t
-test_make_encrypted_ikev2_plaintext_packet(
+test_make_encrypted_ikev2_plaintext_packet_with_flags(
     uint8_t *packet,
     size_t packet_size,
     uint64_t initiator_spi,
     const struct test_ikev2_sa_init_response_material *material,
     bool natt,
     uint8_t exchange_type,
+    uint8_t flags,
     const uint8_t *plaintext,
     size_t plaintext_len,
     uint8_t first_payload,
@@ -3097,8 +3135,7 @@ test_make_encrypted_ikev2_plaintext_packet(
     assert_true(sk_len <= UINT16_MAX);
 
     memset(packet, 0, packet_size);
-    test_make_ikev2_header(packet, natt, exchange_type,
-                           PROVIDER_HELPER_IKEV2_FLAG_INITIATOR,
+    test_make_ikev2_header(packet, natt, exchange_type, flags,
                            material->responder_spi, (uint32_t)ike_len);
     test_write_be64(packet + offset, initiator_spi);
     packet[offset + 16] = PROVIDER_HELPER_IKEV2_PAYLOAD_SK;
@@ -3131,6 +3168,25 @@ test_make_encrypted_ikev2_plaintext_packet(
     secure_memzero(sk_ei, sizeof(sk_ei));
     secure_memzero(nonce, sizeof(nonce));
     return packet_len;
+}
+
+static size_t
+test_make_encrypted_ikev2_plaintext_packet(
+    uint8_t *packet,
+    size_t packet_size,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt,
+    uint8_t exchange_type,
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    uint8_t first_payload,
+    uint32_t message_id)
+{
+    return test_make_encrypted_ikev2_plaintext_packet_with_flags(
+        packet, packet_size, initiator_spi, material, natt, exchange_type,
+        PROVIDER_HELPER_IKEV2_FLAG_INITIATOR, plaintext, plaintext_len,
+        first_payload, message_id);
 }
 
 static size_t
@@ -4034,6 +4090,38 @@ test_send_ikev2_encrypted_protected_exchange_from(
         packet, sizeof(packet), initiator_spi, material, natt, exchange_type,
         plaintext, sizeof(plaintext), PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
         message_id);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    assert_int_equal(sendto(fd, packet, packet_len, 0,
+                            (struct sockaddr *)&addr, sizeof(addr)),
+                     packet_len);
+}
+
+static void
+test_send_ikev2_encrypted_protected_exchange_response_from(
+    int fd,
+    uint16_t port,
+    uint8_t exchange_type,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt,
+    uint32_t message_id)
+{
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const uint8_t plaintext[] = { 0 }; /* Pad Length: no payload bytes. */
+    const size_t packet_len =
+        test_make_encrypted_ikev2_plaintext_packet_with_flags(
+            packet, sizeof(packet), initiator_spi, material, natt,
+            exchange_type,
+            PROVIDER_HELPER_IKEV2_FLAG_INITIATOR
+            | PROVIDER_HELPER_IKEV2_FLAG_RESPONSE,
+            plaintext, sizeof(plaintext),
+            PROVIDER_HELPER_IKEV2_PAYLOAD_NONE, message_id);
 
     struct sockaddr_in addr;
     CLEAR(addr);
@@ -6291,6 +6379,24 @@ test_recv_ikev2_encrypted_ike_delete_request(
     assert_int_equal(plaintext[5], 0);
     assert_int_equal(test_read_be16(plaintext + 6), 0);
 
+    secure_memzero(plaintext, sizeof(plaintext));
+}
+
+static void
+test_recv_ikev2_encrypted_dpd_request(
+    int fd,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    uint32_t expected_message_id,
+    bool expect_natt)
+{
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t payload_len = test_recv_ikev2_encrypted_payload_with_flags(
+        fd, initiator_spi, material, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
+        0, expected_message_id, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+        expect_natt, plaintext, sizeof(plaintext));
+
+    assert_int_equal(payload_len, 0);
     secure_memzero(plaintext, sizeof(plaintext));
 }
 
@@ -12379,6 +12485,208 @@ test_provider_helper_spawn_ikev2_rekey_handling(void **state)
 }
 
 static void
+test_provider_helper_spawn_ikev2_dpd_liveness(void **state)
+{
+    (void)state;
+
+    if (!ikev2_helper_path)
+    {
+        skip();
+    }
+#if !defined(ENABLE_CRYPTO_OPENSSL)
+    skip();
+#else
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.runtime_config.cookie_threshold = 1;
+    supervisor.runtime_config.max_half_open_sas = 1;
+    supervisor.runtime_config.max_half_open_sas_per_source = 1;
+    supervisor.runtime_config.half_open_timeout_seconds = 5;
+    supervisor.runtime_config.dpd_idle_seconds = 2;
+    supervisor.runtime_config.dpd_retry_seconds = 1;
+    supervisor.runtime_config.retransmit_limit = 1;
+    supervisor.runtime_config.flags |=
+        PROVIDER_HELPER_CONFIG_TEST_AUTH_CONTINUATION;
+
+    struct test_provider_helper_auth_cb_state cb_state;
+    CLEAR(cb_state);
+    cb_state.allow = true;
+    provider_helper_supervisor_set_auth_callback(
+        &supervisor, test_provider_helper_auth_cb, &cb_state);
+    struct test_provider_helper_server_sign_cb_state sign_state;
+    CLEAR(sign_state);
+    provider_helper_supervisor_set_server_sign_callback(
+        &supervisor, test_provider_helper_server_sign_cb, &sign_state);
+    struct test_provider_helper_session_close_cb_state close_state;
+    CLEAR(close_state);
+    provider_helper_supervisor_set_session_close_callback(
+        &supervisor, test_provider_helper_session_close_cb, &close_state);
+
+    char *const argv[] = { (char *)ikev2_helper_path, NULL };
+    assert_true(provider_helper_supervisor_spawn(&supervisor, ikev2_helper_path,
+                                                 argv));
+    for (int i = 0; i < 300 && supervisor.state != PROVIDER_HELPER_STATE_READY;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 2);
+
+    uint16_t port = 0;
+    int listener_fd = test_create_udp_listener(&port);
+    const struct provider_helper_listener_fd listener = {
+        .listener_id = 1,
+        .family = AF_INET,
+        .socket_type = SOCK_DGRAM,
+        .protocol = IPPROTO_UDP,
+        .local_port = port,
+        .flags = PROVIDER_HELPER_LISTENER_FD_IKE,
+    };
+    assert_true(provider_helper_supervisor_send_listener_fd(&supervisor,
+                                                            listener_fd,
+                                                            &listener, 88));
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 3; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 3);
+
+    uint16_t natt_port = 0;
+    int natt_listener_fd = test_create_udp_listener(&natt_port);
+    const struct provider_helper_listener_fd natt_listener = {
+        .listener_id = 2,
+        .family = AF_INET,
+        .socket_type = SOCK_DGRAM,
+        .protocol = IPPROTO_UDP,
+        .local_port = natt_port,
+        .flags = PROVIDER_HELPER_LISTENER_FD_NATT,
+    };
+    assert_true(provider_helper_supervisor_send_listener_fd(
+                    &supervisor, natt_listener_fd, &natt_listener, 89));
+    for (int i = 0; i < 100 && supervisor.last_rx_sequence < 4; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, 4);
+
+    test_provider_helper_send_server_auth_config(&supervisor);
+
+    const struct provider_helper_xfrm_lease xfrm_lease = {
+        .lease_id = 202,
+        .provider_session_id = 101,
+        .policy_revision = 303,
+        .mark_value = 0x4200,
+        .mark_mask = 0xffff,
+        .if_id = 12,
+        .reqid = 1100,
+        .address_family = AF_INET,
+        .flags = PROVIDER_HELPER_XFRM_LEASE_IPV4,
+        .local_ts_start_ipv4 = 0x0a580001,
+        .local_ts_end_ipv4 = 0x0a580001,
+        .local_ts_start_port = 0,
+        .local_ts_end_port = 65535,
+        .remote_ts_start_ipv4 = 0x0a580002,
+        .remote_ts_end_ipv4 = 0x0a580002,
+        .remote_ts_start_port = 0,
+        .remote_ts_end_port = 65535,
+        .ip_protocol_id = 0,
+    };
+    uint64_t target_rx_sequence = supervisor.last_rx_sequence + 1;
+    assert_true(provider_helper_supervisor_send_xfrm_lease(&supervisor,
+                                                           &xfrm_lease, 99));
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+
+    uint8_t cert_der[2048];
+    size_t cert_der_len = 0;
+    test_make_der_certificate(cert_der, sizeof(cert_der), &cert_der_len);
+
+    int response_fd = test_create_udp_sender(0x7f000009u);
+    const uint64_t initiator_spi = 0x9876543210abcde4ull;
+    test_send_ikev2_datagram_from(response_fd, port, initiator_spi);
+    usleep(10000);
+    struct test_ikev2_sa_init_response_material sa_init_material;
+    assert_true(test_recv_ikev2_sa_init_response_material(
+                    response_fd, initiator_spi, &sa_init_material) != 0);
+
+    test_send_ikev2_encrypted_ike_auth_datagram_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, false,
+        cert_der, cert_der_len);
+    for (int i = 0; i < 100 && cb_state.calls < 1; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(cb_state.calls, 1);
+    test_provider_helper_wait_for_server_sign_calls(&supervisor, &sign_state, 1);
+    test_recv_ikev2_encrypted_server_auth_response_ex(
+        response_fd, initiator_spi, &sa_init_material, true, true);
+    test_recv_ikev2_encrypted_notify_response(
+        response_fd, initiator_spi, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
+
+    test_send_ikev2_encrypted_create_child_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, 2);
+    test_recv_ikev2_encrypted_notify_exchange_response(
+        response_fd, initiator_spi, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA, 2,
+        PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE, true);
+
+    test_send_ikev2_encrypted_create_child_rekey_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, 3);
+    (void)test_recv_ikev2_encrypted_child_sa_response(
+        response_fd, initiator_spi, &sa_init_material, 3, &xfrm_lease, true);
+
+    test_recv_ikev2_encrypted_dpd_request(
+        response_fd, initiator_spi, &sa_init_material, 0, true);
+    test_send_ikev2_encrypted_protected_exchange_response_from(
+        response_fd, natt_port, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
+        initiator_spi, &sa_init_material, true, 0);
+    usleep(200000);
+
+    target_rx_sequence = supervisor.last_rx_sequence + 2;
+    write_helper_header_fd(supervisor.ipc_fd, PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 100);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
+    assert_int_equal(close_state.calls, 0);
+    assert_true(supervisor.runtime_stats.ike_dpd_request_tx >= 1);
+    assert_int_equal(supervisor.runtime_stats.ike_dpd_response_rx, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_dpd_response_malformed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_dpd_timeout, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
+
+    close(response_fd);
+    close(listener_fd);
+    close(natt_listener_fd);
+    provider_helper_supervisor_stop(&supervisor);
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
+    assert_int_equal(supervisor.ipc_fd, -1);
+#endif
+}
+
+static void
 test_provider_helper_spawn_ikev2_xfrm_install_fails_closed(void **state)
 {
     (void)state;
@@ -13315,6 +13623,7 @@ main(void)
         cmocka_unit_test(
             test_provider_helper_spawn_ikev2_lease_deadline_fails_closed),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_rekey_handling),
+        cmocka_unit_test(test_provider_helper_spawn_ikev2_dpd_liveness),
         cmocka_unit_test(
             test_provider_helper_spawn_ikev2_xfrm_install_fails_closed),
         cmocka_unit_test(test_provider_helper_spawn_ikev2_apply_xfrm_child_sa),

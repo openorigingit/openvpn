@@ -178,6 +178,7 @@
 #define IKEV2_HELPER_PROTECTED_RESPONSE_CACHE_BYTES \
     (PROVIDER_HELPER_SERVER_AUTH_CERT_CHAIN_SIZE \
      + PROVIDER_HELPER_SERVER_AUTH_SIGNATURE_SIZE + 1024)
+#define IKEV2_HELPER_DPD_REQUEST_CACHE_BYTES 128
 #ifdef MSG_DONTWAIT
 #define IKEV2_HELPER_RECV_FLAGS MSG_DONTWAIT
 #define IKEV2_HELPER_CAN_DRAIN_LISTENER 1
@@ -336,6 +337,13 @@ struct ikev2_helper_ike_sa {
     uint8_t ike_sa_init_response[IKEV2_HELPER_IKE_SA_INIT_TRANSCRIPT_BYTES];
     size_t protected_response_len;
     uint8_t protected_response[IKEV2_HELPER_PROTECTED_RESPONSE_CACHE_BYTES];
+    uint32_t next_server_message_id;
+    bool dpd_pending;
+    uint32_t dpd_message_id;
+    uint32_t dpd_retransmits;
+    time_t dpd_sent;
+    size_t dpd_request_len;
+    uint8_t dpd_request[IKEV2_HELPER_DPD_REQUEST_CACHE_BYTES];
     struct ikev2_helper_retired_ike_sa retired_ike_sa;
     uint16_t initiator_ke_group;
     size_t initiator_ke_len;
@@ -486,6 +494,8 @@ static bool ikev2_helper_send_cached_eap_tls12_server_finished_request(
 static bool ikev2_helper_send_encrypted_ike_sa_delete_request(
     const struct ikev2_helper_listener *listener,
     const struct ikev2_helper_ike_sa *sa);
+
+static void ikev2_helper_clear_dpd_request(struct ikev2_helper_ike_sa *sa);
 
 static void
 ikev2_helper_clear_credential_metadata(struct ikev2_helper_ike_sa *sa);
@@ -8355,6 +8365,8 @@ ikev2_helper_commit_ike_sa_rekey(struct ikev2_helper_ike_sa *sa,
     sa->protected_response_len = 0;
     sa->protected_response_message_id = 0;
     sa->protected_retransmits = 0;
+    ikev2_helper_clear_dpd_request(sa);
+    sa->next_server_message_id = 0;
     sa->updated = now;
 }
 
@@ -9343,6 +9355,85 @@ ikev2_helper_send_encrypted_ike_sa_delete_request(
     ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
     ikev2_helper_secure_zero(request, sizeof(request));
     return sent == (ssize_t)request_len;
+}
+
+static void
+ikev2_helper_clear_dpd_request(struct ikev2_helper_ike_sa *sa)
+{
+    if (!sa)
+    {
+        return;
+    }
+    if (sa->dpd_request_len)
+    {
+        ikev2_helper_secure_zero(sa->dpd_request, sa->dpd_request_len);
+    }
+    sa->dpd_pending = false;
+    sa->dpd_message_id = 0;
+    sa->dpd_retransmits = 0;
+    sa->dpd_sent = 0;
+    sa->dpd_request_len = 0;
+}
+
+static bool
+ikev2_helper_send_encrypted_dpd_request(
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_ike_sa *sa,
+    time_t now)
+{
+    const uint8_t plaintext[] = { 0 }; /* Pad Length: no padding bytes. */
+    size_t request_len = 0;
+    if (!listener || !sa || !sa->active || !sa->auth_authorized
+        || sa->dpd_pending
+        || !ikev2_helper_build_encrypted_payload(
+            sa->dpd_request, sizeof(sa->dpd_request), &request_len, listener,
+            sa, PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 0,
+            sa->next_server_message_id, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+            plaintext, sizeof(plaintext)))
+    {
+        ikev2_helper_clear_dpd_request(sa);
+        return false;
+    }
+
+    const ssize_t sent =
+        sendto(listener->fd, sa->dpd_request, request_len, 0,
+               (const struct sockaddr *)&sa->peer, sa->peer_len);
+    if (sent != (ssize_t)request_len)
+    {
+        ikev2_helper_clear_dpd_request(sa);
+        return false;
+    }
+
+    sa->dpd_pending = true;
+    sa->dpd_message_id = sa->next_server_message_id;
+    sa->dpd_retransmits = 0;
+    sa->dpd_sent = now;
+    sa->dpd_request_len = request_len;
+    return true;
+}
+
+static bool
+ikev2_helper_retransmit_dpd_request(
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_ike_sa *sa,
+    time_t now)
+{
+    if (!listener || !sa || !sa->active || !sa->auth_authorized
+        || !sa->dpd_pending || !sa->dpd_request_len)
+    {
+        return false;
+    }
+
+    const ssize_t sent =
+        sendto(listener->fd, sa->dpd_request, sa->dpd_request_len, 0,
+               (const struct sockaddr *)&sa->peer, sa->peer_len);
+    if (sent == (ssize_t)sa->dpd_request_len)
+    {
+        sa->dpd_sent = now;
+        ++sa->dpd_retransmits;
+        return true;
+    }
+    return false;
 }
 
 static bool
@@ -13021,6 +13112,87 @@ ikev2_helper_expire_authorized_ike_sas(
 }
 
 static bool
+ikev2_helper_drive_dpd(struct ikev2_helper_ike_sa_table *table,
+                       const struct ikev2_helper_listener *listeners,
+                       size_t listener_count,
+                       const struct provider_helper_runtime_config *config,
+                       struct provider_helper_runtime_stats *counters,
+                       time_t now,
+                       int ipc_fd,
+                       uint64_t *tx_sequence)
+{
+    if (!table || !config || !counters || ipc_fd < 0 || !tx_sequence)
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        if (!sa->active || !sa->auth_authorized)
+        {
+            continue;
+        }
+        const struct ikev2_helper_listener *listener =
+            ikev2_helper_find_listener(listeners, listener_count,
+                                       sa->listener_id);
+        if (!listener)
+        {
+            continue;
+        }
+
+        if (sa->dpd_pending)
+        {
+            if (sa->dpd_sent > now
+                || now - sa->dpd_sent < (time_t)config->dpd_retry_seconds)
+            {
+                continue;
+            }
+            if (sa->dpd_retransmits >= config->retransmit_limit)
+            {
+                ++counters->ike_dpd_timeout;
+                if (!ikev2_helper_clear_ike_sa_with_session_close(
+                        table, sa, counters, ipc_fd, tx_sequence,
+                        "IKEv2 DPD timeout"))
+                {
+                    return false;
+                }
+                continue;
+            }
+            if (ikev2_helper_retransmit_dpd_request(listener, sa, now))
+            {
+                ++counters->ike_dpd_retransmit_tx;
+            }
+            else
+            {
+                ++counters->ike_dpd_retransmit_failed;
+                ++sa->dpd_retransmits;
+                sa->dpd_sent = now;
+            }
+            continue;
+        }
+
+        if (sa->updated <= now
+            && now - sa->updated >= (time_t)config->dpd_idle_seconds)
+        {
+            if (ikev2_helper_send_encrypted_dpd_request(listener, sa, now))
+            {
+                ++counters->ike_dpd_request_tx;
+            }
+            else
+            {
+                ++counters->ike_dpd_request_failed;
+            }
+        }
+    }
+
+    counters->ike_sa_active = table->active;
+    counters->ike_child_sa_scaffold_active =
+        ikev2_helper_count_child_sa_scaffolds(table);
+    return true;
+}
+
+static bool
 ikev2_helper_send_cookie_response(
     const struct ikev2_helper_listener *listener,
     struct ikev2_helper_cookie_context *cookie_ctx,
@@ -13299,6 +13471,68 @@ ikev2_helper_find_retired_ike_sa(
     }
 
     return NULL;
+}
+
+static bool
+ikev2_helper_handle_dpd_response(
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_ike_sa_table *sa_table,
+    struct provider_helper_runtime_stats *counters,
+    const uint8_t *packet,
+    size_t packet_len,
+    const struct provider_helper_ikev2_header *header,
+    const struct sockaddr_storage *peer,
+    socklen_t peer_len)
+{
+    if (!listener || !sa_table || !counters || !packet || !header || !peer)
+    {
+        return false;
+    }
+    if (header->exchange_type != PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL
+        || header->flags != (PROVIDER_HELPER_IKEV2_FLAG_INITIATOR
+                             | PROVIDER_HELPER_IKEV2_FLAG_RESPONSE))
+    {
+        return false;
+    }
+
+    struct ikev2_helper_ike_sa *sa =
+        ikev2_helper_find_protected_exchange_sa(sa_table, listener, header,
+                                                peer, peer_len);
+    if (!sa || !sa->dpd_pending || header->message_id != sa->dpd_message_id)
+    {
+        return false;
+    }
+
+    struct provider_helper_ikev2_payload_summary summary;
+    if (provider_helper_ikev2_parse_payloads(packet, packet_len, header,
+                                             &summary)
+        != PROVIDER_HELPER_IKEV2_PARSE_OK
+        || !summary.saw_sk || summary.sk_count != 1
+        || summary.sk_next_payload != PROVIDER_HELPER_IKEV2_PAYLOAD_NONE)
+    {
+        ++counters->ike_dpd_response_malformed;
+        return true;
+    }
+
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    size_t plaintext_len = 0;
+    if (!ikev2_helper_decrypt_sk_payload(sa, packet, packet_len, header,
+                                         &summary, plaintext,
+                                         sizeof(plaintext), &plaintext_len)
+        || plaintext_len != 0)
+    {
+        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+        ++counters->ike_dpd_response_malformed;
+        return true;
+    }
+
+    ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+    ikev2_helper_clear_dpd_request(sa);
+    ++sa->next_server_message_id;
+    sa->updated = time(NULL);
+    ++counters->ike_dpd_response_rx;
+    counters->ike_sa_active = sa_table->active;
+    return true;
 }
 
 static bool
@@ -13597,6 +13831,12 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
         ++counters->datagrams_parsed;
         if (header.flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE)
         {
+            if (ikev2_helper_handle_dpd_response(
+                    listener, sa_table, counters, packet, (size_t)n, &header,
+                    &peer, peer_len))
+            {
+                return;
+            }
             ++counters->ike_response_ignored;
             counters->ike_sa_active = sa_table->active;
             return;
@@ -15506,6 +15746,13 @@ ikev2_helper_loop(int fd)
                 ret = 7;
                 goto done;
             }
+            if (!ikev2_helper_drive_dpd(sa_table, listeners, listener_count,
+                                        &config, &counters, time(NULL), fd,
+                                        &tx_sequence))
+            {
+                ret = 7;
+                goto done;
+            }
             continue;
         }
         if (pfds[0].revents & (POLLERR | POLLNVAL))
@@ -15564,6 +15811,13 @@ ikev2_helper_loop(int fd)
         if (!ikev2_helper_expire_authorized_ike_sas(
                 sa_table, listeners, listener_count, &counters, time(NULL), fd,
                 &tx_sequence))
+        {
+            ret = 7;
+            goto done;
+        }
+        if (!ikev2_helper_drive_dpd(sa_table, listeners, listener_count,
+                                    &config, &counters, time(NULL), fd,
+                                    &tx_sequence))
         {
             ret = 7;
             goto done;
