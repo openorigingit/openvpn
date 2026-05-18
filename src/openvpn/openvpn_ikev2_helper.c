@@ -165,7 +165,11 @@
 #define IKEV2_HELPER_POLL_TIMEOUT_MS 1000
 #define IKEV2_HELPER_IKE_SA_INIT_MESSAGE_ID 0
 #define IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID 1
+#define IKEV2_HELPER_MESSAGE_ID_RESET UINT32_MAX
 #define IKEV2_HELPER_IKE_REKEY_SPI_SIZE 8
+#define IKEV2_HELPER_REKEY_SKEYSEED_INPUT_MAX_BYTES \
+    (IKEV2_HELPER_ECP_256_SHARED_SECRET_BYTES \
+     + 2 * PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES)
 #define IKEV2_HELPER_AUTH_METHOD_SHARED_KEY_MIC 2
 #define IKEV2_HELPER_AUTH_KEY_PAD "Key Pad for IKEv2"
 #define IKEV2_HELPER_AUTH_KEY_PAD_BYTES 17
@@ -271,6 +275,32 @@ struct ikev2_helper_child_sa_scaffold {
     uint8_t sk_ei[IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES];
     size_t sk_er_len;
     uint8_t sk_er[IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES];
+};
+
+struct ikev2_helper_ike_rekey_material {
+    uint64_t initiator_spi;
+    uint64_t responder_spi;
+    struct provider_helper_ikev2_sa_selection selection;
+    size_t initiator_ke_len;
+    uint8_t initiator_ke[PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES];
+    size_t initiator_nonce_len;
+    uint8_t initiator_nonce[PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES];
+    size_t responder_ke_len;
+    uint8_t responder_ke[PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES];
+    size_t responder_nonce_len;
+    uint8_t responder_nonce[IKEV2_HELPER_RESPONDER_NONCE_BYTES];
+    size_t skeyseed_len;
+    uint8_t skeyseed[IKEV2_HELPER_PRF_SHA256_BYTES];
+    size_t sk_d_len;
+    uint8_t sk_d[IKEV2_HELPER_PRF_SHA256_BYTES];
+    size_t sk_ei_len;
+    uint8_t sk_ei[IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES];
+    size_t sk_er_len;
+    uint8_t sk_er[IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES];
+    size_t sk_pi_len;
+    uint8_t sk_pi[IKEV2_HELPER_PRF_SHA256_BYTES];
+    size_t sk_pr_len;
+    uint8_t sk_pr[IKEV2_HELPER_PRF_SHA256_BYTES];
 };
 
 struct ikev2_helper_ike_sa {
@@ -504,6 +534,14 @@ ikev2_helper_read_be32(const uint8_t *pos)
     return ntohl(value);
 }
 
+static uint64_t
+ikev2_helper_read_be64(const uint8_t *pos)
+{
+    uint64_t value;
+    memcpy(&value, pos, sizeof(value));
+    return ntohll(value);
+}
+
 static void
 ikev2_helper_write_be32(uint8_t **pos, uint32_t value)
 {
@@ -567,6 +605,9 @@ static bool ikev2_helper_sha256(const uint8_t *input, size_t input_len,
 static bool ikev2_helper_bytes_equal_constant_time(const uint8_t *a,
                                                    const uint8_t *b,
                                                    size_t len);
+static enum provider_helper_ikev2_parse_result
+ikev2_helper_validate_ike_rekey_sa_payload(const uint8_t *body,
+                                           size_t body_len);
 
 static bool
 ikev2_helper_random_bytes(uint8_t *dst, size_t dst_len)
@@ -1313,6 +1354,138 @@ ikev2_helper_derive_child_sa_keys(struct ikev2_helper_ike_sa *sa,
     pos += child->sk_ei_len;
     child->sk_er_len = sk_er_len;
     memcpy(child->sk_er, pos, child->sk_er_len);
+
+    ikev2_helper_secure_zero(seed, sizeof(seed));
+    ikev2_helper_secure_zero(keymat, sizeof(keymat));
+    return true;
+}
+
+static void
+ikev2_helper_clear_ike_rekey_material(
+    struct ikev2_helper_ike_rekey_material *material)
+{
+    if (material)
+    {
+        ikev2_helper_secure_zero(material, sizeof(*material));
+    }
+}
+
+static bool
+ikev2_helper_derive_ike_rekey_skeyseed(
+    const struct ikev2_helper_ike_sa *sa,
+    const uint8_t *shared_secret,
+    size_t shared_secret_len,
+    const uint8_t *initiator_nonce,
+    size_t initiator_nonce_len,
+    const uint8_t *responder_nonce,
+    size_t responder_nonce_len,
+    uint8_t *skeyseed,
+    size_t skeyseed_len)
+{
+    if (!sa || sa->sk_d_len != IKEV2_HELPER_PRF_SHA256_BYTES
+        || !shared_secret
+        || shared_secret_len != IKEV2_HELPER_ECP_256_SHARED_SECRET_BYTES
+        || !initiator_nonce
+        || initiator_nonce_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+        || initiator_nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES
+        || !responder_nonce
+        || responder_nonce_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+        || responder_nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES
+        || !skeyseed || skeyseed_len != IKEV2_HELPER_PRF_SHA256_BYTES)
+    {
+        return false;
+    }
+
+    uint8_t input[IKEV2_HELPER_REKEY_SKEYSEED_INPUT_MAX_BYTES];
+    size_t input_len = 0;
+    memcpy(input, shared_secret, shared_secret_len);
+    input_len += shared_secret_len;
+    memcpy(input + input_len, initiator_nonce, initiator_nonce_len);
+    input_len += initiator_nonce_len;
+    memcpy(input + input_len, responder_nonce, responder_nonce_len);
+    input_len += responder_nonce_len;
+
+    const bool ret = ikev2_helper_hmac_sha256(
+        sa->sk_d, sa->sk_d_len, input, input_len, skeyseed, skeyseed_len);
+    ikev2_helper_secure_zero(input, sizeof(input));
+    if (!ret)
+    {
+        ikev2_helper_secure_zero(skeyseed, skeyseed_len);
+    }
+    return ret;
+}
+
+static bool
+ikev2_helper_derive_ike_rekey_material_keys(
+    struct ikev2_helper_ike_rekey_material *material)
+{
+    if (!material || !material->initiator_spi || !material->responder_spi
+        || material->initiator_nonce_len
+               < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+        || material->initiator_nonce_len
+               > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES
+        || material->responder_nonce_len
+               < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+        || material->responder_nonce_len
+               > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES
+        || material->skeyseed_len != IKEV2_HELPER_PRF_SHA256_BYTES)
+    {
+        return false;
+    }
+
+    size_t sk_ei_len = 0;
+    size_t sk_er_len = 0;
+    if (!ikev2_helper_suite_has_ike_key_sizes(&material->selection, &sk_ei_len,
+                                              &sk_er_len))
+    {
+        return false;
+    }
+
+    uint8_t seed[IKEV2_HELPER_PRF_PLUS_SEED_MAX_BYTES];
+    size_t seed_len = 0;
+    memcpy(seed, material->initiator_nonce, material->initiator_nonce_len);
+    seed_len += material->initiator_nonce_len;
+    memcpy(seed + seed_len, material->responder_nonce,
+           material->responder_nonce_len);
+    seed_len += material->responder_nonce_len;
+
+    const uint64_t initiator_spi = htonll(material->initiator_spi);
+    const uint64_t responder_spi = htonll(material->responder_spi);
+    memcpy(seed + seed_len, &initiator_spi, sizeof(initiator_spi));
+    seed_len += sizeof(initiator_spi);
+    memcpy(seed + seed_len, &responder_spi, sizeof(responder_spi));
+    seed_len += sizeof(responder_spi);
+
+    uint8_t keymat[IKEV2_HELPER_IKE_KEYMAT_MAX_BYTES];
+    const size_t keymat_len = IKEV2_HELPER_PRF_SHA256_BYTES
+                              + sk_ei_len + sk_er_len
+                              + 2 * IKEV2_HELPER_PRF_SHA256_BYTES;
+    if (keymat_len > sizeof(keymat)
+        || !ikev2_helper_prf_plus_sha256(material->skeyseed,
+                                         material->skeyseed_len, seed,
+                                         seed_len, keymat, keymat_len))
+    {
+        ikev2_helper_secure_zero(seed, sizeof(seed));
+        ikev2_helper_secure_zero(keymat, sizeof(keymat));
+        return false;
+    }
+
+    const uint8_t *pos = keymat;
+    material->sk_d_len = IKEV2_HELPER_PRF_SHA256_BYTES;
+    memcpy(material->sk_d, pos, material->sk_d_len);
+    pos += material->sk_d_len;
+
+    material->sk_ei_len = sk_ei_len;
+    memcpy(material->sk_ei, pos, material->sk_ei_len);
+    pos += material->sk_ei_len;
+    material->sk_er_len = sk_er_len;
+    memcpy(material->sk_er, pos, material->sk_er_len);
+    pos += material->sk_er_len;
+    material->sk_pi_len = IKEV2_HELPER_PRF_SHA256_BYTES;
+    memcpy(material->sk_pi, pos, material->sk_pi_len);
+    pos += material->sk_pi_len;
+    material->sk_pr_len = IKEV2_HELPER_PRF_SHA256_BYTES;
+    memcpy(material->sk_pr, pos, material->sk_pr_len);
 
     ikev2_helper_secure_zero(seed, sizeof(seed));
     ikev2_helper_secure_zero(keymat, sizeof(keymat));
@@ -5637,6 +5810,311 @@ ikev2_helper_ike_transform_type_supported(uint8_t transform_type)
 }
 
 static enum provider_helper_ikev2_parse_result
+ikev2_helper_parse_transform_attrs(const uint8_t *body,
+                                   size_t start,
+                                   size_t end,
+                                   uint16_t *key_bits)
+{
+    size_t pos = start;
+    uint32_t attr_count = 0;
+    if (key_bits)
+    {
+        *key_bits = 0;
+    }
+    while (pos < end)
+    {
+        if (++attr_count > PROVIDER_HELPER_IKEV2_MAX_TRANSFORM_ATTRS)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_PAYLOAD_LIMIT;
+        }
+        if (end - pos < 4)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const uint16_t raw_type = ikev2_helper_read_be16(body + pos);
+        const bool tv_format = (raw_type & 0x8000u) != 0;
+        const uint16_t attr_type = raw_type & 0x7fffu;
+        const uint16_t attr_value = ikev2_helper_read_be16(body + pos + 2);
+        pos += 4;
+        if (tv_format)
+        {
+            if (attr_type == PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH && key_bits)
+            {
+                *key_bits = attr_value;
+            }
+        }
+        else
+        {
+            if (attr_value > end - pos)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+            pos += attr_value;
+        }
+    }
+
+    return pos == end ? PROVIDER_HELPER_IKEV2_PARSE_OK
+                      : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+}
+
+static enum provider_helper_ikev2_parse_result
+ikev2_helper_select_ike_transform(
+    const uint8_t *body,
+    size_t pos,
+    size_t end,
+    struct provider_helper_ikev2_sa_selection *selection,
+    bool *has_encr,
+    bool *has_prf,
+    bool *has_integ,
+    bool *has_dh)
+{
+    if (!body || !selection || !has_encr || !has_prf || !has_integ || !has_dh
+        || end - pos < PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    const uint16_t transform_len = ikev2_helper_read_be16(body + pos + 2);
+    const uint8_t transform_type = body[pos + 4];
+    const uint16_t transform_id = ikev2_helper_read_be16(body + pos + 6);
+    uint16_t key_bits = 0;
+    if (transform_len < PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
+        || transform_len > end - pos || !transform_id
+        || !ikev2_helper_ike_transform_type_supported(transform_type))
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    enum provider_helper_ikev2_parse_result result =
+        ikev2_helper_parse_transform_attrs(
+            body, pos + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE,
+            pos + transform_len, &key_bits);
+    if (result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+    {
+        return result;
+    }
+
+    switch (transform_type)
+    {
+        case PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR:
+            if (*has_encr)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN;
+            }
+            *has_encr = true;
+            selection->encr_id = transform_id;
+            selection->encr_key_bits = key_bits;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_TRANSFORM_PRF:
+            if (*has_prf)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN;
+            }
+            *has_prf = true;
+            selection->prf_id = transform_id;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_TRANSFORM_INTEG:
+            if (*has_integ)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN;
+            }
+            *has_integ = true;
+            selection->integ_id = transform_id;
+            break;
+
+        case PROVIDER_HELPER_IKEV2_TRANSFORM_DH:
+            if (*has_dh)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN;
+            }
+            *has_dh = true;
+            selection->dh_id = transform_id;
+            break;
+
+        default:
+            return PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN;
+    }
+
+    return PROVIDER_HELPER_IKEV2_PARSE_OK;
+}
+
+static bool
+ikev2_helper_ike_rekey_selection_supported(
+    const struct provider_helper_ikev2_sa_selection *selection,
+    bool has_encr,
+    bool has_prf,
+    bool has_integ,
+    bool has_dh)
+{
+    return selection && has_encr && has_prf && !has_integ && has_dh
+           && selection->encr_id == PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16
+           && (!selection->encr_key_bits
+               || selection->encr_key_bits == 128
+               || selection->encr_key_bits == 256)
+           && selection->prf_id == PROVIDER_HELPER_IKEV2_PRF_HMAC_SHA2_256
+           && selection->dh_id == PROVIDER_HELPER_IKEV2_DH_ECP_256;
+}
+
+static bool
+ikev2_helper_ike_rekey_selection_matches_ke(
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    const struct provider_helper_ikev2_payload_summary *summary,
+    const struct provider_helper_ikev2_sa_selection *selection)
+{
+    if (!plaintext || !summary || !selection || !selection->selected
+        || summary->ke_len != PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE
+                              + PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES
+        || !ikev2_helper_body_inside(plaintext_len, summary->ke_offset,
+                                     summary->ke_len)
+        || ikev2_helper_read_be16(plaintext + summary->ke_offset)
+               != selection->dh_id
+        || !ikev2_helper_ecp256_public_key_valid(
+            plaintext + summary->ke_offset
+            + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE,
+            PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES))
+    {
+        return false;
+    }
+    return true;
+}
+
+static enum provider_helper_ikev2_parse_result
+ikev2_helper_select_ike_rekey_proposal(
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    const struct provider_helper_ikev2_payload_summary *summary,
+    struct provider_helper_ikev2_sa_selection *selection,
+    uint64_t *initiator_spi)
+{
+    if (selection)
+    {
+        CLEAR(*selection);
+    }
+    if (initiator_spi)
+    {
+        *initiator_spi = 0;
+    }
+    if (!plaintext || !summary || !selection || !initiator_spi
+        || !ikev2_helper_body_inside(plaintext_len, summary->sa_offset,
+                                     summary->sa_len)
+        || summary->sa_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                           + IKEV2_HELPER_IKE_REKEY_SPI_SIZE
+                           + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    enum provider_helper_ikev2_parse_result structural_result =
+        ikev2_helper_validate_ike_rekey_sa_payload(
+            plaintext + summary->sa_offset, summary->sa_len);
+    if (structural_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+    {
+        return structural_result;
+    }
+
+    size_t pos = summary->sa_offset;
+    const size_t end = summary->sa_offset + summary->sa_len;
+    uint32_t proposal_count = 0;
+    while (pos < end)
+    {
+        if (++proposal_count > PROVIDER_HELPER_IKEV2_MAX_PROPOSALS)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_PAYLOAD_LIMIT;
+        }
+        if (end - pos < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        const uint16_t proposal_len = ikev2_helper_read_be16(plaintext + pos + 2);
+        const uint8_t proposal_number = plaintext[pos + 4];
+        const uint8_t protocol_id = plaintext[pos + 5];
+        const uint8_t spi_size = plaintext[pos + 6];
+        const uint8_t transform_count = plaintext[pos + 7];
+        if (proposal_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                           + spi_size
+            || proposal_len > end - pos
+            || protocol_id != PROVIDER_HELPER_IKEV2_PROTOCOL_IKE
+            || spi_size != IKEV2_HELPER_IKE_REKEY_SPI_SIZE
+            || !transform_count)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+
+        struct provider_helper_ikev2_sa_selection candidate = {
+            .proposal_number = proposal_number,
+        };
+        bool has_encr = false;
+        bool has_prf = false;
+        bool has_integ = false;
+        bool has_dh = false;
+        bool candidate_invalid = false;
+        const uint64_t candidate_spi =
+            ikev2_helper_read_be64(
+                plaintext + pos + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE);
+        size_t transform_pos =
+            pos + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE + spi_size;
+        const size_t transform_end = pos + proposal_len;
+        uint32_t parsed = 0;
+        while (transform_pos < transform_end)
+        {
+            if (++parsed > PROVIDER_HELPER_IKEV2_MAX_TRANSFORMS)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_PAYLOAD_LIMIT;
+            }
+            enum provider_helper_ikev2_parse_result result =
+                ikev2_helper_select_ike_transform(
+                    plaintext, transform_pos, transform_end, &candidate,
+                    &has_encr, &has_prf, &has_integ, &has_dh);
+            if (result == PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN)
+            {
+                candidate_invalid = true;
+            }
+            else if (result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+            {
+                return result;
+            }
+            if (transform_end - transform_pos
+                < PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+            const uint16_t transform_len =
+                ikev2_helper_read_be16(plaintext + transform_pos + 2);
+            if (transform_len < PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
+                || transform_len > transform_end - transform_pos)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+            transform_pos += transform_len;
+        }
+
+        if (!candidate_invalid && candidate_spi && parsed == transform_count
+            && ikev2_helper_ike_rekey_selection_supported(
+                &candidate, has_encr, has_prf, has_integ, has_dh))
+        {
+            candidate.selected = true;
+            if (ikev2_helper_ike_rekey_selection_matches_ke(
+                    plaintext, plaintext_len, summary, &candidate))
+            {
+                *selection = candidate;
+                *initiator_spi = candidate_spi;
+                return PROVIDER_HELPER_IKEV2_PARSE_OK;
+            }
+            return PROVIDER_HELPER_IKEV2_PARSE_INVALID_KE_PAYLOAD;
+        }
+
+        pos += proposal_len;
+    }
+
+    return PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN;
+}
+
+static enum provider_helper_ikev2_parse_result
 ikev2_helper_validate_child_sa_transforms(const uint8_t *body,
                                           size_t start,
                                           size_t end,
@@ -7632,6 +8110,153 @@ ikev2_helper_store_ike_sa_init_material(
     return true;
 }
 
+static bool
+ikev2_helper_prepare_ike_rekey_material(
+    const struct ikev2_helper_ike_sa *sa,
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    const struct provider_helper_ikev2_payload_summary *summary,
+    const struct provider_helper_ikev2_sa_selection *selection,
+    uint64_t initiator_spi,
+    uint64_t responder_spi,
+    struct ikev2_helper_ike_rekey_material *material)
+{
+    uint8_t responder_private_key[IKEV2_HELPER_ECP_256_PRIVATE_BYTES];
+    uint8_t shared_secret[IKEV2_HELPER_ECP_256_SHARED_SECRET_BYTES];
+    bool ret = false;
+    CLEAR(responder_private_key);
+    CLEAR(shared_secret);
+
+    if (!sa || !plaintext || !summary || !selection || !selection->selected
+        || !initiator_spi || !responder_spi || !material
+        || !ikev2_helper_body_inside(plaintext_len, summary->ke_offset,
+                                     summary->ke_len)
+        || !ikev2_helper_body_inside(plaintext_len, summary->nonce_offset,
+                                     summary->nonce_len)
+        || summary->ke_len != PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE
+                              + PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES
+        || summary->nonce_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+        || summary->nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES)
+    {
+        return false;
+    }
+
+    CLEAR(*material);
+    material->initiator_spi = initiator_spi;
+    material->responder_spi = responder_spi;
+    material->selection = *selection;
+    material->initiator_ke_len = PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES;
+    memcpy(material->initiator_ke,
+           plaintext + summary->ke_offset
+           + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE,
+           material->initiator_ke_len);
+    material->initiator_nonce_len = summary->nonce_len;
+    memcpy(material->initiator_nonce, plaintext + summary->nonce_offset,
+           material->initiator_nonce_len);
+
+    material->responder_nonce_len = sizeof(material->responder_nonce);
+    material->responder_ke_len = sizeof(material->responder_ke);
+    if (!ikev2_helper_random_bytes(material->responder_nonce,
+                                   material->responder_nonce_len)
+        || !ikev2_helper_generate_ecp256_keypair(
+            material->responder_ke, material->responder_ke_len,
+            responder_private_key, sizeof(responder_private_key))
+        || !ikev2_helper_compute_ecp256_shared_secret(
+            material->initiator_ke, material->initiator_ke_len,
+            responder_private_key, sizeof(responder_private_key),
+            shared_secret, sizeof(shared_secret)))
+    {
+        goto done;
+    }
+
+    material->skeyseed_len = sizeof(material->skeyseed);
+    if (!ikev2_helper_derive_ike_rekey_skeyseed(
+            sa, shared_secret, sizeof(shared_secret), material->initiator_nonce,
+            material->initiator_nonce_len, material->responder_nonce,
+            material->responder_nonce_len, material->skeyseed,
+            material->skeyseed_len)
+        || !ikev2_helper_derive_ike_rekey_material_keys(material))
+    {
+        goto done;
+    }
+
+    ikev2_helper_secure_zero(material->skeyseed, sizeof(material->skeyseed));
+    material->skeyseed_len = 0;
+    ret = true;
+
+done:
+    ikev2_helper_secure_zero(responder_private_key, sizeof(responder_private_key));
+    ikev2_helper_secure_zero(shared_secret, sizeof(shared_secret));
+    if (!ret)
+    {
+        ikev2_helper_clear_ike_rekey_material(material);
+    }
+    return ret;
+}
+
+static void
+ikev2_helper_commit_ike_sa_rekey(struct ikev2_helper_ike_sa *sa,
+                                 const struct ikev2_helper_ike_rekey_material *material,
+                                 time_t now)
+{
+    if (!sa || !material)
+    {
+        return;
+    }
+
+    ikev2_helper_secure_zero(sa->initiator_ke, sizeof(sa->initiator_ke));
+    ikev2_helper_secure_zero(sa->initiator_nonce, sizeof(sa->initiator_nonce));
+    ikev2_helper_secure_zero(sa->responder_ke, sizeof(sa->responder_ke));
+    ikev2_helper_secure_zero(sa->responder_nonce, sizeof(sa->responder_nonce));
+    ikev2_helper_secure_zero(sa->responder_private_key,
+                             sizeof(sa->responder_private_key));
+    ikev2_helper_secure_zero(sa->shared_secret, sizeof(sa->shared_secret));
+    ikev2_helper_secure_zero(sa->skeyseed, sizeof(sa->skeyseed));
+    ikev2_helper_secure_zero(sa->sk_d, sizeof(sa->sk_d));
+    ikev2_helper_secure_zero(sa->sk_ei, sizeof(sa->sk_ei));
+    ikev2_helper_secure_zero(sa->sk_er, sizeof(sa->sk_er));
+    ikev2_helper_secure_zero(sa->sk_pi, sizeof(sa->sk_pi));
+    ikev2_helper_secure_zero(sa->sk_pr, sizeof(sa->sk_pr));
+    if (sa->protected_response_len)
+    {
+        ikev2_helper_secure_zero(sa->protected_response,
+                                 sa->protected_response_len);
+    }
+
+    sa->initiator_spi = material->initiator_spi;
+    sa->responder_spi = material->responder_spi;
+    sa->selection = material->selection;
+    sa->initiator_ke_group = material->selection.dh_id;
+    sa->initiator_ke_len = material->initiator_ke_len;
+    memcpy(sa->initiator_ke, material->initiator_ke, material->initiator_ke_len);
+    sa->initiator_nonce_len = material->initiator_nonce_len;
+    memcpy(sa->initiator_nonce, material->initiator_nonce,
+           material->initiator_nonce_len);
+    sa->responder_ke_len = material->responder_ke_len;
+    memcpy(sa->responder_ke, material->responder_ke, material->responder_ke_len);
+    sa->responder_nonce_len = material->responder_nonce_len;
+    memcpy(sa->responder_nonce, material->responder_nonce,
+           material->responder_nonce_len);
+    sa->responder_private_key_len = 0;
+    sa->shared_secret_len = 0;
+    sa->skeyseed_len = 0;
+    sa->sk_d_len = material->sk_d_len;
+    memcpy(sa->sk_d, material->sk_d, material->sk_d_len);
+    sa->sk_ei_len = material->sk_ei_len;
+    memcpy(sa->sk_ei, material->sk_ei, material->sk_ei_len);
+    sa->sk_er_len = material->sk_er_len;
+    memcpy(sa->sk_er, material->sk_er, material->sk_er_len);
+    sa->sk_pi_len = material->sk_pi_len;
+    memcpy(sa->sk_pi, material->sk_pi, material->sk_pi_len);
+    sa->sk_pr_len = material->sk_pr_len;
+    memcpy(sa->sk_pr, material->sk_pr, material->sk_pr_len);
+    sa->message_id = IKEV2_HELPER_MESSAGE_ID_RESET;
+    sa->protected_response_len = 0;
+    sa->protected_response_message_id = 0;
+    sa->protected_retransmits = 0;
+    sa->updated = now;
+}
+
 static enum ikev2_helper_add_sa_result
 ikev2_helper_add_ike_sa(struct ikev2_helper_ike_sa_table *table,
                         const struct ikev2_helper_listener *listener,
@@ -8115,8 +8740,7 @@ ikev2_helper_scaffold_child_sa(
         || !selection->selected || !selection->initiator_spi || !lease
         || !local_ts || !remote_ts || !initiator_nonce
         || initiator_nonce_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
-        || initiator_nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES
-        || !message_id)
+        || initiator_nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES)
     {
         return false;
     }
@@ -8539,10 +9163,6 @@ ikev2_helper_build_encrypted_payload_response(
     const uint8_t *plaintext,
     size_t plaintext_len)
 {
-    if (!message_id)
-    {
-        return false;
-    }
     return ikev2_helper_build_encrypted_payload(
         response, response_size, response_len, listener, sa, exchange_type,
         PROVIDER_HELPER_IKEV2_FLAG_RESPONSE, message_id, first_payload,
@@ -8786,6 +9406,173 @@ ikev2_helper_send_cached_encrypted_child_sa_response(
             plaintext, sizeof(plaintext), &child->selection,
             child->responder_spi, &child->xfrm_lease, child->responder_nonce,
             child->responder_nonce_len, &plaintext_len)
+        || !ikev2_helper_build_encrypted_payload_response(
+            response, sizeof(response), &response_len, listener, sa,
+            PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA, message_id,
+            PROVIDER_HELPER_IKEV2_PAYLOAD_SA, plaintext, plaintext_len))
+    {
+        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+        ikev2_helper_secure_zero(response, sizeof(response));
+        return false;
+    }
+
+    const ssize_t sent =
+        sendto(listener->fd, response, response_len, 0,
+               (const struct sockaddr *)&sa->peer, sa->peer_len);
+    const bool ret = sent == (ssize_t)response_len
+                     && ikev2_helper_cache_protected_response(
+                         sa, message_id, response, response_len);
+    ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+    ikev2_helper_secure_zero(response, sizeof(response));
+    return ret;
+}
+
+static uint16_t
+ikev2_helper_ike_transform_len(uint16_t key_bits)
+{
+    return (uint16_t)(PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
+                      + (key_bits ? 4 : 0));
+}
+
+static void
+ikev2_helper_write_ike_transform(uint8_t **pos,
+                                 uint8_t next_transform,
+                                 uint8_t transform_type,
+                                 uint16_t transform_id,
+                                 uint16_t key_bits)
+{
+    *(*pos)++ = next_transform;
+    *(*pos)++ = 0;
+    ikev2_helper_write_be16(pos, ikev2_helper_ike_transform_len(key_bits));
+    *(*pos)++ = transform_type;
+    *(*pos)++ = 0;
+    ikev2_helper_write_be16(pos, transform_id);
+    if (key_bits)
+    {
+        ikev2_helper_write_be16(
+            pos, (uint16_t)(0x8000u | PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH));
+        ikev2_helper_write_be16(pos, key_bits);
+    }
+}
+
+static bool
+ikev2_helper_build_ike_rekey_response_plaintext(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct ikev2_helper_ike_rekey_material *material,
+    size_t *out_len)
+{
+    if (out_len)
+    {
+        *out_len = 0;
+    }
+    size_t sk_ei_len = 0;
+    size_t sk_er_len = 0;
+    if (!dst || !material || !material->initiator_spi
+        || !material->responder_spi
+        || !ikev2_helper_suite_has_ike_key_sizes(&material->selection,
+                                                 &sk_ei_len, &sk_er_len)
+        || material->responder_ke_len
+               != PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES
+        || material->responder_nonce_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
+        || material->responder_nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES)
+    {
+        return false;
+    }
+    if (!sk_ei_len || !sk_er_len)
+    {
+        return false;
+    }
+
+    const uint16_t encr_transform_len =
+        ikev2_helper_ike_transform_len(material->selection.encr_key_bits);
+    const uint16_t prf_transform_len = ikev2_helper_ike_transform_len(0);
+    const uint16_t dh_transform_len = ikev2_helper_ike_transform_len(0);
+    const uint16_t proposal_len =
+        (uint16_t)(PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
+                   + IKEV2_HELPER_IKE_REKEY_SPI_SIZE + encr_transform_len
+                   + prf_transform_len + dh_transform_len);
+    const uint16_t sa_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + proposal_len;
+    const uint16_t ke_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+        + PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE
+        + (uint16_t)material->responder_ke_len;
+    const uint16_t nonce_payload_len =
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
+        + (uint16_t)material->responder_nonce_len;
+    const size_t plaintext_len =
+        sa_payload_len + ke_payload_len + nonce_payload_len + 1u;
+    if (dst_len < plaintext_len)
+    {
+        return false;
+    }
+
+    memset(dst, 0, plaintext_len);
+    uint8_t *pos = dst;
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_KE;
+    *pos++ = 0;
+    ikev2_helper_write_be16(&pos, sa_payload_len);
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+    *pos++ = 0;
+    ikev2_helper_write_be16(&pos, proposal_len);
+    *pos++ = material->selection.proposal_number;
+    *pos++ = PROVIDER_HELPER_IKEV2_PROTOCOL_IKE;
+    *pos++ = IKEV2_HELPER_IKE_REKEY_SPI_SIZE;
+    *pos++ = 3; /* ENCR, PRF, DH. */
+    ikev2_helper_write_be64(&pos, material->responder_spi);
+    ikev2_helper_write_ike_transform(
+        &pos, PROVIDER_HELPER_IKEV2_TRANSFORM_MORE,
+        PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR, material->selection.encr_id,
+        material->selection.encr_key_bits);
+    ikev2_helper_write_ike_transform(
+        &pos, PROVIDER_HELPER_IKEV2_TRANSFORM_MORE,
+        PROVIDER_HELPER_IKEV2_TRANSFORM_PRF, material->selection.prf_id, 0);
+    ikev2_helper_write_ike_transform(
+        &pos, PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+        PROVIDER_HELPER_IKEV2_TRANSFORM_DH, material->selection.dh_id, 0);
+
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE;
+    *pos++ = 0;
+    ikev2_helper_write_be16(&pos, ke_payload_len);
+    ikev2_helper_write_be16(&pos, material->selection.dh_id);
+    ikev2_helper_write_be16(&pos, 0);
+    memcpy(pos, material->responder_ke, material->responder_ke_len);
+    pos += material->responder_ke_len;
+
+    *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+    *pos++ = 0;
+    ikev2_helper_write_be16(&pos, nonce_payload_len);
+    memcpy(pos, material->responder_nonce, material->responder_nonce_len);
+    pos += material->responder_nonce_len;
+
+    *pos++ = 0; /* Pad Length: no padding bytes for AEAD. */
+    if ((size_t)(pos - dst) != plaintext_len)
+    {
+        memset(dst, 0, plaintext_len);
+        return false;
+    }
+    if (out_len)
+    {
+        *out_len = plaintext_len;
+    }
+    return true;
+}
+
+static bool
+ikev2_helper_send_cached_encrypted_ike_rekey_response(
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_ike_sa *sa,
+    const struct ikev2_helper_ike_rekey_material *material,
+    uint32_t message_id)
+{
+    uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    uint8_t response[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    size_t plaintext_len = 0;
+    size_t response_len = 0;
+    if (!listener || !sa || !sa->active || !material
+        || !ikev2_helper_build_ike_rekey_response_plaintext(
+            plaintext, sizeof(plaintext), material, &plaintext_len)
         || !ikev2_helper_build_encrypted_payload_response(
             response, sizeof(response), &response_len, listener, sa,
             PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA, message_id,
@@ -12204,8 +12991,7 @@ ikev2_helper_protected_exchange_request_header_valid(
     return header
            && (header->flags & PROVIDER_HELPER_IKEV2_FLAG_INITIATOR)
            && !(header->flags & PROVIDER_HELPER_IKEV2_FLAG_RESPONSE)
-           && header->initiator_spi && header->responder_spi
-           && header->message_id > IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID;
+           && header->initiator_spi && header->responder_spi;
 }
 
 static bool
@@ -13524,13 +14310,21 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
-                if (header.message_id < sa->message_id)
+                const bool message_id_reset =
+                    sa->message_id == IKEV2_HELPER_MESSAGE_ID_RESET;
+                if (message_id_reset && header.message_id != 0)
+                {
+                    ++counters->ike_exchange_out_of_order_dropped;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+                if (!message_id_reset && header.message_id < sa->message_id)
                 {
                     ++counters->ike_exchange_replay_dropped;
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
-                if (header.message_id == sa->message_id)
+                if (!message_id_reset && header.message_id == sa->message_id)
                 {
                     if (!peer_matches)
                     {
@@ -13554,7 +14348,8 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
-                if (sa->message_id >= IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID
+                if (!message_id_reset
+                    && sa->message_id >= IKEV2_HELPER_INITIAL_IKE_AUTH_MESSAGE_ID
                     && header.message_id != sa->message_id + 1)
                 {
                     ++counters->ike_exchange_out_of_order_dropped;
@@ -13893,6 +14688,102 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     if (any_rekey_request)
                     {
                         ++counters->ike_create_child_rekey_rx;
+                    }
+                    if (ike_rekey_request)
+                    {
+                        struct provider_helper_ikev2_sa_selection rekey_selection;
+                        struct ikev2_helper_ike_rekey_material rekey_material;
+                        uint64_t rekey_initiator_spi = 0;
+                        uint64_t rekey_responder_spi = 0;
+                        CLEAR(rekey_selection);
+                        CLEAR(rekey_material);
+
+                        const enum provider_helper_ikev2_parse_result
+                            rekey_select_result =
+                                ikev2_helper_select_ike_rekey_proposal(
+                                    plaintext, plaintext_len, &inner_summary,
+                                    &rekey_selection, &rekey_initiator_spi);
+                        if (rekey_select_result
+                            == PROVIDER_HELPER_IKEV2_PARSE_NO_PROPOSAL_CHOSEN)
+                        {
+                            if (ikev2_helper_send_cached_encrypted_notify_exchange_response(
+                                    listener, sa, header.exchange_type,
+                                    header.message_id,
+                                    PROVIDER_HELPER_IKEV2_NOTIFY_NO_PROPOSAL_CHOSEN))
+                            {
+                                ++counters->ike_create_child_no_proposal_tx;
+                                sa->updated = exchange_now;
+                                sa->message_id = header.message_id;
+                            }
+                            else
+                            {
+                                ++counters->ike_create_child_no_proposal_failed;
+                            }
+                            ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                            counters->ike_sa_active = sa_table->active;
+                            counters->ike_child_sa_scaffold_active =
+                                ikev2_helper_count_child_sa_scaffolds(sa_table);
+                            return;
+                        }
+                        if (rekey_select_result != PROVIDER_HELPER_IKEV2_PARSE_OK)
+                        {
+                            ++counters->datagrams_malformed;
+                            ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                            counters->ike_sa_active = sa_table->active;
+                            return;
+                        }
+
+                        if (!ikev2_helper_generate_responder_spi(
+                                sa_table, &rekey_responder_spi)
+                            || !ikev2_helper_prepare_ike_rekey_material(
+                                sa, plaintext, plaintext_len, &inner_summary,
+                                &rekey_selection, rekey_initiator_spi,
+                                rekey_responder_spi, &rekey_material)
+                            || !ikev2_helper_send_cached_encrypted_ike_rekey_response(
+                                listener, sa, &rekey_material,
+                                header.message_id))
+                        {
+                            ++counters->ike_create_child_temp_failure_tx;
+                            (void)ikev2_helper_send_cached_encrypted_notify_exchange_response(
+                                listener, sa, header.exchange_type,
+                                header.message_id,
+                                PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE);
+                            if (!ikev2_helper_send_session_close(
+                                    ipc_fd, tx_sequence, sa,
+                                    "IKEv2 IKE SA rekey failed"))
+                            {
+                                ikev2_helper_note_fatal_ipc_failure();
+                            }
+                            (void)ikev2_helper_clear_ike_sa(sa_table, sa,
+                                                            counters);
+                            ikev2_helper_clear_ike_rekey_material(&rekey_material);
+                            ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                            counters->ike_sa_active = sa_table->active;
+                            counters->ike_child_sa_scaffold_active =
+                                ikev2_helper_count_child_sa_scaffolds(sa_table);
+                            counters->ike_child_sa_xfrm_active =
+                                ikev2_helper_count_child_sa_xfrm_active(sa_table);
+                            return;
+                        }
+
+                        ++counters->ike_create_child_response_tx;
+                        ikev2_helper_commit_ike_sa_rekey(sa, &rekey_material,
+                                                         exchange_now);
+                        if (!ikev2_helper_send_session_update(
+                                ipc_fd, tx_sequence, sa,
+                                PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE,
+                                "ike-authorized", "ike-rekeyed"))
+                        {
+                            ikev2_helper_note_fatal_ipc_failure();
+                        }
+                        ikev2_helper_clear_ike_rekey_material(&rekey_material);
+                        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                        counters->ike_sa_active = sa_table->active;
+                        counters->ike_child_sa_scaffold_active =
+                            ikev2_helper_count_child_sa_scaffolds(sa_table);
+                        counters->ike_child_sa_xfrm_active =
+                            ikev2_helper_count_child_sa_xfrm_active(sa_table);
+                        return;
                     }
                     bool no_proposal = false;
                     bool ts_unacceptable = false;
