@@ -303,6 +303,24 @@ struct ikev2_helper_ike_rekey_material {
     uint8_t sk_pr[IKEV2_HELPER_PRF_SHA256_BYTES];
 };
 
+struct ikev2_helper_retired_ike_sa {
+    bool active;
+    uint64_t initiator_spi;
+    uint64_t responder_spi;
+    uint32_t listener_id;
+    uint32_t message_id;
+    uint32_t protected_retransmits;
+    size_t protected_response_len;
+    uint8_t protected_response[IKEV2_HELPER_PROTECTED_RESPONSE_CACHE_BYTES];
+    size_t sk_ei_len;
+    uint8_t sk_ei[IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES];
+    size_t sk_er_len;
+    uint8_t sk_er[IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES];
+    struct sockaddr_storage peer;
+    socklen_t peer_len;
+    time_t retired;
+};
+
 struct ikev2_helper_ike_sa {
     bool active;
     uint64_t initiator_spi;
@@ -318,6 +336,7 @@ struct ikev2_helper_ike_sa {
     uint8_t ike_sa_init_response[IKEV2_HELPER_IKE_SA_INIT_TRANSCRIPT_BYTES];
     size_t protected_response_len;
     uint8_t protected_response[IKEV2_HELPER_PROTECTED_RESPONSE_CACHE_BYTES];
+    struct ikev2_helper_retired_ike_sa retired_ike_sa;
     uint16_t initiator_ke_group;
     size_t initiator_ke_len;
     uint8_t initiator_ke[PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES];
@@ -1367,6 +1386,16 @@ ikev2_helper_clear_ike_rekey_material(
     if (material)
     {
         ikev2_helper_secure_zero(material, sizeof(*material));
+    }
+}
+
+static void
+ikev2_helper_clear_retired_ike_sa(
+    struct ikev2_helper_retired_ike_sa *retired)
+{
+    if (retired)
+    {
+        ikev2_helper_secure_zero(retired, sizeof(*retired));
     }
 }
 
@@ -7575,8 +7604,9 @@ ikev2_helper_aes_gcm_encrypt(const uint8_t *key, size_t key_len,
 }
 
 static bool
-ikev2_helper_decrypt_sk_payload(
-    const struct ikev2_helper_ike_sa *sa,
+ikev2_helper_decrypt_sk_payload_with_key(
+    const uint8_t *sk_ei,
+    size_t sk_ei_len,
     const uint8_t *packet,
     size_t packet_len,
     const struct provider_helper_ikev2_header *header,
@@ -7589,9 +7619,9 @@ ikev2_helper_decrypt_sk_payload(
     {
         *plaintext_len = 0;
     }
-    if (!sa || !packet || !header || !summary || !plaintext || !plaintext_len
-        || sa->sk_ei_len <= IKEV2_HELPER_AES_GCM_SALT_BYTES
-        || sa->sk_ei_len > sizeof(sa->sk_ei)
+    if (!sk_ei || sk_ei_len <= IKEV2_HELPER_AES_GCM_SALT_BYTES
+        || sk_ei_len > IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES
+        || !packet || !header || !summary || !plaintext || !plaintext_len
         || !summary->saw_sk || summary->sk_count != 1
         || summary->sk_offset < PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
         || !ikev2_helper_body_inside(packet_len, summary->sk_offset,
@@ -7621,15 +7651,15 @@ ikev2_helper_decrypt_sk_payload(
                          - IKEV2_HELPER_AES_GCM_TAG_BYTES;
     const uint8_t *aad = packet + header->header_offset;
     const size_t aad_len = summary->sk_offset - header->header_offset;
-    const size_t key_len = sa->sk_ei_len - IKEV2_HELPER_AES_GCM_SALT_BYTES;
-    const uint8_t *salt = sa->sk_ei + key_len;
+    const size_t key_len = sk_ei_len - IKEV2_HELPER_AES_GCM_SALT_BYTES;
+    const uint8_t *salt = sk_ei + key_len;
     uint8_t nonce[IKEV2_HELPER_AES_GCM_NONCE_BYTES];
     memcpy(nonce, salt, IKEV2_HELPER_AES_GCM_SALT_BYTES);
     memcpy(nonce + IKEV2_HELPER_AES_GCM_SALT_BYTES, iv,
            IKEV2_HELPER_AES_GCM_IV_BYTES);
 
     bool ret = ikev2_helper_aes_gcm_decrypt(
-        sa->sk_ei, key_len, nonce, sizeof(nonce), aad, aad_len, ciphertext,
+        sk_ei, key_len, nonce, sizeof(nonce), aad, aad_len, ciphertext,
         ciphertext_len, tag, IKEV2_HELPER_AES_GCM_TAG_BYTES, plaintext,
         plaintext_size, plaintext_len);
     ikev2_helper_secure_zero(nonce, sizeof(nonce));
@@ -7649,6 +7679,26 @@ ikev2_helper_decrypt_sk_payload(
     }
     *plaintext_len -= padding_len;
     return true;
+}
+
+static bool
+ikev2_helper_decrypt_sk_payload(
+    const struct ikev2_helper_ike_sa *sa,
+    const uint8_t *packet,
+    size_t packet_len,
+    const struct provider_helper_ikev2_header *header,
+    const struct provider_helper_ikev2_payload_summary *summary,
+    uint8_t *plaintext,
+    size_t plaintext_size,
+    size_t *plaintext_len)
+{
+    if (!sa)
+    {
+        return false;
+    }
+    return ikev2_helper_decrypt_sk_payload_with_key(
+        sa->sk_ei, sa->sk_ei_len, packet, packet_len, header, summary,
+        plaintext, plaintext_size, plaintext_len);
 }
 
 static bool
@@ -8194,15 +8244,66 @@ done:
     return ret;
 }
 
+static bool
+ikev2_helper_stage_retired_ike_sa(struct ikev2_helper_ike_sa *sa,
+                                  uint32_t message_id,
+                                  time_t now)
+{
+    if (!sa || !sa->active || !sa->initiator_spi || !sa->responder_spi
+        || !sa->listener_id
+        || sa->sk_ei_len > sizeof(sa->retired_ike_sa.sk_ei)
+        || sa->sk_er_len > sizeof(sa->retired_ike_sa.sk_er)
+        || sa->protected_response_len
+               > sizeof(sa->retired_ike_sa.protected_response)
+        || !ikev2_helper_sockaddr_len_valid(&sa->peer, sa->peer_len))
+    {
+        return false;
+    }
+
+    struct ikev2_helper_retired_ike_sa retired;
+    CLEAR(retired);
+    retired.active = true;
+    retired.initiator_spi = sa->initiator_spi;
+    retired.responder_spi = sa->responder_spi;
+    retired.listener_id = sa->listener_id;
+    retired.message_id = message_id;
+    retired.protected_response_len = sa->protected_response_len;
+    if (retired.protected_response_len)
+    {
+        memcpy(retired.protected_response, sa->protected_response,
+               retired.protected_response_len);
+    }
+    retired.sk_ei_len = sa->sk_ei_len;
+    if (retired.sk_ei_len)
+    {
+        memcpy(retired.sk_ei, sa->sk_ei, retired.sk_ei_len);
+    }
+    retired.sk_er_len = sa->sk_er_len;
+    if (retired.sk_er_len)
+    {
+        memcpy(retired.sk_er, sa->sk_er, retired.sk_er_len);
+    }
+    retired.peer = sa->peer;
+    retired.peer_len = sa->peer_len;
+    retired.retired = now;
+
+    ikev2_helper_clear_retired_ike_sa(&sa->retired_ike_sa);
+    sa->retired_ike_sa = retired;
+    return true;
+}
+
 static void
 ikev2_helper_commit_ike_sa_rekey(struct ikev2_helper_ike_sa *sa,
                                  const struct ikev2_helper_ike_rekey_material *material,
+                                 uint32_t message_id,
                                  time_t now)
 {
     if (!sa || !material)
     {
         return;
     }
+
+    (void)ikev2_helper_stage_retired_ike_sa(sa, message_id, now);
 
     ikev2_helper_secure_zero(sa->initiator_ke, sizeof(sa->initiator_ke));
     ikev2_helper_secure_zero(sa->initiator_nonce, sizeof(sa->initiator_nonce));
@@ -9053,12 +9154,15 @@ ikev2_helper_delete_xfrm_lease(
 }
 
 static bool
-ikev2_helper_build_encrypted_payload(
+ikev2_helper_build_encrypted_payload_with_key(
     uint8_t *packet,
     size_t response_size,
     size_t *response_len,
     const struct ikev2_helper_listener *listener,
-    const struct ikev2_helper_ike_sa *sa,
+    uint64_t initiator_spi,
+    uint64_t responder_spi,
+    const uint8_t *sk_er,
+    size_t sk_er_len,
     uint8_t exchange_type,
     uint8_t flags,
     uint32_t message_id,
@@ -9070,11 +9174,11 @@ ikev2_helper_build_encrypted_payload(
     {
         *response_len = 0;
     }
-    if (!packet || !response_len || !listener || !sa || !sa->active
-        || !sa->initiator_spi || !sa->responder_spi || !plaintext
-        || !plaintext_len
-        || sa->sk_er_len <= IKEV2_HELPER_AES_GCM_SALT_BYTES
-        || sa->sk_er_len > sizeof(sa->sk_er))
+    if (!packet || !response_len || !listener || !initiator_spi
+        || !responder_spi || !sk_er
+        || sk_er_len <= IKEV2_HELPER_AES_GCM_SALT_BYTES
+        || sk_er_len > IKEV2_HELPER_IKE_ENCR_KEYMAT_MAX_BYTES
+        || !plaintext || !plaintext_len)
     {
         return false;
     }
@@ -9101,8 +9205,8 @@ ikev2_helper_build_encrypted_payload(
 
     memset(packet, 0, packet_len);
     uint8_t *pos = packet + offset;
-    ikev2_helper_write_be64(&pos, sa->initiator_spi);
-    ikev2_helper_write_be64(&pos, sa->responder_spi);
+    ikev2_helper_write_be64(&pos, initiator_spi);
+    ikev2_helper_write_be64(&pos, responder_spi);
     *pos++ = PROVIDER_HELPER_IKEV2_PAYLOAD_SK;
     *pos++ = (PROVIDER_HELPER_IKEV2_MAJOR_VERSION << 4)
              | PROVIDER_HELPER_IKEV2_MINOR_VERSION;
@@ -9122,8 +9226,8 @@ ikev2_helper_build_encrypted_payload(
     }
     pos += IKEV2_HELPER_AES_GCM_IV_BYTES;
 
-    const size_t key_len = sa->sk_er_len - IKEV2_HELPER_AES_GCM_SALT_BYTES;
-    const uint8_t *salt = sa->sk_er + key_len;
+    const size_t key_len = sk_er_len - IKEV2_HELPER_AES_GCM_SALT_BYTES;
+    const uint8_t *salt = sk_er + key_len;
     uint8_t nonce[IKEV2_HELPER_AES_GCM_NONCE_BYTES];
     memcpy(nonce, salt, IKEV2_HELPER_AES_GCM_SALT_BYTES);
     memcpy(nonce + IKEV2_HELPER_AES_GCM_SALT_BYTES, iv,
@@ -9132,7 +9236,7 @@ ikev2_helper_build_encrypted_payload(
     uint8_t *ciphertext = pos;
     uint8_t *tag = pos + plaintext_len;
     const bool ret = ikev2_helper_aes_gcm_encrypt(
-        sa->sk_er, key_len, nonce, sizeof(nonce), packet + offset,
+        sk_er, key_len, nonce, sizeof(nonce), packet + offset,
         PROVIDER_HELPER_IKEV2_HEADER_SIZE
         + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE,
         plaintext, plaintext_len, ciphertext, plaintext_len, tag,
@@ -9148,6 +9252,30 @@ ikev2_helper_build_encrypted_payload(
 
     *response_len = packet_len;
     return true;
+}
+
+static bool
+ikev2_helper_build_encrypted_payload(
+    uint8_t *packet,
+    size_t response_size,
+    size_t *response_len,
+    const struct ikev2_helper_listener *listener,
+    const struct ikev2_helper_ike_sa *sa,
+    uint8_t exchange_type,
+    uint8_t flags,
+    uint32_t message_id,
+    uint8_t first_payload,
+    const uint8_t *plaintext,
+    size_t plaintext_len)
+{
+    if (!sa || !sa->active)
+    {
+        return false;
+    }
+    return ikev2_helper_build_encrypted_payload_with_key(
+        packet, response_size, response_len, listener, sa->initiator_spi,
+        sa->responder_spi, sa->sk_er, sa->sk_er_len, exchange_type, flags,
+        message_id, first_payload, plaintext, plaintext_len);
 }
 
 static bool
@@ -9326,6 +9454,55 @@ ikev2_helper_retransmit_cached_protected_response(
         sendto(listener->fd, sa->protected_response, sa->protected_response_len,
                0, (const struct sockaddr *)&sa->peer, sa->peer_len);
     return sent == (ssize_t)sa->protected_response_len;
+}
+
+static bool
+ikev2_helper_retransmit_retired_ike_sa_response(
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_retired_ike_sa *retired)
+{
+    if (!listener || !retired || !retired->active
+        || !retired->protected_response_len)
+    {
+        return false;
+    }
+
+    const ssize_t sent =
+        sendto(listener->fd, retired->protected_response,
+               retired->protected_response_len, 0,
+               (const struct sockaddr *)&retired->peer, retired->peer_len);
+    return sent == (ssize_t)retired->protected_response_len;
+}
+
+static bool
+ikev2_helper_send_retired_ike_sa_empty_response(
+    const struct ikev2_helper_listener *listener,
+    struct ikev2_helper_retired_ike_sa *retired,
+    uint8_t exchange_type,
+    uint32_t message_id)
+{
+    const uint8_t plaintext[] = { 0 }; /* Pad Length: no padding bytes. */
+    size_t response_len = 0;
+    if (!listener || !retired || !retired->active
+        || !ikev2_helper_build_encrypted_payload_with_key(
+            retired->protected_response, sizeof(retired->protected_response),
+            &response_len, listener, retired->initiator_spi,
+            retired->responder_spi, retired->sk_er, retired->sk_er_len,
+            exchange_type, PROVIDER_HELPER_IKEV2_FLAG_RESPONSE, message_id,
+            PROVIDER_HELPER_IKEV2_PAYLOAD_NONE, plaintext,
+            sizeof(plaintext)))
+    {
+        return false;
+    }
+
+    retired->protected_response_len = response_len;
+    retired->message_id = message_id;
+    retired->protected_retransmits = 0;
+
+    const ssize_t sent =
+        sendto(listener->fd, retired->protected_response, response_len, 0,
+               (const struct sockaddr *)&retired->peer, retired->peer_len);
+    return sent == (ssize_t)response_len;
 }
 
 static bool
@@ -12757,6 +12934,12 @@ ikev2_helper_expire_ike_sas(struct ikev2_helper_ike_sa_table *table,
     for (size_t i = 0; i < SIZE(table->entries); ++i)
     {
         struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        if (sa->active && sa->retired_ike_sa.active
+            && sa->retired_ike_sa.retired <= now
+            && now - sa->retired_ike_sa.retired >= (time_t)timeout_seconds)
+        {
+            ikev2_helper_clear_retired_ike_sa(&sa->retired_ike_sa);
+        }
         if (!sa->active || sa->auth_authorized || sa->updated > now
             || now - sa->updated < (time_t)timeout_seconds)
         {
@@ -13062,6 +13245,44 @@ ikev2_helper_find_protected_exchange_sa_by_spi(
             && sa->initiator_spi == header->initiator_spi
             && sa->responder_spi == header->responder_spi)
         {
+            return sa;
+        }
+    }
+
+    return NULL;
+}
+
+static struct ikev2_helper_ike_sa *
+ikev2_helper_find_retired_ike_sa(
+    struct ikev2_helper_ike_sa_table *table,
+    const struct ikev2_helper_listener *listener,
+    const struct provider_helper_ikev2_header *header,
+    const struct sockaddr_storage *peer,
+    socklen_t peer_len,
+    struct ikev2_helper_retired_ike_sa **retired_out)
+{
+    if (retired_out)
+    {
+        *retired_out = NULL;
+    }
+    if (!table || !listener || !header || !peer || !retired_out)
+    {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < SIZE(table->entries); ++i)
+    {
+        struct ikev2_helper_ike_sa *sa = &table->entries[i];
+        struct ikev2_helper_retired_ike_sa *retired =
+            sa->active ? &sa->retired_ike_sa : NULL;
+        if (retired && retired->active
+            && retired->listener_id == listener->descriptor.listener_id
+            && retired->initiator_spi == header->initiator_spi
+            && retired->responder_spi == header->responder_spi
+            && ikev2_helper_peer_equal(&retired->peer, retired->peer_len,
+                                       peer, peer_len))
+        {
+            *retired_out = retired;
             return sa;
         }
     }
@@ -14278,6 +14499,8 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                     ikev2_helper_find_protected_exchange_sa(
                         sa_table, listener, &header, &peer, peer_len);
                 bool peer_migration_candidate = false;
+                struct ikev2_helper_retired_ike_sa *retired_ike_sa = NULL;
+                bool retired_exchange = false;
                 if (!sa
                     && header.exchange_type
                            == PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL
@@ -14290,7 +14513,93 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                 }
                 if (!sa)
                 {
+                    sa = ikev2_helper_find_retired_ike_sa(
+                        sa_table, listener, &header, &peer, peer_len,
+                        &retired_ike_sa);
+                    retired_exchange = retired_ike_sa != NULL;
+                }
+                if (!sa)
+                {
                     ++counters->datagrams_malformed;
+                    counters->ike_sa_active = sa_table->active;
+                    return;
+                }
+                if (retired_exchange)
+                {
+                    if (header.message_id == retired_ike_sa->message_id
+                        && retired_ike_sa->protected_response_len)
+                    {
+                        if (retired_ike_sa->protected_retransmits
+                            >= config->retransmit_limit)
+                        {
+                            ++counters->ike_exchange_replay_dropped;
+                        }
+                        else if (ikev2_helper_retransmit_retired_ike_sa_response(
+                                     listener, retired_ike_sa))
+                        {
+                            ++retired_ike_sa->protected_retransmits;
+                            ++counters->ike_exchange_retransmit_tx;
+                        }
+                        else
+                        {
+                            ++counters->ike_exchange_retransmit_failed;
+                        }
+                        counters->ike_sa_active = sa_table->active;
+                        return;
+                    }
+                    if (header.exchange_type
+                            != PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL
+                        || header.message_id != retired_ike_sa->message_id + 1)
+                    {
+                        ++counters->ike_exchange_out_of_order_dropped;
+                        counters->ike_sa_active = sa_table->active;
+                        return;
+                    }
+
+                    uint8_t retired_plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+                    size_t retired_plaintext_len = 0;
+                    if (!ikev2_helper_decrypt_sk_payload_with_key(
+                            retired_ike_sa->sk_ei, retired_ike_sa->sk_ei_len,
+                            packet, (size_t)n, &header, &protected_summary,
+                            retired_plaintext, sizeof(retired_plaintext),
+                            &retired_plaintext_len))
+                    {
+                        ++counters->ike_exchange_decrypt_failed;
+                        ++counters->datagrams_malformed;
+                        counters->ike_sa_active = sa_table->active;
+                        return;
+                    }
+
+                    struct provider_helper_ikev2_payload_summary inner_summary;
+                    const enum provider_helper_ikev2_parse_result inner_result =
+                        ikev2_helper_parse_ike_auth_inner_payloads(
+                            retired_plaintext, retired_plaintext_len,
+                            protected_summary.sk_next_payload, config,
+                            &inner_summary);
+                    if (inner_result == PROVIDER_HELPER_IKEV2_PARSE_OK
+                        && ikev2_helper_is_ike_sa_delete_request(
+                            retired_plaintext, retired_plaintext_len,
+                            &inner_summary))
+                    {
+                        ++counters->ike_informational_delete_rx;
+                        if (ikev2_helper_send_retired_ike_sa_empty_response(
+                                listener, retired_ike_sa, header.exchange_type,
+                                header.message_id))
+                        {
+                            ++counters->ike_informational_delete_response_tx;
+                        }
+                        else
+                        {
+                            ++counters
+                                  ->ike_informational_delete_response_failed;
+                        }
+                    }
+                    else
+                    {
+                        ++counters->ike_exchange_unsupported;
+                    }
+                    ikev2_helper_secure_zero(retired_plaintext,
+                                             sizeof(retired_plaintext));
                     counters->ike_sa_active = sa_table->active;
                     return;
                 }
@@ -14768,6 +15077,7 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
 
                         ++counters->ike_create_child_response_tx;
                         ikev2_helper_commit_ike_sa_rekey(sa, &rekey_material,
+                                                         header.message_id,
                                                          exchange_now);
                         if (!ikev2_helper_send_session_update(
                                 ipc_fd, tx_sequence, sa,

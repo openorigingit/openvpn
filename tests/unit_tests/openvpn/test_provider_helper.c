@@ -12276,6 +12276,26 @@ test_provider_helper_spawn_ikev2_rekey_handling(void **state)
                     response_fd, initiator_spi, &sa_init_material, 4, true,
                     &rekey_material) != 0);
 
+    struct test_ikev2_sa_init_response_material retransmit_material;
+    test_send_ikev2_encrypted_ike_sa_rekey_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, 4);
+    assert_int_equal(test_recv_ikev2_encrypted_ike_sa_rekey_response(
+                         response_fd, initiator_spi, &sa_init_material, 4,
+                         true, &retransmit_material),
+                     rekey_material.responder_spi);
+
+    test_send_ikev2_encrypted_ike_delete_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, 5);
+    test_recv_ikev2_encrypted_empty_exchange_response(
+        response_fd, initiator_spi, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 5, true);
+
+    test_send_ikev2_encrypted_ike_delete_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true, 5);
+    test_recv_ikev2_encrypted_empty_exchange_response(
+        response_fd, initiator_spi, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL, 5, true);
+
     target_rx_sequence = supervisor.last_rx_sequence + 1;
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
@@ -12309,6 +12329,10 @@ test_provider_helper_spawn_ikev2_rekey_handling(void **state)
     assert_int_equal(supervisor.last_rx_sequence, target_rx_sequence);
     assert_int_equal(supervisor.runtime_stats.ike_create_child_rekey_rx, 2);
     assert_int_equal(supervisor.runtime_stats.ike_create_child_response_tx, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_exchange_retransmit_tx, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_informational_delete_rx, 1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_informational_delete_response_tx, 1);
     assert_int_equal(supervisor.runtime_stats.ike_create_child_temp_failure_tx,
                      0);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
