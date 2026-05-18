@@ -148,6 +148,9 @@ bool provider_policy_fingerprint_list_add(
 bool provider_policy_fingerprint_list_add_runtime(
     struct provider_policy_fingerprint_list *list,
     const char *credential_fingerprint);
+bool provider_policy_fingerprint_list_copy_runtime(
+    struct provider_policy_fingerprint_list *dest,
+    const struct provider_policy_fingerprint_list *src);
 void provider_policy_fingerprint_list_free_runtime(
     struct provider_policy_fingerprint_list *list);
 bool provider_policy_fingerprint_list_load_runtime(

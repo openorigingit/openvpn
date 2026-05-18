@@ -296,6 +296,39 @@ provider_policy_fingerprint_list_add_runtime(
                                                 NULL);
 }
 
+bool
+provider_policy_fingerprint_list_copy_runtime(
+    struct provider_policy_fingerprint_list *dest,
+    const struct provider_policy_fingerprint_list *src)
+{
+    if (!dest)
+    {
+        return false;
+    }
+    if (dest == src)
+    {
+        return true;
+    }
+
+    struct provider_policy_fingerprint_list copy = { 0 };
+    for (const struct provider_policy_fingerprint_entry *entry =
+             src ? src->head : NULL;
+         entry;
+         entry = entry->next)
+    {
+        if (!provider_policy_fingerprint_list_add_runtime(
+                &copy, entry->credential_fingerprint))
+        {
+            provider_policy_fingerprint_list_free_runtime(&copy);
+            return false;
+        }
+    }
+
+    provider_policy_fingerprint_list_free_runtime(dest);
+    *dest = copy;
+    return true;
+}
+
 void
 provider_policy_fingerprint_list_free_runtime(
     struct provider_policy_fingerprint_list *list)

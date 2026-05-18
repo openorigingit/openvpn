@@ -198,6 +198,7 @@ struct multi_context
     bool provider_helper_listener_fds_sent;
     bool provider_helper_server_auth_config_sent;
     struct provider_session_table provider_sessions;
+    struct provider_policy_fingerprint_list provider_allowed_fingerprints;
     struct provider_policy_fingerprint_list provider_revoked_fingerprints;
     struct provider_policy_principal_list provider_revoked_principals;
     struct provider_policy_cert_list provider_revoked_certs;

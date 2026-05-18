@@ -1376,7 +1376,7 @@ multi_ikev2_helper_auth_request(void *arg,
                                       : NULL,
         .cert_serial = request->cert_serial_len ? cert_serial : NULL,
         .cert_issuer = request->cert_issuer_len ? cert_issuer : NULL,
-        .allowed_fingerprints = &m->top.options.ikev2_helper_allowed_fingerprints,
+        .allowed_fingerprints = &m->provider_allowed_fingerprints,
         .revoked_fingerprints = &m->provider_revoked_fingerprints,
         .revoked_principals = &m->provider_revoked_principals,
         .revoked_certs = &m->provider_revoked_certs,
@@ -1502,6 +1502,12 @@ multi_init(struct context *t)
     provider_session_table_init(&m->provider_sessions);
     m->provider_policy_revision =
         MULTI_IKEV2_HELPER_INITIAL_POLICY_REVISION;
+    if (!provider_policy_fingerprint_list_copy_runtime(
+            &m->provider_allowed_fingerprints,
+            &t->options.ikev2_helper_allowed_fingerprints))
+    {
+        msg(M_FATAL, "IKEv2 helper allowlist initialization failed");
+    }
     if (t->options.ikev2_helper_revocation_file)
     {
         char reason[PROVIDER_POLICY_REASON_SIZE];
@@ -1977,6 +1983,8 @@ multi_uninit(struct multi_context *m)
         multi_ikev2_helper_close_provider_sessions(m, "server shutdown");
         provider_helper_supervisor_free(&m->provider_helper);
         multi_ikev2_helper_listener_fds_close(m);
+        provider_policy_fingerprint_list_free_runtime(
+            &m->provider_allowed_fingerprints);
         provider_policy_fingerprint_list_free_runtime(
             &m->provider_revoked_fingerprints);
         provider_policy_principal_list_free_runtime(
@@ -5405,6 +5413,52 @@ management_provider_revoke_fingerprint(void *arg,
 }
 
 static bool
+management_provider_allow_fingerprint(void *arg,
+                                      const char *credential_fingerprint,
+                                      const char *reason)
+{
+    struct multi_context *m = (struct multi_context *)arg;
+    if (!provider_policy_fingerprint_valid(credential_fingerprint))
+    {
+        return false;
+    }
+    if (provider_policy_fingerprint_list_contains(
+            &m->provider_revoked_fingerprints, credential_fingerprint))
+    {
+        msg(M_WARN,
+            "MANAGEMENT: provider credential fingerprint allow rejected because the fingerprint is revoked");
+        return false;
+    }
+
+    const bool already_allowed =
+        provider_policy_fingerprint_list_contains(
+            &m->provider_allowed_fingerprints, credential_fingerprint);
+    if (!provider_policy_fingerprint_list_add_runtime(
+            &m->provider_allowed_fingerprints, credential_fingerprint))
+    {
+        return false;
+    }
+    if (!already_allowed && m->provider_policy_revision < UINT64_MAX)
+    {
+        ++m->provider_policy_revision;
+    }
+
+    if (reason && *reason)
+    {
+        msg(M_INFO,
+            "MANAGEMENT: provider credential fingerprint allowed (%s), policy revision %" PRIu64,
+            reason, m->provider_policy_revision);
+    }
+    else
+    {
+        msg(M_INFO,
+            "MANAGEMENT: provider credential fingerprint allowed, policy revision %" PRIu64,
+            m->provider_policy_revision);
+    }
+    return true;
+}
+
+static bool
 management_provider_revoke_principal(void *arg, const char *principal,
                                      const char *reason)
 {
@@ -5698,6 +5752,7 @@ init_management_callback_multi(struct multi_context *m)
         cb.delete_event = management_delete_event;
         cb.n_clients = management_callback_n_clients;
         cb.kill_by_cid = management_kill_by_cid;
+        cb.provider_allow_fingerprint = management_provider_allow_fingerprint;
         cb.provider_revoke_by_cid = management_provider_revoke_by_cid;
         cb.provider_revoke_cert_by_cid =
             management_provider_revoke_cert_by_cid;

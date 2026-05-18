@@ -309,6 +309,62 @@ test_provider_policy_runtime_revocation_list(void **state)
 }
 
 static void
+test_provider_policy_runtime_fingerprint_list_copy(void **state)
+{
+    (void)state;
+
+    struct gc_arena gc = gc_new();
+    struct provider_policy_fingerprint_list source = { 0 };
+    assert_true(provider_policy_fingerprint_list_add(&source, "SHA256:ABCD",
+                                                     &gc));
+    assert_true(provider_policy_fingerprint_list_add(&source, "sha256:abcd",
+                                                     &gc));
+    assert_true(provider_policy_fingerprint_list_add(&source, "SHA256:DCBA",
+                                                     &gc));
+    assert_int_equal(source.count, 2);
+
+    struct provider_policy_fingerprint_list copy = { 0 };
+    assert_true(provider_policy_fingerprint_list_copy_runtime(&copy,
+                                                              &source));
+    assert_int_equal(copy.count, 2);
+    assert_true(provider_policy_fingerprint_list_contains(&copy,
+                                                          "sha256:abcd"));
+    assert_true(provider_policy_fingerprint_list_contains(&copy,
+                                                          "sha256:dcba"));
+
+    gc_free(&gc);
+    assert_true(provider_policy_fingerprint_list_contains(&copy,
+                                                          "sha256:abcd"));
+    provider_policy_fingerprint_list_free_runtime(&copy);
+    assert_false(provider_policy_fingerprint_list_defined(&copy));
+}
+
+static void
+test_provider_policy_runtime_fingerprint_list_copy_rejects_invalid(void **state)
+{
+    (void)state;
+
+    struct provider_policy_fingerprint_entry invalid = {
+        .credential_fingerprint = "bad value",
+    };
+    struct provider_policy_fingerprint_list source = {
+        .head = &invalid,
+        .tail = &invalid,
+        .count = 1,
+    };
+    struct provider_policy_fingerprint_list dest = { 0 };
+    assert_true(provider_policy_fingerprint_list_add_runtime(&dest,
+                                                             "SHA256:KEEP"));
+    assert_false(provider_policy_fingerprint_list_copy_runtime(&dest,
+                                                               &source));
+    assert_int_equal(dest.count, 1);
+    assert_true(provider_policy_fingerprint_list_contains(&dest,
+                                                          "sha256:keep"));
+
+    provider_policy_fingerprint_list_free_runtime(&dest);
+}
+
+static void
 test_provider_policy_revocation_file_missing(void **state)
 {
     (void)state;
@@ -854,6 +910,9 @@ main(void)
         cmocka_unit_test(test_provider_policy_ignores_disabled_push_entry),
         cmocka_unit_test(test_provider_policy_fingerprint_allowlist),
         cmocka_unit_test(test_provider_policy_runtime_revocation_list),
+        cmocka_unit_test(test_provider_policy_runtime_fingerprint_list_copy),
+        cmocka_unit_test(
+            test_provider_policy_runtime_fingerprint_list_copy_rejects_invalid),
         cmocka_unit_test(test_provider_policy_revocation_file_missing),
         cmocka_unit_test(test_provider_policy_revocation_file_load),
         cmocka_unit_test(test_provider_policy_revocation_file_rejects_invalid),
