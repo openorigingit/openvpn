@@ -34,6 +34,22 @@
 
 #include "memdbg.h"
 
+#define PROVIDER_HELPER_EAP_HEADER_SIZE 4
+#define PROVIDER_HELPER_EAP_TYPE_HEADER_SIZE 5
+#define PROVIDER_HELPER_EAP_TLS_HEADER_SIZE 6
+#define PROVIDER_HELPER_EAP_TLS_LENGTH_SIZE 4
+#define PROVIDER_HELPER_EAP_CODE_REQUEST 1
+#define PROVIDER_HELPER_EAP_CODE_RESPONSE 2
+#define PROVIDER_HELPER_EAP_CODE_SUCCESS 3
+#define PROVIDER_HELPER_EAP_CODE_FAILURE 4
+#define PROVIDER_HELPER_EAP_TYPE_TLS 13
+#define PROVIDER_HELPER_EAP_TLS_FLAG_START 0x20
+#define PROVIDER_HELPER_EAP_TLS_FLAG_MORE_FRAGMENTS 0x40
+#define PROVIDER_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED 0x80
+#define PROVIDER_HELPER_EAP_TLS_FLAGS_ALLOWED \
+    (PROVIDER_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED \
+     | PROVIDER_HELPER_EAP_TLS_FLAG_MORE_FRAGMENTS)
+
 void
 provider_helper_runtime_config_default(struct provider_helper_runtime_config *config)
 {
@@ -3429,6 +3445,130 @@ provider_helper_ikev2_validate_ike_auth_request(
         return PROVIDER_HELPER_IKEV2_PARSE_MISSING_REQUIRED_PAYLOAD;
     }
     return PROVIDER_HELPER_IKEV2_PARSE_OK;
+}
+
+enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_parse_eap_tls_fragment(
+    const uint8_t *body,
+    size_t body_len,
+    const struct provider_helper_runtime_config *config,
+    struct provider_helper_ikev2_eap_tls_fragment *fragment)
+{
+    if (fragment)
+    {
+        CLEAR(*fragment);
+    }
+    if (!body || body_len < PROVIDER_HELPER_EAP_TLS_HEADER_SIZE || !config)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    const uint8_t flags = body[5];
+    if ((flags & PROVIDER_HELPER_EAP_TLS_FLAG_START)
+        || (flags & ~PROVIDER_HELPER_EAP_TLS_FLAGS_ALLOWED))
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD;
+    }
+
+    size_t fragment_offset = PROVIDER_HELPER_EAP_TLS_HEADER_SIZE;
+    uint32_t tls_message_len = 0;
+    const bool length_included =
+        (flags & PROVIDER_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED) != 0;
+    const bool more_fragments =
+        (flags & PROVIDER_HELPER_EAP_TLS_FLAG_MORE_FRAGMENTS) != 0;
+    if (length_included)
+    {
+        if (body_len < PROVIDER_HELPER_EAP_TLS_HEADER_SIZE
+                       + PROVIDER_HELPER_EAP_TLS_LENGTH_SIZE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+        tls_message_len = ((uint32_t)body[6] << 24)
+                          | ((uint32_t)body[7] << 16)
+                          | ((uint32_t)body[8] << 8)
+                          | body[9];
+        if (!tls_message_len || tls_message_len > config->max_eap_tls_bytes)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+        fragment_offset += PROVIDER_HELPER_EAP_TLS_LENGTH_SIZE;
+    }
+
+    const size_t fragment_len = body_len - fragment_offset;
+    if (fragment_len > config->max_eap_tls_bytes)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+    if (length_included && fragment_len > tls_message_len)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+    if (more_fragments && fragment_len == 0)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+    if (length_included && more_fragments
+        && fragment_len >= tls_message_len)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+    if (length_included && !more_fragments
+        && fragment_len != tls_message_len)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    if (fragment)
+    {
+        fragment->length_included = length_included;
+        fragment->more_fragments = more_fragments;
+        fragment->tls_message_len = tls_message_len;
+        fragment->fragment_offset = fragment_offset;
+        fragment->fragment_len = fragment_len;
+    }
+    return PROVIDER_HELPER_IKEV2_PARSE_OK;
+}
+
+enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_validate_eap_payload(
+    const uint8_t *body,
+    size_t body_len,
+    const struct provider_helper_runtime_config *config)
+{
+    if (!body || body_len < PROVIDER_HELPER_EAP_HEADER_SIZE)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    const uint8_t code = body[0];
+    const uint16_t eap_len = ((uint16_t)body[2] << 8) | body[3];
+    if (eap_len != body_len)
+    {
+        return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+    }
+
+    switch (code)
+    {
+        case PROVIDER_HELPER_EAP_CODE_RESPONSE:
+            if (body_len < PROVIDER_HELPER_EAP_TYPE_HEADER_SIZE)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+            }
+            if (body[4] != PROVIDER_HELPER_EAP_TYPE_TLS)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD;
+            }
+            return provider_helper_ikev2_parse_eap_tls_fragment(body, body_len,
+                                                          config, NULL);
+
+        case PROVIDER_HELPER_EAP_CODE_REQUEST:
+        case PROVIDER_HELPER_EAP_CODE_SUCCESS:
+        case PROVIDER_HELPER_EAP_CODE_FAILURE:
+            return PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD;
+
+        default:
+            return PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD;
+    }
 }
 
 static bool

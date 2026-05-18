@@ -2,7 +2,8 @@ AUTOMAKE_OPTIONS = foreign
 
 AM_TESTSUITE_SUMMARY_HEADER = ' for $(PACKAGE_STRING) Fuzz Smoke Tests'
 
-check_PROGRAMS = ikev2_parser_fuzzer provider_helper_ipc_fuzzer
+check_PROGRAMS = ikev2_parser_fuzzer provider_helper_ipc_fuzzer \
+	eap_tls_payload_fuzzer
 
 if !CROSS_COMPILING
 TESTS = $(check_PROGRAMS)
@@ -20,4 +21,11 @@ provider_helper_ipc_fuzzer_CFLAGS = \
 	@TEST_CFLAGS@ -DOPENVPN_FUZZ_STANDALONE
 provider_helper_ipc_fuzzer_LDFLAGS = @TEST_LDFLAGS@
 provider_helper_ipc_fuzzer_SOURCES = provider_helper_ipc_fuzzer.c \
+	$(top_srcdir)/src/openvpn/provider_helper_wire.c
+
+eap_tls_payload_fuzzer_CFLAGS = \
+	-I$(top_srcdir)/include -I$(top_srcdir)/src/compat -I$(top_srcdir)/src/openvpn \
+	@TEST_CFLAGS@ -DOPENVPN_FUZZ_STANDALONE
+eap_tls_payload_fuzzer_LDFLAGS = @TEST_LDFLAGS@
+eap_tls_payload_fuzzer_SOURCES = eap_tls_payload_fuzzer.c \
 	$(top_srcdir)/src/openvpn/provider_helper_wire.c

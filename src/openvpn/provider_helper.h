@@ -715,6 +715,14 @@ struct provider_helper_ikev2_payload_summary {
     size_t cookie_len;
 };
 
+struct provider_helper_ikev2_eap_tls_fragment {
+    bool length_included;
+    bool more_fragments;
+    uint32_t tls_message_len;
+    size_t fragment_offset;
+    size_t fragment_len;
+};
+
 struct provider_helper_ikev2_sa_selection {
     bool selected;
     uint8_t proposal_number;
@@ -1015,6 +1023,17 @@ provider_helper_ikev2_select_child_sa_proposal(
     size_t packet_len,
     const struct provider_helper_ikev2_payload_summary *summary,
     struct provider_helper_ikev2_child_sa_selection *selection);
+enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_parse_eap_tls_fragment(
+    const uint8_t *body,
+    size_t body_len,
+    const struct provider_helper_runtime_config *config,
+    struct provider_helper_ikev2_eap_tls_fragment *fragment);
+enum provider_helper_ikev2_parse_result
+provider_helper_ikev2_validate_eap_payload(
+    const uint8_t *body,
+    size_t body_len,
+    const struct provider_helper_runtime_config *config);
 bool provider_helper_ikev2_build_cookie_response(
     uint8_t *dst,
     size_t dst_len,
