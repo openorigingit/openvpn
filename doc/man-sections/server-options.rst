@@ -212,6 +212,15 @@ fast hardware. SSL/TLS authentication must be used in this mode.
   management command ``provider-revoke-cert`` appends to this file when it is
   configured.
 
+--experimental-ikev2-helper-dpd-idle-seconds n
+  Send an IKEv2 Dead Peer Detection liveness probe after ``n`` seconds without
+  peer activity. If unset, the helper uses its compiled default.
+
+--experimental-ikev2-helper-dpd-retry-seconds n
+  Retransmit an unanswered IKEv2 Dead Peer Detection liveness probe after
+  ``n`` seconds. The helper uses the runtime retransmit limit before closing
+  the provider session through OpenVPN-owned policy.
+
 --experimental-ikev2-helper-apply-xfrm
   Allow the experimental IKEv2 helper to install OpenVPN-authorized Linux XFRM
   state and policy for IKEv2 provider sessions. Without this option, the helper

@@ -481,6 +481,8 @@ struct options
     const char *ikev2_helper_revocation_file;
     const char *ikev2_helper_principal_revocation_file;
     const char *ikev2_helper_cert_revocation_file;
+    int ikev2_helper_dpd_idle_seconds;
+    int ikev2_helper_dpd_retry_seconds;
     bool ikev2_helper_apply_xfrm;
     bool ikev2_helper_full_tunnel;
     struct provider_policy_fingerprint_list ikev2_helper_allowed_fingerprints;

@@ -509,6 +509,10 @@ provider_helper_print_status(const struct provider_helper_supervisor *supervisor
                       supervisor->runtime_config.flags);
         status_printf(so, "Runtime Apply XFRM,%s",
                       apply_xfrm ? "enabled" : "disabled");
+        status_printf(so, "DPD Idle Seconds,%u",
+                      supervisor->runtime_config.dpd_idle_seconds);
+        status_printf(so, "DPD Retry Seconds,%u",
+                      supervisor->runtime_config.dpd_retry_seconds);
     }
     else if (version == 2 || version == 3)
     {
@@ -516,10 +520,11 @@ provider_helper_print_status(const struct provider_helper_supervisor *supervisor
         status_printf(so,
                       "HEADER%cPROVIDER_HELPER%cState%cPID%cRestart Count%c"
                       "Restart Backoff%cRestart Delay%cNegotiated Features%c"
-                      "Runtime Flags%cApply XFRM",
-                      sep, sep, sep, sep, sep, sep, sep, sep, sep);
+                      "Runtime Flags%cApply XFRM%cDPD Idle Seconds%c"
+                      "DPD Retry Seconds",
+                      sep, sep, sep, sep, sep, sep, sep, sep, sep, sep, sep);
         status_printf(so, "PROVIDER_HELPER%c%s%c%ld%c%u%c%u%c%u%c0x%" PRIx64
-                      "%c0x%" PRIx32 "%c%d",
+                      "%c0x%" PRIx32 "%c%d%c%u%c%u",
                       sep, provider_helper_state_name(supervisor->state),
                       sep, pid,
                       sep, supervisor->restart_count,
@@ -527,7 +532,9 @@ provider_helper_print_status(const struct provider_helper_supervisor *supervisor
                       sep, restart_delay,
                       sep, supervisor->negotiated_features,
                       sep, supervisor->runtime_config.flags,
-                      sep, apply_xfrm ? 1 : 0);
+                      sep, apply_xfrm ? 1 : 0,
+                      sep, supervisor->runtime_config.dpd_idle_seconds,
+                      sep, supervisor->runtime_config.dpd_retry_seconds);
     }
     else
     {

@@ -1438,6 +1438,16 @@ multi_spawn_ikev2_helper(struct context *t, bool fatal)
     {
         m->provider_helper.runtime_config.flags |= PROVIDER_HELPER_CONFIG_APPLY_XFRM;
     }
+    if (t->options.ikev2_helper_dpd_idle_seconds)
+    {
+        m->provider_helper.runtime_config.dpd_idle_seconds =
+            (uint32_t)t->options.ikev2_helper_dpd_idle_seconds;
+    }
+    if (t->options.ikev2_helper_dpd_retry_seconds)
+    {
+        m->provider_helper.runtime_config.dpd_retry_seconds =
+            (uint32_t)t->options.ikev2_helper_dpd_retry_seconds;
+    }
     if (!multi_open_ikev2_helper_listeners(m, fatal))
     {
         return false;

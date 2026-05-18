@@ -995,6 +995,8 @@ test_provider_helper_status_output(void **state)
                                          PROVIDER_HELPER_STATE_READY);
     supervisor.negotiated_features = PROVIDER_HELPER_FEATURE_IKEV2_BASE;
     supervisor.runtime_config.flags = PROVIDER_HELPER_CONFIG_APPLY_XFRM;
+    supervisor.runtime_config.dpd_idle_seconds = 17;
+    supervisor.runtime_config.dpd_retry_seconds = 5;
     supervisor.restart_count = 2;
     supervisor.restart_backoff_seconds = 4;
     supervisor.next_restart_time = time(NULL) + 3;
@@ -1032,7 +1034,7 @@ test_provider_helper_status_output(void **state)
     assert_non_null(strstr(capture.data,
                            "PROVIDER_HELPER,ready,0,2,4,"));
 #endif
-    assert_non_null(strstr(capture.data, ",0x1,0x4,1"));
+    assert_non_null(strstr(capture.data, ",0x1,0x4,1,17,5"));
     assert_non_null(strstr(capture.data,
                            "PROVIDER_HELPER_STAT,datagrams_rx,11"));
     assert_non_null(strstr(capture.data,
