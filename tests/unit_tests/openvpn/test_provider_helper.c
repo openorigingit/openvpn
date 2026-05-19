@@ -11543,7 +11543,7 @@ test_provider_helper_spawn_ikev2_auth_allow_unsupported(void **state)
     struct provider_helper_supervisor supervisor;
     provider_helper_supervisor_init(&supervisor);
     supervisor.runtime_config.cookie_threshold = 1;
-    supervisor.runtime_config.max_half_open_sas = 1;
+    supervisor.runtime_config.max_half_open_sas = 2;
     supervisor.runtime_config.max_half_open_sas_per_source = 1;
     supervisor.runtime_config.half_open_timeout_seconds = 1;
     supervisor.runtime_config.flags |=
