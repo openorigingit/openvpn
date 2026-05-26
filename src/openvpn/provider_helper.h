@@ -276,6 +276,9 @@ enum provider_helper_ikev2_payload_type {
 #define PROVIDER_HELPER_IKEV2_NOTIFY_UPDATE_SA_ADDRESSES 16400
 #define PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE2 16401
 #define PROVIDER_HELPER_IKEV2_NOTIFY_NO_NATS_ALLOWED 16402
+#define PROVIDER_HELPER_IKEV2_NOTIFY_FRAGMENTATION_SUPPORTED 16430
+#define PROVIDER_HELPER_IKEV2_NOTIFY_SIGNATURE_HASH_ALGORITHMS 16431
+#define PROVIDER_HELPER_IKEV2_HASH_ALGORITHM_SHA2_256 2
 
 enum provider_helper_ikev2_parse_result {
     PROVIDER_HELPER_IKEV2_PARSE_OK = 0,
@@ -306,6 +309,7 @@ enum provider_helper_auth_decision {
 };
 
 enum provider_helper_server_auth_method {
+    PROVIDER_HELPER_SERVER_AUTH_METHOD_ECDSA_SHA256_P256 = 9,
     PROVIDER_HELPER_SERVER_AUTH_METHOD_DIGITAL_SIGNATURE = 14,
 };
 
@@ -667,6 +671,9 @@ struct provider_helper_ikev2_payload_summary {
     bool saw_sk;
     bool saw_cp;
     bool saw_cookie_notify;
+    bool saw_fragmentation_supported_notify;
+    bool saw_signature_hash_algorithms_notify;
+    bool signature_hash_sha256_supported;
     uint32_t sa_count;
     uint32_t ke_count;
     uint32_t nonce_count;
@@ -1063,6 +1070,7 @@ bool provider_helper_ikev2_build_sa_init_response(
     size_t responder_ke_len,
     const uint8_t *responder_nonce,
     size_t responder_nonce_len,
+    bool advertise_signature_hash_algorithms,
     bool force_natt,
     size_t *out_len);
 bool provider_helper_ikev2_build_child_sa_response_plaintext(

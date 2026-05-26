@@ -42,6 +42,7 @@
 #define PROVIDER_HELPER_EAP_CODE_RESPONSE 2
 #define PROVIDER_HELPER_EAP_CODE_SUCCESS 3
 #define PROVIDER_HELPER_EAP_CODE_FAILURE 4
+#define PROVIDER_HELPER_EAP_TYPE_IDENTITY 1
 #define PROVIDER_HELPER_EAP_TYPE_TLS 13
 #define PROVIDER_HELPER_EAP_TLS_FLAG_START 0x20
 #define PROVIDER_HELPER_EAP_TLS_FLAG_MORE_FRAGMENTS 0x40
@@ -903,7 +904,9 @@ provider_helper_server_sign_request_valid(
         return false;
     }
     if (request->auth_method
-        != PROVIDER_HELPER_SERVER_AUTH_METHOD_DIGITAL_SIGNATURE)
+        != PROVIDER_HELPER_SERVER_AUTH_METHOD_DIGITAL_SIGNATURE
+        && request->auth_method
+               != PROVIDER_HELPER_SERVER_AUTH_METHOD_ECDSA_SHA256_P256)
     {
         provider_helper_config_reason(reason, reason_size,
                                       "unsupported server auth method");
@@ -2474,6 +2477,39 @@ provider_helper_ikev2_record_notify_payload(
         summary->cookie_offset = pos + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE;
         summary->cookie_len = cookie_len;
     }
+    else if (protocol_id == 0 && spi_size == 0
+             && notify_type
+                    == PROVIDER_HELPER_IKEV2_NOTIFY_FRAGMENTATION_SUPPORTED)
+    {
+        if (payload_len != PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+        summary->saw_fragmentation_supported_notify = true;
+    }
+    else if (protocol_id == 0 && spi_size == 0
+             && notify_type
+                    == PROVIDER_HELPER_IKEV2_NOTIFY_SIGNATURE_HASH_ALGORITHMS)
+    {
+        const size_t data_offset =
+            pos + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE;
+        const size_t data_len =
+            payload_len - PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE;
+        if (!data_len || (data_len % 2) != 0)
+        {
+            return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+        }
+        summary->saw_signature_hash_algorithms_notify = true;
+        for (size_t i = 0; i < data_len; i += 2)
+        {
+            const uint16_t hash = ((uint16_t)packet[data_offset + i] << 8)
+                                  | packet[data_offset + i + 1];
+            if (hash == PROVIDER_HELPER_IKEV2_HASH_ALGORITHM_SHA2_256)
+            {
+                summary->signature_hash_sha256_supported = true;
+            }
+        }
+    }
 
     return PROVIDER_HELPER_IKEV2_PARSE_OK;
 }
@@ -3554,6 +3590,10 @@ provider_helper_ikev2_validate_eap_payload(
             {
                 return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
             }
+            if (body[4] == PROVIDER_HELPER_EAP_TYPE_IDENTITY)
+            {
+                return PROVIDER_HELPER_IKEV2_PARSE_OK;
+            }
             if (body[4] != PROVIDER_HELPER_EAP_TYPE_TLS)
             {
                 return PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD;
@@ -4035,6 +4075,7 @@ provider_helper_ikev2_build_sa_init_response(
     size_t responder_ke_len,
     const uint8_t *responder_nonce,
     size_t responder_nonce_len,
+    bool advertise_signature_hash_algorithms,
     bool force_natt,
     size_t *out_len)
 {
@@ -4079,11 +4120,17 @@ provider_helper_ikev2_build_sa_init_response(
     const uint16_t natt_notify_payload_len =
         PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE
         + PROVIDER_HELPER_IKEV2_NAT_DETECTION_HASH_BYTES;
+    const uint16_t signature_hash_notify_payload_len =
+        advertise_signature_hash_algorithms
+        ? PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE + 2
+        : 0;
     const uint16_t natt_payloads_len =
         force_natt ? (uint16_t)(2 * natt_notify_payload_len) : 0;
     const uint32_t ike_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE
                              + sa_payload_len + ke_payload_len
-                             + nonce_payload_len + natt_payloads_len;
+                             + nonce_payload_len
+                             + signature_hash_notify_payload_len
+                             + natt_payloads_len;
     const size_t offset = request->natt
                           ? PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE : 0;
     const size_t packet_len = offset + ike_len;
@@ -4133,12 +4180,25 @@ provider_helper_ikev2_build_sa_init_response(
     memcpy(pos, responder_ke, responder_ke_len);
     pos += responder_ke_len;
 
-    *pos++ = force_natt ? PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY
-                        : PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+    *pos++ = advertise_signature_hash_algorithms || force_natt
+             ? PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY
+             : PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
     *pos++ = 0;
     provider_helper_wire_write_u16(&pos, nonce_payload_len);
     memcpy(pos, responder_nonce, responder_nonce_len);
     pos += responder_nonce_len;
+
+    if (advertise_signature_hash_algorithms)
+    {
+        const uint8_t signature_hash_algorithms[] = {
+            0x00, PROVIDER_HELPER_IKEV2_HASH_ALGORITHM_SHA2_256,
+        };
+        provider_helper_ikev2_write_notify(
+            &pos, force_natt ? PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY
+                             : PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+            PROVIDER_HELPER_IKEV2_NOTIFY_SIGNATURE_HASH_ALGORITHMS,
+            signature_hash_algorithms, sizeof(signature_hash_algorithms));
+    }
 
     if (force_natt)
     {
