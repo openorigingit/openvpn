@@ -368,6 +368,10 @@ struct ikev2_helper_ike_sa {
     size_t claimed_principal_len;
     uint32_t claimed_principal_id_type;
     char claimed_principal[IKEV2_HELPER_CLAIMED_PRINCIPAL_SIZE];
+    bool initiator_id_ready;
+    uint32_t initiator_id_type;
+    size_t initiator_id_data_len;
+    uint8_t initiator_id_data[IKEV2_HELPER_CLAIMED_PRINCIPAL_SIZE];
     size_t credential_fingerprint_len;
     char credential_fingerprint[PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE];
     size_t cert_serial_len;
@@ -3582,21 +3586,21 @@ ikev2_helper_build_initiator_id_body(
     {
         *id_body_len = 0;
     }
-    if (!sa || !sa->claimed_principal_ready || !sa->claimed_principal_len
-        || sa->claimed_principal_id_type > UINT8_MAX
+    if (!sa || !sa->initiator_id_ready || !sa->initiator_id_data_len
+        || sa->initiator_id_type > UINT8_MAX
         || !id_body || !id_body_len
-        || id_body_size < 4u + sa->claimed_principal_len)
+        || id_body_size < 4u + sa->initiator_id_data_len)
     {
         return false;
     }
 
     uint8_t *pos = id_body;
-    *pos++ = (uint8_t)sa->claimed_principal_id_type;
+    *pos++ = (uint8_t)sa->initiator_id_type;
     *pos++ = 0;
     *pos++ = 0;
     *pos++ = 0;
-    memcpy(pos, sa->claimed_principal, sa->claimed_principal_len);
-    pos += sa->claimed_principal_len;
+    memcpy(pos, sa->initiator_id_data, sa->initiator_id_data_len);
+    pos += sa->initiator_id_data_len;
     *id_body_len = (size_t)(pos - id_body);
     return true;
 }
@@ -7289,8 +7293,13 @@ ikev2_helper_extract_claimed_idi(
     sa->claimed_principal_ready = false;
     sa->claimed_principal_len = 0;
     sa->claimed_principal_id_type = 0;
+    sa->initiator_id_ready = false;
+    sa->initiator_id_type = 0;
+    sa->initiator_id_data_len = 0;
     ikev2_helper_secure_zero(sa->claimed_principal,
                              sizeof(sa->claimed_principal));
+    ikev2_helper_secure_zero(sa->initiator_id_data,
+                             sizeof(sa->initiator_id_data));
 
     if (!plaintext || !summary || !summary->saw_idi
         || summary->idi_count != 1
@@ -7303,9 +7312,7 @@ ikev2_helper_extract_claimed_idi(
 
     const uint8_t *idi = plaintext + summary->idi_offset;
     const uint8_t id_type = idi[0];
-    if ((id_type != PROVIDER_HELPER_IKEV2_ID_FQDN
-         && id_type != PROVIDER_HELPER_IKEV2_ID_RFC822)
-        || idi[1] || idi[2] || idi[3])
+    if (idi[1] || idi[2] || idi[3])
     {
         return false;
     }
@@ -7313,7 +7320,43 @@ ikev2_helper_extract_claimed_idi(
     const uint8_t *id_data = idi + 4;
     const size_t id_data_len = summary->idi_len - 4;
     if (id_data_len == 0
-        || id_data_len >= sizeof(sa->claimed_principal))
+        || id_data_len >= sizeof(sa->initiator_id_data))
+    {
+        return false;
+    }
+
+    if (id_type == PROVIDER_HELPER_IKEV2_ID_IPV4_ADDR)
+    {
+        if (id_data_len != 4)
+        {
+            return false;
+        }
+        const int principal_len =
+            snprintf(sa->claimed_principal, sizeof(sa->claimed_principal),
+                     "ipv4:%u.%u.%u.%u", (unsigned)id_data[0],
+                     (unsigned)id_data[1], (unsigned)id_data[2],
+                     (unsigned)id_data[3]);
+        if (principal_len < 0
+            || (size_t)principal_len >= sizeof(sa->claimed_principal))
+        {
+            return false;
+        }
+        memcpy(sa->initiator_id_data, id_data, id_data_len);
+        sa->initiator_id_data_len = id_data_len;
+        sa->initiator_id_type = id_type;
+        sa->initiator_id_ready = true;
+        sa->claimed_principal_len = (size_t)principal_len;
+        sa->claimed_principal_id_type = PROVIDER_HELPER_IKEV2_ID_FQDN;
+        sa->claimed_principal_ready = true;
+        return true;
+    }
+
+    if (id_type != PROVIDER_HELPER_IKEV2_ID_FQDN
+        && id_type != PROVIDER_HELPER_IKEV2_ID_RFC822)
+    {
+        return false;
+    }
+    if (id_data_len >= sizeof(sa->claimed_principal))
     {
         return false;
     }
@@ -7324,7 +7367,10 @@ ikev2_helper_extract_claimed_idi(
             return false;
         }
     }
-
+    memcpy(sa->initiator_id_data, id_data, id_data_len);
+    sa->initiator_id_data_len = id_data_len;
+    sa->initiator_id_type = id_type;
+    sa->initiator_id_ready = true;
     memcpy(sa->claimed_principal, id_data, id_data_len);
     sa->claimed_principal[id_data_len] = '\0';
     sa->claimed_principal_len = id_data_len;

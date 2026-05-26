@@ -3209,7 +3209,7 @@ test_make_encrypted_ike_auth_plaintext_packet(
 }
 
 static size_t
-test_make_encrypted_ike_auth_message_id_flags_packet(
+test_make_encrypted_ike_auth_message_id_flags_id_packet(
     uint8_t *packet,
     size_t packet_size,
     uint64_t initiator_spi,
@@ -3221,18 +3221,28 @@ test_make_encrypted_ike_auth_message_id_flags_packet(
     uint8_t eap_code,
     uint8_t eap_flags,
     uint32_t message_id,
+    uint8_t id_type,
+    const uint8_t *id_data,
+    size_t id_data_len,
     bool mixed_traffic_selectors)
 {
     uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     CLEAR(plaintext);
+    assert_non_null(id_data);
+    assert_true(id_data_len > 0);
+    assert_true(id_data_len <= UINT16_MAX
+                - PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE - 4);
     const uint8_t next_payload =
         cert_der ? PROVIDER_HELPER_IKEV2_PAYLOAD_CERT
                  : PROVIDER_HELPER_IKEV2_PAYLOAD_CP;
+    const uint16_t id_payload_len =
+        (uint16_t)(PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 4
+                   + id_data_len);
     size_t plaintext_len = 0;
     plaintext_len = test_add_ikev2_payload(plaintext, plaintext_len,
-                                           next_payload, 9, 0);
-    plaintext[4] = PROVIDER_HELPER_IKEV2_ID_FQDN;
-    plaintext[8] = 'a';
+                                           next_payload, id_payload_len, 0);
+    plaintext[4] = id_type;
+    memcpy(plaintext + 8, id_data, id_data_len);
     if (cert_der)
     {
         assert_true(cert_der_len > 0);
@@ -3383,6 +3393,29 @@ test_make_encrypted_ike_auth_message_id_flags_packet(
 }
 
 static size_t
+test_make_encrypted_ike_auth_message_id_flags_packet(
+    uint8_t *packet,
+    size_t packet_size,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt,
+    bool malformed_inner,
+    const uint8_t *cert_der,
+    size_t cert_der_len,
+    uint8_t eap_code,
+    uint8_t eap_flags,
+    uint32_t message_id,
+    bool mixed_traffic_selectors)
+{
+    const uint8_t id_data[] = { 'a' };
+    return test_make_encrypted_ike_auth_message_id_flags_id_packet(
+        packet, packet_size, initiator_spi, material, natt, malformed_inner,
+        cert_der, cert_der_len, eap_code, eap_flags, message_id,
+        PROVIDER_HELPER_IKEV2_ID_FQDN, id_data, sizeof(id_data),
+        mixed_traffic_selectors);
+}
+
+static size_t
 test_make_encrypted_ike_auth_message_id_packet(
     uint8_t *packet,
     size_t packet_size,
@@ -3417,16 +3450,20 @@ test_make_encrypted_ike_auth_packet(
 }
 
 static size_t
-test_make_encrypted_ike_auth_mixed_ts_packet(
+test_make_encrypted_ike_auth_mixed_ts_id_packet(
     uint8_t *packet,
     size_t packet_size,
     uint64_t initiator_spi,
     const struct test_ikev2_sa_init_response_material *material,
-    bool natt)
+    bool natt,
+    uint8_t id_type,
+    const uint8_t *id_data,
+    size_t id_data_len)
 {
-    return test_make_encrypted_ike_auth_message_id_flags_packet(
+    return test_make_encrypted_ike_auth_message_id_flags_id_packet(
         packet, packet_size, initiator_spi, material, natt, false, NULL, 0,
-        TEST_IKEV2_EAP_CODE_RESPONSE, 0x80, 1, true);
+        TEST_IKEV2_EAP_CODE_RESPONSE, 0x80, 1, id_type, id_data,
+        id_data_len, true);
 }
 
 static size_t
@@ -3487,7 +3524,7 @@ test_make_encrypted_ike_auth_eap_response_fragment_packet(
 }
 
 static size_t
-test_make_encrypted_ike_auth_final_auth_packet(
+test_make_encrypted_ike_auth_final_auth_id_packet(
     uint8_t *packet,
     size_t packet_size,
     uint64_t initiator_spi,
@@ -3495,14 +3532,15 @@ test_make_encrypted_ike_auth_final_auth_packet(
     bool natt,
     uint32_t message_id,
     const uint8_t *eap_tls_msk,
-    size_t eap_tls_msk_len)
+    size_t eap_tls_msk_len,
+    uint8_t id_type,
+    const uint8_t *id_data,
+    size_t id_data_len)
 {
     uint8_t plaintext[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     uint8_t sk_pi[TEST_IKEV2_PRF_SHA256_BYTES];
     uint8_t ike_sa_init[PROVIDER_HELPER_IPC_MAX_MESSAGE];
-    uint8_t id_body[5] = {
-        PROVIDER_HELPER_IKEV2_ID_FQDN, 0, 0, 0, 'a',
-    };
+    uint8_t id_body[PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE + 4];
     uint8_t id_hash[TEST_IKEV2_PRF_SHA256_BYTES];
     uint8_t signed_octets[PROVIDER_HELPER_IPC_MAX_MESSAGE
                           + TEST_IKEV2_PRF_SHA256_BYTES
@@ -3517,15 +3555,22 @@ test_make_encrypted_ike_auth_final_auth_packet(
     CLEAR(signed_octets);
     CLEAR(auth_key);
     CLEAR(auth_data);
+    CLEAR(id_body);
     assert_non_null(eap_tls_msk);
     assert_int_equal(eap_tls_msk_len, TEST_IKEV2_EAP_TLS_MSK_BYTES);
+    assert_non_null(id_data);
+    assert_true(id_data_len > 0);
+    assert_true(id_data_len <= sizeof(id_body) - 4);
+    id_body[0] = id_type;
+    memcpy(id_body + 4, id_data, id_data_len);
+    const size_t id_body_len = 4 + id_data_len;
     assert_true(test_derive_ike_auth_keymat(initiator_spi, material, NULL, 0,
                                             NULL, 0, sk_pi, sizeof(sk_pi)));
     const size_t ike_sa_init_len =
         test_make_ike_sa_init_packet(ike_sa_init, sizeof(ike_sa_init));
     test_write_be64(ike_sa_init, initiator_spi);
     assert_true(test_hmac_sha256(sk_pi, sizeof(sk_pi), id_body,
-                                 sizeof(id_body), id_hash,
+                                 id_body_len, id_hash,
                                  sizeof(id_hash)));
     assert_true(ike_sa_init_len + material->responder_nonce_len
                 + sizeof(id_hash) <= sizeof(signed_octets));
@@ -3833,16 +3878,20 @@ test_send_ikev2_encrypted_ike_auth_datagram_from(
 }
 
 static void
-test_send_ikev2_encrypted_ike_auth_mixed_ts_datagram_from(
+test_send_ikev2_encrypted_ike_auth_mixed_ts_id_datagram_from(
     int fd,
     uint16_t port,
     uint64_t initiator_spi,
     const struct test_ikev2_sa_init_response_material *material,
-    bool natt)
+    bool natt,
+    uint8_t id_type,
+    const uint8_t *id_data,
+    size_t id_data_len)
 {
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
-    const size_t packet_len = test_make_encrypted_ike_auth_mixed_ts_packet(
-        packet, sizeof(packet), initiator_spi, material, natt);
+    const size_t packet_len = test_make_encrypted_ike_auth_mixed_ts_id_packet(
+        packet, sizeof(packet), initiator_spi, material, natt, id_type,
+        id_data, id_data_len);
 
     struct sockaddr_in addr;
     CLEAR(addr);
@@ -3885,6 +3934,55 @@ test_send_ikev2_encrypted_ike_auth_eap_response_fragment_datagram_from(
     assert_int_equal(sendto(fd, packet, packet_len, 0,
                             (struct sockaddr *)&addr, sizeof(addr)),
                      packet_len);
+}
+
+static void
+test_send_ikev2_encrypted_ike_auth_final_auth_id_datagram_from(
+    int fd,
+    uint16_t port,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt,
+    uint32_t message_id,
+    const uint8_t *eap_tls_msk,
+    size_t eap_tls_msk_len,
+    uint8_t id_type,
+    const uint8_t *id_data,
+    size_t id_data_len)
+{
+    uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
+    const size_t packet_len =
+        test_make_encrypted_ike_auth_final_auth_id_packet(
+            packet, sizeof(packet), initiator_spi, material, natt, message_id,
+            eap_tls_msk, eap_tls_msk_len, id_type, id_data, id_data_len);
+
+    struct sockaddr_in addr;
+    CLEAR(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+
+    assert_int_equal(sendto(fd, packet, packet_len, 0,
+                            (struct sockaddr *)&addr, sizeof(addr)),
+                     packet_len);
+}
+
+static size_t
+test_make_encrypted_ike_auth_final_auth_packet(
+    uint8_t *packet,
+    size_t packet_size,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt,
+    uint32_t message_id,
+    const uint8_t *eap_tls_msk,
+    size_t eap_tls_msk_len)
+{
+    const uint8_t id_data[] = { 'a' };
+    return test_make_encrypted_ike_auth_final_auth_id_packet(
+        packet, packet_size, initiator_spi, material, natt, message_id,
+        eap_tls_msk, eap_tls_msk_len, PROVIDER_HELPER_IKEV2_ID_FQDN,
+        id_data, sizeof(id_data));
 }
 
 static void
@@ -10631,8 +10729,11 @@ test_provider_helper_spawn_ikev2_eap_tls_auth_allow_success(void **state)
     assert_true(test_recv_ikev2_sa_init_response_material(
                     response_fd, initiator_spi, &sa_init_material) != 0);
 
-    test_send_ikev2_encrypted_ike_auth_mixed_ts_datagram_from(
-        response_fd, natt_port, initiator_spi, &sa_init_material, true);
+    const uint8_t windows_ipv4_id[] = { 127, 0, 0, 15 };
+    test_send_ikev2_encrypted_ike_auth_mixed_ts_id_datagram_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true,
+        PROVIDER_HELPER_IKEV2_ID_IPV4_ADDR, windows_ipv4_id,
+        sizeof(windows_ipv4_id));
     for (int i = 0; i < 100 && sign_state.calls < 1; ++i)
     {
         provider_helper_process_event(&supervisor);
@@ -10761,8 +10862,10 @@ test_provider_helper_spawn_ikev2_eap_tls_auth_allow_success(void **state)
     assert_int_equal(auth_state.calls, 1);
     assert_int_equal(auth_state.request.profile,
                      PROVIDER_HELPER_AUTH_PROFILE_EAP_TLS);
-    assert_int_equal(auth_state.request.claimed_principal_len, 1);
-    assert_memory_equal(auth_state.request.claimed_principal, "a", 1);
+    assert_int_equal(auth_state.request.claimed_principal_len,
+                     strlen("ipv4:127.0.0.15"));
+    assert_memory_equal(auth_state.request.claimed_principal,
+                        "ipv4:127.0.0.15", strlen("ipv4:127.0.0.15"));
     assert_int_equal(auth_state.request.credential_fingerprint_len, 71);
     assert_memory_equal(auth_state.request.credential_fingerprint, "sha256:",
                         strlen("sha256:"));
@@ -10780,9 +10883,11 @@ test_provider_helper_spawn_ikev2_eap_tls_auth_allow_success(void **state)
         provider_helper_process_event(&supervisor);
         usleep(10000);
     }
-    test_send_ikev2_encrypted_ike_auth_final_auth_datagram_from(
+    test_send_ikev2_encrypted_ike_auth_final_auth_id_datagram_from(
         response_fd, natt_port, initiator_spi, &sa_init_material, true, 5,
-        eap_tls_msk, sizeof(eap_tls_msk));
+        eap_tls_msk, sizeof(eap_tls_msk),
+        PROVIDER_HELPER_IKEV2_ID_IPV4_ADDR, windows_ipv4_id,
+        sizeof(windows_ipv4_id));
     usleep(10000);
     (void)test_recv_ikev2_encrypted_final_auth_child_sa_response(
         response_fd, initiator_spi, &sa_init_material, 5, &xfrm_lease, true);
