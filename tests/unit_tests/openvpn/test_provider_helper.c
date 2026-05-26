@@ -1801,6 +1801,7 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
 #define TEST_IKEV2_EAP_CODE_REQUEST 1
 #define TEST_IKEV2_EAP_CODE_RESPONSE 2
 #define TEST_IKEV2_EAP_CODE_SUCCESS 3
+#define TEST_IKEV2_EAP_TYPE_IDENTITY 1
 #define TEST_IKEV2_EAP_TYPE_TLS 13
 #define TEST_IKEV2_AUTH_METHOD_SHARED_KEY_MIC 2
 #define TEST_IKEV2_AUTH_KEY_PAD "Key Pad for IKEv2"
@@ -5168,16 +5169,15 @@ test_recv_ikev2_encrypted_server_auth_response_ex(
     }
 
     const uint16_t eap_len =
-        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 6;
+        PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE + 5;
     assert_int_equal(payload_len, pos + eap_len);
     assert_int_equal(plaintext[pos], PROVIDER_HELPER_IKEV2_PAYLOAD_NONE);
     assert_int_equal(plaintext[pos + 1], 0);
     assert_int_equal(test_read_be16(plaintext + pos + 2), eap_len);
     assert_int_equal(plaintext[pos + 4], TEST_IKEV2_EAP_CODE_REQUEST);
     assert_int_equal(plaintext[pos + 5], 1);
-    assert_int_equal(test_read_be16(plaintext + pos + 6), 6);
-    assert_int_equal(plaintext[pos + 8], TEST_IKEV2_EAP_TYPE_TLS);
-    assert_int_equal(plaintext[pos + 9], 0x20);
+    assert_int_equal(test_read_be16(plaintext + pos + 6), 5);
+    assert_int_equal(plaintext[pos + 8], TEST_IKEV2_EAP_TYPE_IDENTITY);
 
     secure_memzero(plaintext, sizeof(plaintext));
 }
