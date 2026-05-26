@@ -326,6 +326,14 @@ struct ikev2_helper_retired_ike_sa {
     time_t retired;
 };
 
+struct ikev2_helper_retired_child_sa {
+    bool active;
+    uint32_t initiator_spi;
+    uint32_t responder_spi;
+    uint32_t rekey_message_id;
+    time_t retired;
+};
+
 struct ikev2_helper_ike_sa {
     bool active;
     uint64_t initiator_spi;
@@ -433,6 +441,7 @@ struct ikev2_helper_ike_sa {
     bool initial_cp_request_ready;
     bool initial_cp_requested_ipv4_address;
     struct ikev2_helper_child_sa_scaffold child_sa;
+    struct ikev2_helper_retired_child_sa retired_child_sa;
     time_t created;
     time_t updated;
     struct provider_helper_ikev2_sa_selection selection;
@@ -6190,8 +6199,11 @@ ikev2_helper_validate_child_sa_transforms(const uint8_t *body,
         {
             return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
         }
+        const bool transform_id_valid =
+            transform_id
+            || transform_type == PROVIDER_HELPER_IKEV2_TRANSFORM_ESN;
         if (transform_len < PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
-            || transform_len > end - pos || !transform_id
+            || transform_len > end - pos || !transform_id_valid
             || !ikev2_helper_child_transform_type_supported(transform_type))
         {
             return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
@@ -6585,32 +6597,6 @@ ikev2_helper_read_single_ipv4_ts_range(
 }
 
 static bool
-ikev2_helper_ipv4_ts_allowed(
-    const struct ikev2_helper_ipv4_ts_range *requested,
-    uint32_t allowed_start_addr,
-    uint32_t allowed_end_addr,
-    uint32_t allowed_start_port,
-    uint32_t allowed_end_port,
-    uint32_t allowed_protocol_id)
-{
-    if (!requested || allowed_start_addr > allowed_end_addr
-        || allowed_start_port > allowed_end_port || allowed_end_port > 65535
-        || allowed_protocol_id > 255)
-    {
-        return false;
-    }
-    if (requested->start_addr < allowed_start_addr
-        || requested->end_addr > allowed_end_addr
-        || requested->start_port < allowed_start_port
-        || requested->end_port > allowed_end_port)
-    {
-        return false;
-    }
-    return allowed_protocol_id == 0
-           || requested->ip_protocol_id == (uint8_t)allowed_protocol_id;
-}
-
-static bool
 ikev2_helper_ipv4_ts_intersect(
     const struct ikev2_helper_ipv4_ts_range *requested,
     uint32_t allowed_start_addr,
@@ -6707,27 +6693,40 @@ ikev2_helper_child_ts_for_xfrm_lease(
         return false;
     }
 
-    if (!ikev2_helper_ipv4_ts_allowed(
+    struct provider_xfrm_ipv4_selector narrowed_local_ts;
+    struct provider_xfrm_ipv4_selector narrowed_remote_ts;
+    if (!ikev2_helper_ipv4_ts_intersect(
             &tsi, lease->remote_ts_start_ipv4, lease->remote_ts_end_ipv4,
             lease->remote_ts_start_port, lease->remote_ts_end_port,
-            lease->ip_protocol_id)
-        || !ikev2_helper_ipv4_ts_allowed(
+            lease->ip_protocol_id, &narrowed_remote_ts)
+        || !ikev2_helper_ipv4_ts_intersect(
             &tsr, lease->local_ts_start_ipv4, lease->local_ts_end_ipv4,
             lease->local_ts_start_port, lease->local_ts_end_port,
-            lease->ip_protocol_id))
+            lease->ip_protocol_id, &narrowed_local_ts))
     {
         return false;
+    }
+    if (narrowed_remote_ts.ip_protocol_id && narrowed_local_ts.ip_protocol_id
+        && narrowed_remote_ts.ip_protocol_id != narrowed_local_ts.ip_protocol_id)
+    {
+        return false;
+    }
+    if (narrowed_remote_ts.ip_protocol_id)
+    {
+        narrowed_local_ts.ip_protocol_id = narrowed_remote_ts.ip_protocol_id;
+    }
+    else
+    {
+        narrowed_remote_ts.ip_protocol_id = narrowed_local_ts.ip_protocol_id;
     }
 
-    if (local_ts
-        && !ikev2_helper_xfrm_selector_from_ipv4_ts(&tsr, local_ts))
+    if (local_ts)
     {
-        return false;
+        *local_ts = narrowed_local_ts;
     }
-    if (remote_ts
-        && !ikev2_helper_xfrm_selector_from_ipv4_ts(&tsi, remote_ts))
+    if (remote_ts)
     {
-        return false;
+        *remote_ts = narrowed_remote_ts;
     }
     return true;
 }
@@ -8795,6 +8794,24 @@ ikev2_helper_count_child_sa_xfrm_active(
         }
     }
     return active;
+}
+
+static void
+ikev2_helper_stage_retired_child_sa(struct ikev2_helper_ike_sa *sa,
+                                    uint32_t rekey_message_id,
+                                    time_t now)
+{
+    if (!sa || !sa->active || !sa->child_sa.ready)
+    {
+        return;
+    }
+
+    CLEAR(sa->retired_child_sa);
+    sa->retired_child_sa.active = true;
+    sa->retired_child_sa.initiator_spi = sa->child_sa.initiator_spi;
+    sa->retired_child_sa.responder_spi = sa->child_sa.responder_spi;
+    sa->retired_child_sa.rekey_message_id = rekey_message_id;
+    sa->retired_child_sa.retired = now;
 }
 
 static bool
@@ -14200,6 +14217,41 @@ ikev2_helper_is_child_sa_delete_request(
 }
 
 static bool
+ikev2_helper_is_retired_child_sa_delete_request(
+    const uint8_t *plaintext,
+    size_t plaintext_len,
+    const struct provider_helper_ikev2_payload_summary *summary,
+    const struct ikev2_helper_retired_child_sa *retired)
+{
+    if (!plaintext || !summary || !retired || !retired->active
+        || summary->payload_count != 1 || !summary->saw_delete
+        || summary->delete_count != 1 || summary->delete_len < 8
+        || !ikev2_helper_body_inside(plaintext_len, summary->delete_offset,
+                                     summary->delete_len))
+    {
+        return false;
+    }
+
+    const uint8_t *body = plaintext + summary->delete_offset;
+    const uint16_t spi_count = ((uint16_t)body[2] << 8) | body[3];
+    if (body[0] != PROVIDER_HELPER_IKEV2_PROTOCOL_ESP || body[1] != 4
+        || !spi_count || summary->delete_len != 4 + (size_t)spi_count * 4)
+    {
+        return false;
+    }
+
+    for (uint16_t i = 0; i < spi_count; ++i)
+    {
+        const uint32_t spi = ikev2_helper_read_be32(body + 4 + (size_t)i * 4);
+        if (spi == retired->initiator_spi || spi == retired->responder_spi)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool
 ikev2_helper_ike_auth_listener_allowed(
     const struct ikev2_helper_listener *listener,
     const struct provider_helper_runtime_config *config)
@@ -15729,6 +15781,32 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                             ikev2_helper_count_child_sa_scaffolds(sa_table);
                         return;
                     }
+                    if (ikev2_helper_is_retired_child_sa_delete_request(
+                            plaintext, plaintext_len, &inner_summary,
+                            &sa->retired_child_sa))
+                    {
+                        ++counters->ike_informational_delete_rx;
+                        if (ikev2_helper_send_cached_encrypted_empty_response(
+                                listener, sa, header.exchange_type,
+                                header.message_id))
+                        {
+                            ++counters
+                                  ->ike_informational_delete_response_tx;
+                            sa->updated = exchange_now;
+                            sa->message_id = header.message_id;
+                            CLEAR(sa->retired_child_sa);
+                        }
+                        else
+                        {
+                            ++counters
+                                  ->ike_informational_delete_response_failed;
+                        }
+                        ikev2_helper_secure_zero(plaintext, sizeof(plaintext));
+                        counters->ike_sa_active = sa_table->active;
+                        counters->ike_child_sa_scaffold_active =
+                            ikev2_helper_count_child_sa_scaffolds(sa_table);
+                        return;
+                    }
                 }
                 if (header.exchange_type
                     == PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA)
@@ -15943,6 +16021,11 @@ ikev2_helper_handle_datagram(const struct ikev2_helper_listener *listener,
                         const bool apply_xfrm =
                             (config->flags
                              & PROVIDER_HELPER_CONFIG_APPLY_XFRM) != 0;
+                        if (child_rekey_request && sa->child_sa.ready)
+                        {
+                            ikev2_helper_stage_retired_child_sa(
+                                sa, header.message_id, exchange_now);
+                        }
                         if (child_rekey_request && sa->child_sa.xfrm_applied)
                         {
                             if (ikev2_helper_delete_child_sa_xfrm(

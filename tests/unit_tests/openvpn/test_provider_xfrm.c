@@ -461,6 +461,14 @@ test_provider_xfrm_linux_builds_child_sa_messages(void **state)
     assert_int_equal(ntohl(in_sa->id.daddr.a4), spec.local_outer_ipv4);
     assert_int_equal(ntohl(in_sa->saddr.a4), spec.remote_outer_ipv4);
     assert_int_equal(in_sa->reqid, spec.reqid);
+    assert_int_equal(in_sa->replay_window, 0);
+
+    const struct rtattr *replay_attr = test_provider_xfrm_linux_find_attr(
+        &messages.messages[0], sizeof(*in_sa), XFRMA_REPLAY_ESN_VAL);
+    assert_non_null(replay_attr);
+    const struct xfrm_replay_state_esn *replay = RTA_DATA(replay_attr);
+    assert_int_equal(replay->bmp_len, 32);
+    assert_int_equal(replay->replay_window, 1024);
 
     const struct rtattr *aead_attr = test_provider_xfrm_linux_find_attr(
         &messages.messages[0], sizeof(*in_sa), XFRMA_ALG_AEAD);
@@ -494,6 +502,10 @@ test_provider_xfrm_linux_builds_child_sa_messages(void **state)
     assert_int_equal(ntohl(out_sa->id.spi), spec.initiator_inbound_spi);
     assert_int_equal(ntohl(out_sa->id.daddr.a4), spec.remote_outer_ipv4);
     assert_int_equal(ntohl(out_sa->saddr.a4), spec.local_outer_ipv4);
+    assert_int_equal(out_sa->replay_window, 0);
+    assert_null(test_provider_xfrm_linux_find_attr(
+                    &messages.messages[1], sizeof(*out_sa),
+                    XFRMA_REPLAY_ESN_VAL));
 
     const struct nlmsghdr *in_pol_nlh =
         (const struct nlmsghdr *)messages.messages[2].data;

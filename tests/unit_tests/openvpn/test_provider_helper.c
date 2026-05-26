@@ -1757,6 +1757,7 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
 
 #define TEST_IKEV2_ENCR_TRANSFORM_LEN \
     (PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE + 4)
+#define TEST_IKEV2_ESN_TRANSFORM_LEN PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
 #define TEST_IKEV2_PRF_TRANSFORM_LEN PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
 #define TEST_IKEV2_DH_TRANSFORM_LEN PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
 #define TEST_IKEV2_SA_PROPOSAL_LEN \
@@ -1775,9 +1776,14 @@ test_add_ikev2_payload(uint8_t *packet, size_t pos, uint8_t next_payload,
 #define TEST_IKEV2_CHILD_SA_PROPOSAL_LEN \
     (PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE + 4 \
      + TEST_IKEV2_ENCR_TRANSFORM_LEN)
+#define TEST_IKEV2_CHILD_SA_ESN_PROPOSAL_LEN \
+    (TEST_IKEV2_CHILD_SA_PROPOSAL_LEN + TEST_IKEV2_ESN_TRANSFORM_LEN)
 #define TEST_IKEV2_CHILD_SA_PAYLOAD_LEN \
     (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE \
      + TEST_IKEV2_CHILD_SA_PROPOSAL_LEN)
+#define TEST_IKEV2_CHILD_SA_ESN_PAYLOAD_LEN \
+    (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE \
+     + TEST_IKEV2_CHILD_SA_ESN_PROPOSAL_LEN)
 #define TEST_IKEV2_TS_IPV4_PAYLOAD_LEN \
     (PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE \
      + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE \
@@ -4275,6 +4281,7 @@ test_send_ikev2_encrypted_create_child_impl(
     bool natt,
     uint32_t message_id,
     uint16_t encr_id,
+    bool include_esn,
     bool rekey,
     uint32_t tsi_start_ipv4,
     uint32_t tsi_end_ipv4,
@@ -4282,37 +4289,54 @@ test_send_ikev2_encrypted_create_child_impl(
     uint32_t tsr_end_ipv4)
 {
     uint8_t packet[PROVIDER_HELPER_IPC_MAX_MESSAGE];
-    uint8_t plaintext[TEST_IKEV2_CHILD_SA_PAYLOAD_LEN
+    uint8_t plaintext[TEST_IKEV2_CHILD_SA_ESN_PAYLOAD_LEN
                       + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE + 4
                       + PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
                       + PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
                       + 2 * TEST_IKEV2_TS_IPV4_PAYLOAD_LEN + 1];
     CLEAR(plaintext);
     size_t plaintext_len = 0;
+    const uint16_t proposal_len =
+        include_esn ? TEST_IKEV2_CHILD_SA_ESN_PROPOSAL_LEN
+                    : TEST_IKEV2_CHILD_SA_PROPOSAL_LEN;
+    const uint16_t payload_len =
+        include_esn ? TEST_IKEV2_CHILD_SA_ESN_PAYLOAD_LEN
+                    : TEST_IKEV2_CHILD_SA_PAYLOAD_LEN;
 
     plaintext_len = test_add_ikev2_payload(
         plaintext, plaintext_len,
         rekey ? PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY
               : PROVIDER_HELPER_IKEV2_PAYLOAD_NONCE,
-        TEST_IKEV2_CHILD_SA_PAYLOAD_LEN, 0);
+        payload_len, 0);
     const size_t sa_body = PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE;
-    test_write_be16(plaintext + sa_body + 2,
-                    TEST_IKEV2_CHILD_SA_PROPOSAL_LEN);
+    test_write_be16(plaintext + sa_body + 2, proposal_len);
     plaintext[sa_body + 4] = 1;
     plaintext[sa_body + 5] = PROVIDER_HELPER_IKEV2_PROTOCOL_ESP;
     plaintext[sa_body + 6] = 4;
-    plaintext[sa_body + 7] = 1;
+    plaintext[sa_body + 7] = include_esn ? 2 : 1;
     test_write_be32(plaintext + sa_body + 8, 0x01020304);
 
     const size_t transform = sa_body
                              + PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
                              + 4;
+    plaintext[transform] = include_esn
+                           ? PROVIDER_HELPER_IKEV2_TRANSFORM_MORE
+                           : PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
     test_write_be16(plaintext + transform + 2, TEST_IKEV2_ENCR_TRANSFORM_LEN);
     plaintext[transform + 4] = PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR;
     test_write_be16(plaintext + transform + 6, encr_id);
     test_write_be16(plaintext + transform + 8,
                     0x8000u | PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH);
     test_write_be16(plaintext + transform + 10, 256);
+    if (include_esn)
+    {
+        const size_t esn_transform = transform + TEST_IKEV2_ENCR_TRANSFORM_LEN;
+        test_write_be16(plaintext + esn_transform + 2,
+                        TEST_IKEV2_ESN_TRANSFORM_LEN);
+        plaintext[esn_transform + 4] = PROVIDER_HELPER_IKEV2_TRANSFORM_ESN;
+        test_write_be16(plaintext + esn_transform + 6,
+                        PROVIDER_HELPER_IKEV2_ESN_NO_EXTENDED);
+    }
 
     if (rekey)
     {
@@ -4394,7 +4418,7 @@ test_send_ikev2_encrypted_create_child_from(
 {
     test_send_ikev2_encrypted_create_child_impl(
         fd, port, initiator_spi, material, natt, message_id,
-        PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16, false, 0x0a580002,
+        PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16, false, false, 0x0a580002,
         0x0a580002, 0x0a580001, 0x0a580001);
 }
 
@@ -4409,8 +4433,38 @@ test_send_ikev2_encrypted_create_child_rekey_from(
 {
     test_send_ikev2_encrypted_create_child_impl(
         fd, port, initiator_spi, material, natt, message_id,
-        PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16, true, 0x0a580002,
+        PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16, false, true, 0x0a580002,
         0x0a580002, 0x0a580001, 0x0a580001);
+}
+
+static void
+test_send_ikev2_encrypted_create_child_rekey_esn_from(
+    int fd,
+    uint16_t port,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt,
+    uint32_t message_id)
+{
+    test_send_ikev2_encrypted_create_child_impl(
+        fd, port, initiator_spi, material, natt, message_id,
+        PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16, true, true, 0x0a580002,
+        0x0a580002, 0x0a580001, 0x0a580001);
+}
+
+static void
+test_send_ikev2_encrypted_create_child_rekey_esn_full_tunnel_from(
+    int fd,
+    uint16_t port,
+    uint64_t initiator_spi,
+    const struct test_ikev2_sa_init_response_material *material,
+    bool natt,
+    uint32_t message_id)
+{
+    test_send_ikev2_encrypted_create_child_impl(
+        fd, port, initiator_spi, material, natt, message_id,
+        PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16, true, true, 0x00000000,
+        0xffffffff, 0x00000000, 0xffffffff);
 }
 
 static void
@@ -4423,7 +4477,7 @@ test_send_ikev2_encrypted_create_child_no_proposal_from(
     uint32_t message_id)
 {
     test_send_ikev2_encrypted_create_child_impl(
-        fd, port, initiator_spi, material, natt, message_id, 999, false,
+        fd, port, initiator_spi, material, natt, message_id, 999, false, false,
         0x0a580002, 0x0a580002, 0x0a580001, 0x0a580001);
 }
 
@@ -4438,7 +4492,7 @@ test_send_ikev2_encrypted_create_child_bad_ts_from(
 {
     test_send_ikev2_encrypted_create_child_impl(
         fd, port, initiator_spi, material, natt, message_id,
-        PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16, false, 0x0a580003,
+        PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16, false, false, 0x0a580003,
         0x0a580003, 0x0a580001, 0x0a580001);
 }
 
@@ -4453,7 +4507,7 @@ test_send_ikev2_encrypted_create_child_uncidr_ts_from(
 {
     test_send_ikev2_encrypted_create_child_impl(
         fd, port, initiator_spi, material, natt, message_id,
-        PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16, false, 0x0a580002,
+        PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16, false, false, 0x0a580002,
         0x0a580004, 0x0a580001, 0x0a580001);
 }
 
@@ -11417,7 +11471,7 @@ test_provider_helper_spawn_ikev2_tls12_client_hello_server_flight(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
 
-    test_send_ikev2_encrypted_create_child_rekey_from(
+    test_send_ikev2_encrypted_create_child_rekey_esn_full_tunnel_from(
         response_fd, natt_port, initiator_spi, &sa_init_material, true,
         next_protected_message_id);
     usleep(10000);
@@ -11449,7 +11503,7 @@ test_provider_helper_spawn_ikev2_tls12_client_hello_server_flight(void **state)
 
     test_send_ikev2_encrypted_child_delete_from(
         response_fd, natt_port, initiator_spi, &sa_init_material, true,
-        next_protected_message_id, rekeyed_child_spi);
+        next_protected_message_id, initial_child_spi);
     usleep(10000);
     test_recv_ikev2_encrypted_empty_exchange_response(
         response_fd, initiator_spi, &sa_init_material,
@@ -11457,7 +11511,7 @@ test_provider_helper_spawn_ikev2_tls12_client_hello_server_flight(void **state)
         next_protected_message_id, true);
     ++next_protected_message_id;
 
-    target_rx_sequence = supervisor.last_rx_sequence + 2;
+    target_rx_sequence = supervisor.last_rx_sequence + 1;
     write_helper_header_fd(supervisor.ipc_fd,
                            PROVIDER_HELPER_MSG_STATS_REQUEST,
                            supervisor.next_tx_sequence++, 94);
@@ -11472,6 +11526,37 @@ test_provider_helper_spawn_ikev2_tls12_client_hello_server_flight(void **state)
     assert_int_equal(supervisor.runtime_stats.ike_informational_delete_rx, 1);
     assert_int_equal(
         supervisor.runtime_stats.ike_informational_delete_response_tx, 1);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_informational_delete_response_failed, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 0);
+    assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 1);
+    assert_int_equal(supervisor.runtime_stats.ike_sa_active, 1);
+
+    test_send_ikev2_encrypted_child_delete_from(
+        response_fd, natt_port, initiator_spi, &sa_init_material, true,
+        next_protected_message_id, rekeyed_child_spi);
+    usleep(10000);
+    test_recv_ikev2_encrypted_empty_exchange_response(
+        response_fd, initiator_spi, &sa_init_material,
+        PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL,
+        next_protected_message_id, true);
+    ++next_protected_message_id;
+
+    target_rx_sequence = supervisor.last_rx_sequence + 2;
+    write_helper_header_fd(supervisor.ipc_fd,
+                           PROVIDER_HELPER_MSG_STATS_REQUEST,
+                           supervisor.next_tx_sequence++, 95);
+    for (int i = 0;
+         i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
+         ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
+    assert_int_equal(supervisor.runtime_stats.ike_informational_delete_rx, 2);
+    assert_int_equal(
+        supervisor.runtime_stats.ike_informational_delete_response_tx, 2);
     assert_int_equal(
         supervisor.runtime_stats.ike_informational_delete_response_failed, 0);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 0);
@@ -11490,7 +11575,7 @@ test_provider_helper_spawn_ikev2_tls12_client_hello_server_flight(void **state)
     target_rx_sequence = supervisor.last_rx_sequence + 2;
     write_helper_header_fd(supervisor.ipc_fd,
                            PROVIDER_HELPER_MSG_STATS_REQUEST,
-                           supervisor.next_tx_sequence++, 95);
+                           supervisor.next_tx_sequence++, 96);
     for (int i = 0;
          i < 100 && supervisor.last_rx_sequence < target_rx_sequence;
          ++i)
@@ -11499,9 +11584,9 @@ test_provider_helper_spawn_ikev2_tls12_client_hello_server_flight(void **state)
         usleep(10000);
     }
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
-    assert_int_equal(supervisor.runtime_stats.ike_informational_delete_rx, 2);
+    assert_int_equal(supervisor.runtime_stats.ike_informational_delete_rx, 3);
     assert_int_equal(
-        supervisor.runtime_stats.ike_informational_delete_response_tx, 2);
+        supervisor.runtime_stats.ike_informational_delete_response_tx, 3);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_xfrm_delete_ok, 0);
     assert_int_equal(supervisor.runtime_stats.ike_child_sa_scaffold_active, 0);
     assert_int_equal(supervisor.runtime_stats.ike_sa_active, 0);

@@ -56,6 +56,12 @@ provider_xfrm_linux_set_errno(struct provider_xfrm_result *result,
 
 #define PROVIDER_XFRM_LINUX_AEAD_ICV_BITS 128
 #define PROVIDER_XFRM_LINUX_DEFAULT_PRIORITY 1000
+#define PROVIDER_XFRM_LINUX_INBOUND_REPLAY_WINDOW 1024U
+#define PROVIDER_XFRM_LINUX_REPLAY_WORD_BITS 32U
+#define PROVIDER_XFRM_LINUX_INBOUND_REPLAY_WORDS \
+    ((PROVIDER_XFRM_LINUX_INBOUND_REPLAY_WINDOW \
+      + PROVIDER_XFRM_LINUX_REPLAY_WORD_BITS - 1U) \
+     / PROVIDER_XFRM_LINUX_REPLAY_WORD_BITS)
 
 static bool
 provider_xfrm_linux_ipv4_range_to_prefix(uint32_t start, uint32_t end,
@@ -269,6 +275,33 @@ provider_xfrm_linux_add_mark_and_if_id(
 }
 
 static bool
+provider_xfrm_linux_add_replay_window(
+    struct provider_xfrm_linux_message *message,
+    uint32_t replay_window)
+{
+    if (!replay_window || replay_window <= 32U)
+    {
+        return true;
+    }
+    if (replay_window > XFRMA_REPLAY_ESN_MAX)
+    {
+        return false;
+    }
+
+    uint8_t replay_buf[sizeof(struct xfrm_replay_state_esn)
+                       + PROVIDER_XFRM_LINUX_INBOUND_REPLAY_WORDS
+                             * sizeof(uint32_t)];
+    CLEAR(replay_buf);
+    struct xfrm_replay_state_esn *replay =
+        (struct xfrm_replay_state_esn *)replay_buf;
+    replay->bmp_len = PROVIDER_XFRM_LINUX_INBOUND_REPLAY_WORDS;
+    replay->replay_window = replay_window;
+
+    return provider_xfrm_linux_message_add_attr(
+        message, XFRMA_REPLAY_ESN_VAL, replay_buf, sizeof(replay_buf));
+}
+
+static bool
 provider_xfrm_linux_state_identity_valid(
     const struct provider_xfrm_child_sa_state *state,
     enum provider_xfrm_direction direction)
@@ -334,7 +367,15 @@ provider_xfrm_linux_sa_message_build(
     sa.reqid = state->reqid;
     sa.family = AF_INET;
     sa.mode = XFRM_MODE_TUNNEL;
-    sa.replay_window = 32;
+
+    const uint32_t replay_window =
+        direction == PROVIDER_XFRM_DIRECTION_IN
+        ? PROVIDER_XFRM_LINUX_INBOUND_REPLAY_WINDOW
+        : 0U;
+    if (replay_window <= 32U)
+    {
+        sa.replay_window = (uint8_t)replay_window;
+    }
 
     if (!provider_xfrm_linux_message_start(message, XFRM_MSG_NEWSA, &sa,
                                            sizeof(sa)))
@@ -365,8 +406,9 @@ provider_xfrm_linux_sa_message_build(
         .encap_sport = htons(state->src_outer_port),
         .encap_dport = htons(state->dst_outer_port),
     };
-    if (!provider_xfrm_linux_message_add_attr(message, XFRMA_ENCAP, &encap,
-                                              sizeof(encap))
+    if (!provider_xfrm_linux_add_replay_window(message, replay_window)
+        || !provider_xfrm_linux_message_add_attr(message, XFRMA_ENCAP, &encap,
+                                                sizeof(encap))
         || !provider_xfrm_linux_add_mark_and_if_id(
             message, state->mark_value, state->mark_mask, state->if_id))
     {
