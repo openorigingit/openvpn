@@ -2145,8 +2145,23 @@ ikev2_helper_send_header(int fd, uint32_t type, uint64_t sequence,
 static bool
 ikev2_helper_send_hello(int fd, uint64_t sequence, uint64_t correlation_id)
 {
-    uint8_t frame[PROVIDER_HELPER_IPC_HEADER_SIZE
-                  + PROVIDER_HELPER_FEATURE_SET_SIZE];
+    const char *nonce_hex = getenv(PROVIDER_HELPER_NONCE_ENV);
+    uint8_t launch_nonce[PROVIDER_HELPER_LAUNCH_NONCE_SIZE];
+    bool has_launch_nonce = false;
+    CLEAR(launch_nonce);
+    if (nonce_hex)
+    {
+        if (!provider_helper_launch_nonce_from_hex(
+                nonce_hex, launch_nonce, sizeof(launch_nonce)))
+        {
+            return false;
+        }
+        has_launch_nonce = true;
+    }
+
+    const uint32_t payload_len = has_launch_nonce ? PROVIDER_HELPER_HELLO_SIZE
+                                                 : PROVIDER_HELPER_FEATURE_SET_SIZE;
+    uint8_t frame[PROVIDER_HELPER_IPC_HEADER_SIZE + PROVIDER_HELPER_HELLO_SIZE];
     const struct provider_helper_msg_header header = {
         .magic = PROVIDER_HELPER_IPC_MAGIC,
         .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
@@ -2154,18 +2169,23 @@ ikev2_helper_send_hello(int fd, uint64_t sequence, uint64_t correlation_id)
         .type = PROVIDER_HELPER_MSG_HELLO,
         .sequence = sequence,
         .correlation_id = correlation_id,
-        .payload_len = PROVIDER_HELPER_FEATURE_SET_SIZE,
+        .payload_len = payload_len,
     };
     const struct provider_helper_feature_set features = {
         .mandatory_features = PROVIDER_HELPER_FEATURE_IKEV2_BASE,
     };
 
-    return provider_helper_ipc_encode_header(frame, PROVIDER_HELPER_IPC_HEADER_SIZE,
-                                             &header)
-           && provider_helper_ipc_encode_feature_set(
+    const bool ret =
+        provider_helper_ipc_encode_header(frame, PROVIDER_HELPER_IPC_HEADER_SIZE,
+                                          &header)
+        && provider_helper_ipc_encode_hello(
                frame + PROVIDER_HELPER_IPC_HEADER_SIZE,
-               PROVIDER_HELPER_FEATURE_SET_SIZE, &features)
-           && ikev2_helper_write_all(fd, frame, sizeof(frame));
+               payload_len, &features,
+               has_launch_nonce ? launch_nonce : NULL)
+        && ikev2_helper_write_all(fd, frame,
+                                  PROVIDER_HELPER_IPC_HEADER_SIZE + payload_len);
+    ikev2_helper_secure_zero(launch_nonce, sizeof(launch_nonce));
+    return ret;
 }
 
 static bool

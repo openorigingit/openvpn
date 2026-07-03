@@ -34,6 +34,12 @@
 #define PROVIDER_HELPER_FEATURE_SET_SIZE  16
 #define PROVIDER_HELPER_CHILD_FD          3
 #define PROVIDER_HELPER_FD_ENV            "OPENVPN_PROVIDER_HELPER_FD"
+#define PROVIDER_HELPER_NONCE_ENV         "OPENVPN_PROVIDER_HELPER_NONCE"
+#define PROVIDER_HELPER_LAUNCH_NONCE_SIZE 16
+#define PROVIDER_HELPER_LAUNCH_NONCE_HEX_SIZE \
+    (PROVIDER_HELPER_LAUNCH_NONCE_SIZE * 2)
+#define PROVIDER_HELPER_HELLO_SIZE \
+    (PROVIDER_HELPER_FEATURE_SET_SIZE + PROVIDER_HELPER_LAUNCH_NONCE_SIZE)
 #define PROVIDER_HELPER_RUNTIME_CONFIG_SIZE 68
 #define PROVIDER_HELPER_LISTENER_FD_SIZE    24
 #define PROVIDER_HELPER_RUNTIME_STATS_SIZE  1008
@@ -771,6 +777,8 @@ struct provider_helper_supervisor {
     uint32_t max_message_size;
     uint64_t supported_features;
     uint64_t negotiated_features;
+    uint8_t launch_nonce[PROVIDER_HELPER_LAUNCH_NONCE_SIZE];
+    bool launch_nonce_required;
     struct provider_helper_runtime_config runtime_config;
     struct provider_helper_runtime_stats runtime_stats;
     unsigned int restart_count;
@@ -894,6 +902,23 @@ bool provider_helper_ipc_decode_feature_set(
     const uint8_t *src,
     size_t src_len,
     struct provider_helper_feature_set *features);
+bool provider_helper_ipc_encode_hello(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_feature_set *features,
+    const uint8_t *launch_nonce);
+bool provider_helper_ipc_decode_hello(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_feature_set *features,
+    uint8_t *launch_nonce,
+    bool *has_launch_nonce);
+bool provider_helper_launch_nonce_to_hex(char *dst, size_t dst_len,
+                                         const uint8_t *launch_nonce,
+                                         size_t launch_nonce_len);
+bool provider_helper_launch_nonce_from_hex(const char *src,
+                                           uint8_t *launch_nonce,
+                                           size_t launch_nonce_len);
 bool provider_helper_ipc_write_runtime_config(struct buffer *buf,
                                               const struct provider_helper_runtime_config *config);
 bool provider_helper_ipc_write_listener_fd(struct buffer *buf,

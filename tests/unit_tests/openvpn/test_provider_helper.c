@@ -8130,6 +8130,102 @@ test_provider_helper_processes_partial_header(void **state)
 }
 
 static void
+write_helper_hello_with_payload(int fd, const uint8_t *payload, size_t payload_len)
+{
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE + payload_len);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_HELLO,
+        .sequence = 1,
+        .correlation_id = 1,
+        .payload_len = (uint32_t)payload_len,
+    };
+    assert_true(provider_helper_ipc_write_header(&buf, &header));
+    assert_true(buf_write(&buf, payload, payload_len));
+    assert_int_equal(write(fd, BPTR(&buf), (size_t)BLEN(&buf)),
+                     (ssize_t)BLEN(&buf));
+    free_buf(&buf);
+}
+
+static void
+test_provider_helper_rejects_missing_launch_nonce_hello(void **state)
+{
+    (void)state;
+
+    int fds[2] = { -1, -1 };
+    assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.ipc_fd = fds[0];
+    supervisor.launch_nonce_required = true;
+    for (size_t i = 0; i < sizeof(supervisor.launch_nonce); ++i)
+    {
+        supervisor.launch_nonce[i] = (uint8_t)(0xa0 + i);
+    }
+    provider_helper_supervisor_set_state(&supervisor,
+                                         PROVIDER_HELPER_STATE_STARTING);
+
+    uint8_t payload[PROVIDER_HELPER_FEATURE_SET_SIZE];
+    const struct provider_helper_feature_set features = {
+        .mandatory_features = PROVIDER_HELPER_FEATURE_IKEV2_BASE,
+    };
+    assert_true(provider_helper_ipc_encode_feature_set(payload, sizeof(payload),
+                                                       &features));
+    write_helper_hello_with_payload(fds[1], payload, sizeof(payload));
+
+    provider_helper_process_event(&supervisor);
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_FAILED);
+    assert_int_equal(supervisor.ipc_fd, -1);
+
+    close(fds[1]);
+    provider_helper_supervisor_free(&supervisor);
+}
+
+static void
+test_provider_helper_accepts_matching_launch_nonce_hello(void **state)
+{
+    (void)state;
+
+    int fds[2] = { -1, -1 };
+    assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.ipc_fd = fds[0];
+    supervisor.launch_nonce_required = true;
+    for (size_t i = 0; i < sizeof(supervisor.launch_nonce); ++i)
+    {
+        supervisor.launch_nonce[i] = (uint8_t)(0xb0 + i);
+    }
+    provider_helper_supervisor_set_state(&supervisor,
+                                         PROVIDER_HELPER_STATE_STARTING);
+
+    uint8_t payload[PROVIDER_HELPER_HELLO_SIZE];
+    const struct provider_helper_feature_set features = {
+        .mandatory_features = PROVIDER_HELPER_FEATURE_IKEV2_BASE,
+    };
+    assert_true(provider_helper_ipc_encode_feature_set(
+                    payload, PROVIDER_HELPER_FEATURE_SET_SIZE, &features));
+    memcpy(payload + PROVIDER_HELPER_FEATURE_SET_SIZE,
+           supervisor.launch_nonce, sizeof(supervisor.launch_nonce));
+    write_helper_hello_with_payload(fds[1], payload, sizeof(payload));
+
+    provider_helper_process_event(&supervisor);
+
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_PREFLIGHT);
+    assert_int_equal(supervisor.last_rx_sequence, 1);
+    assert_int_equal(supervisor.negotiated_features,
+                     PROVIDER_HELPER_FEATURE_IKEV2_BASE);
+
+    close(fds[1]);
+    provider_helper_supervisor_free(&supervisor);
+}
+
+static void
 test_provider_helper_start_timeout_fails_closed(void **state)
 {
     (void)state;
@@ -14008,6 +14104,8 @@ main(void)
             test_provider_helper_ikev2_child_sa_response_plaintext),
         cmocka_unit_test(test_provider_helper_ikev2_cookie_builder),
         cmocka_unit_test(test_provider_helper_processes_partial_header),
+        cmocka_unit_test(test_provider_helper_rejects_missing_launch_nonce_hello),
+        cmocka_unit_test(test_provider_helper_accepts_matching_launch_nonce_hello),
         cmocka_unit_test(test_provider_helper_auth_request_callback),
         cmocka_unit_test(test_provider_helper_session_close_callback),
         cmocka_unit_test(test_provider_helper_session_update_callback),

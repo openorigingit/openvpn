@@ -1114,6 +1114,124 @@ provider_helper_ipc_decode_feature_set(
 }
 
 bool
+provider_helper_ipc_encode_hello(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_feature_set *features,
+    const uint8_t *launch_nonce)
+{
+    const size_t required_len = launch_nonce ? PROVIDER_HELPER_HELLO_SIZE
+                                            : PROVIDER_HELPER_FEATURE_SET_SIZE;
+    if (!dst || dst_len < required_len || !features)
+    {
+        return false;
+    }
+    if (!provider_helper_ipc_encode_feature_set(
+            dst, PROVIDER_HELPER_FEATURE_SET_SIZE, features))
+    {
+        return false;
+    }
+    if (launch_nonce)
+    {
+        memcpy(dst + PROVIDER_HELPER_FEATURE_SET_SIZE, launch_nonce,
+               PROVIDER_HELPER_LAUNCH_NONCE_SIZE);
+    }
+    return true;
+}
+
+bool
+provider_helper_ipc_decode_hello(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_feature_set *features,
+    uint8_t *launch_nonce,
+    bool *has_launch_nonce)
+{
+    if (!src || !features || !has_launch_nonce
+        || (src_len != PROVIDER_HELPER_FEATURE_SET_SIZE
+            && src_len != PROVIDER_HELPER_HELLO_SIZE))
+    {
+        return false;
+    }
+    if (!provider_helper_ipc_decode_feature_set(
+            src, PROVIDER_HELPER_FEATURE_SET_SIZE, features))
+    {
+        return false;
+    }
+    *has_launch_nonce = src_len == PROVIDER_HELPER_HELLO_SIZE;
+    if (*has_launch_nonce && launch_nonce)
+    {
+        memcpy(launch_nonce, src + PROVIDER_HELPER_FEATURE_SET_SIZE,
+               PROVIDER_HELPER_LAUNCH_NONCE_SIZE);
+    }
+    return true;
+}
+
+static int
+provider_helper_hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9')
+    {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f')
+    {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F')
+    {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+bool
+provider_helper_launch_nonce_to_hex(char *dst, size_t dst_len,
+                                    const uint8_t *launch_nonce,
+                                    size_t launch_nonce_len)
+{
+    static const char hex[] = "0123456789abcdef";
+    if (!dst || !launch_nonce
+        || launch_nonce_len != PROVIDER_HELPER_LAUNCH_NONCE_SIZE
+        || dst_len < PROVIDER_HELPER_LAUNCH_NONCE_HEX_SIZE + 1)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < launch_nonce_len; ++i)
+    {
+        dst[i * 2] = hex[launch_nonce[i] >> 4];
+        dst[(i * 2) + 1] = hex[launch_nonce[i] & 0x0f];
+    }
+    dst[PROVIDER_HELPER_LAUNCH_NONCE_HEX_SIZE] = '\0';
+    return true;
+}
+
+bool
+provider_helper_launch_nonce_from_hex(const char *src,
+                                      uint8_t *launch_nonce,
+                                      size_t launch_nonce_len)
+{
+    if (!src || !launch_nonce
+        || launch_nonce_len != PROVIDER_HELPER_LAUNCH_NONCE_SIZE
+        || strlen(src) != PROVIDER_HELPER_LAUNCH_NONCE_HEX_SIZE)
+    {
+        return false;
+    }
+    for (size_t i = 0; i < launch_nonce_len; ++i)
+    {
+        const int hi = provider_helper_hex_nibble(src[i * 2]);
+        const int lo = provider_helper_hex_nibble(src[(i * 2) + 1]);
+        if (hi < 0 || lo < 0)
+        {
+            secure_memzero(launch_nonce, launch_nonce_len);
+            return false;
+        }
+        launch_nonce[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return true;
+}
+
+bool
 provider_helper_ipc_encode_runtime_config(uint8_t *dst, size_t dst_len,
                                           const struct provider_helper_runtime_config *config)
 {

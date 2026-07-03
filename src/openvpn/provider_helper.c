@@ -30,6 +30,7 @@
 
 #include "provider_helper.h"
 
+#include "crypto_backend.h"
 #include "error.h"
 #include "fdmisc.h"
 #include "otime.h"
@@ -192,6 +193,8 @@ provider_helper_close_ipc(struct provider_helper_supervisor *supervisor)
     supervisor->payload_len = 0;
     supervisor->payload_received = 0;
     CLEAR(supervisor->pending_header);
+    secure_memzero(supervisor->launch_nonce, sizeof(supervisor->launch_nonce));
+    supervisor->launch_nonce_required = false;
 }
 
 void
@@ -731,6 +734,17 @@ provider_helper_write_all(int fd, const uint8_t *data, size_t len)
 }
 
 static bool
+provider_helper_launch_nonce_equal(const uint8_t *a, const uint8_t *b)
+{
+    uint8_t diff = 0;
+    for (size_t i = 0; i < PROVIDER_HELPER_LAUNCH_NONCE_SIZE; ++i)
+    {
+        diff |= a[i] ^ b[i];
+    }
+    return diff == 0;
+}
+
+static bool
 provider_helper_supervisor_send_hello_reply(
     struct provider_helper_supervisor *supervisor,
     uint64_t correlation_id,
@@ -852,16 +866,38 @@ provider_helper_supervisor_process_hello(
     supervisor->negotiated_features = 0;
     if (!payload_len)
     {
+        if (supervisor->launch_nonce_required)
+        {
+            return false;
+        }
         return provider_helper_supervisor_send_config(supervisor, header->sequence);
-    }
-    if (payload_len != PROVIDER_HELPER_FEATURE_SET_SIZE)
-    {
-        return false;
     }
 
     struct provider_helper_feature_set remote;
-    if (!provider_helper_ipc_decode_feature_set(payload, payload_len, &remote)
-        || !provider_helper_negotiate_features(
+    uint8_t launch_nonce[PROVIDER_HELPER_LAUNCH_NONCE_SIZE];
+    bool has_launch_nonce = false;
+    CLEAR(launch_nonce);
+    if (!provider_helper_ipc_decode_hello(payload, payload_len, &remote,
+                                          launch_nonce, &has_launch_nonce))
+    {
+        return false;
+    }
+    if (supervisor->launch_nonce_required)
+    {
+        if (!has_launch_nonce
+            || !provider_helper_launch_nonce_equal(launch_nonce,
+                                                   supervisor->launch_nonce))
+        {
+            secure_memzero(launch_nonce, sizeof(launch_nonce));
+            return false;
+        }
+        secure_memzero(supervisor->launch_nonce,
+                       sizeof(supervisor->launch_nonce));
+        supervisor->launch_nonce_required = false;
+    }
+    secure_memzero(launch_nonce, sizeof(launch_nonce));
+
+    if (!provider_helper_negotiate_features(
             supervisor->supported_features, remote.mandatory_features,
             remote.optional_features, &supervisor->negotiated_features))
     {
@@ -1258,6 +1294,21 @@ provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
         return false;
     }
 
+    char nonce_hex[PROVIDER_HELPER_LAUNCH_NONCE_HEX_SIZE + 1];
+    if (!rand_bytes(supervisor->launch_nonce,
+                    (int)sizeof(supervisor->launch_nonce))
+        || !provider_helper_launch_nonce_to_hex(
+            nonce_hex, sizeof(nonce_hex), supervisor->launch_nonce,
+            sizeof(supervisor->launch_nonce)))
+    {
+        msg(M_WARN, "provider-helper: failed to generate launch nonce");
+        close(fds[0]);
+        close(fds[1]);
+        secure_memzero(supervisor->launch_nonce, sizeof(supervisor->launch_nonce));
+        return false;
+    }
+    supervisor->launch_nonce_required = true;
+
     pid_t pid = fork();
     if (pid == 0)
     {
@@ -1271,7 +1322,11 @@ provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
         char fd_env[sizeof(PROVIDER_HELPER_FD_ENV) + 1 + 16];
         snprintf(fd_env, sizeof(fd_env), "%s=%d", PROVIDER_HELPER_FD_ENV,
                  PROVIDER_HELPER_CHILD_FD);
-        char *const envp[] = { fd_env, NULL };
+        char nonce_env[sizeof(PROVIDER_HELPER_NONCE_ENV)
+                       + 1 + PROVIDER_HELPER_LAUNCH_NONCE_HEX_SIZE + 1];
+        snprintf(nonce_env, sizeof(nonce_env), "%s=%s",
+                 PROVIDER_HELPER_NONCE_ENV, nonce_hex);
+        char *const envp[] = { fd_env, nonce_env, NULL };
         if (!provider_helper_child_drop_supplementary_groups())
         {
             _exit(126);
@@ -1285,6 +1340,8 @@ provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
         msg(M_WARN | M_ERRNO, "provider-helper: fork failed");
         close(fds[0]);
         close(fds[1]);
+        secure_memzero(supervisor->launch_nonce, sizeof(supervisor->launch_nonce));
+        supervisor->launch_nonce_required = false;
         return false;
     }
 

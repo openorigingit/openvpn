@@ -43,3 +43,10 @@ prng_bytes(uint8_t *output, int len)
         output[i] = (uint8_t)rand();
     }
 }
+
+int
+rand_bytes(uint8_t *output, int len)
+{
+    prng_bytes(output, len);
+    return 1;
+}

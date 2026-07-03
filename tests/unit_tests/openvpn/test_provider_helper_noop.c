@@ -21,7 +21,8 @@
 #include "provider_helper.h"
 
 static bool
-noop_write_header(int fd, uint32_t type, uint64_t sequence, uint64_t correlation_id)
+noop_write_header(int fd, uint32_t type, uint64_t sequence,
+                  uint64_t correlation_id)
 {
     struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE);
     const struct provider_helper_msg_header header = {
@@ -36,6 +37,50 @@ noop_write_header(int fd, uint32_t type, uint64_t sequence, uint64_t correlation
     const bool encoded = provider_helper_ipc_write_header(&buf, &header);
     const int len = BLEN(&buf);
     const bool written = encoded && write(fd, BPTR(&buf), (size_t)len) == len;
+    free_buf(&buf);
+    return written;
+}
+
+static bool
+noop_write_hello(int fd)
+{
+    const char *nonce_hex = getenv(PROVIDER_HELPER_NONCE_ENV);
+    uint8_t launch_nonce[PROVIDER_HELPER_LAUNCH_NONCE_SIZE];
+    bool has_launch_nonce = false;
+    CLEAR(launch_nonce);
+    if (nonce_hex)
+    {
+        if (!provider_helper_launch_nonce_from_hex(
+                nonce_hex, launch_nonce, sizeof(launch_nonce)))
+        {
+            return false;
+        }
+        has_launch_nonce = true;
+    }
+
+    const uint32_t payload_len = has_launch_nonce ? PROVIDER_HELPER_HELLO_SIZE
+                                                 : PROVIDER_HELPER_FEATURE_SET_SIZE;
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE + payload_len);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_HELLO,
+        .sequence = 1,
+        .correlation_id = 1,
+        .payload_len = payload_len,
+    };
+    const struct provider_helper_feature_set features = { 0 };
+
+    const bool encoded =
+        provider_helper_ipc_write_header(&buf, &header)
+        && provider_helper_ipc_encode_hello(
+            BEND(&buf), payload_len, &features,
+            has_launch_nonce ? launch_nonce : NULL)
+        && buf_inc_len(&buf, payload_len);
+    const int len = BLEN(&buf);
+    const bool written = encoded && write(fd, BPTR(&buf), (size_t)len) == len;
+    secure_memzero(launch_nonce, sizeof(launch_nonce));
     free_buf(&buf);
     return written;
 }
@@ -62,6 +107,18 @@ noop_read_all(int fd, uint8_t *data, size_t len)
         len -= (size_t)n;
     }
     return true;
+}
+
+static bool
+noop_read_header(int fd, struct provider_helper_msg_header *header,
+                 uint64_t *last_sequence)
+{
+    uint8_t header_buf[PROVIDER_HELPER_IPC_HEADER_SIZE];
+    return noop_read_all(fd, header_buf, sizeof(header_buf))
+           && provider_helper_ipc_decode_header(
+                  header_buf, sizeof(header_buf), header,
+                  PROVIDER_HELPER_IPC_MAX_MESSAGE, last_sequence)
+                  == PROVIDER_HELPER_IPC_OK;
 }
 
 int
@@ -123,23 +180,31 @@ main(int argc, char **argv)
 #endif
     }
 
-    if (!noop_write_header(fd, PROVIDER_HELPER_MSG_HELLO, 1, 1))
+    if (!noop_write_hello(fd))
     {
         return 4;
     }
 
-    uint8_t header_buf[PROVIDER_HELPER_IPC_HEADER_SIZE];
-    if (!noop_read_all(fd, header_buf, sizeof(header_buf)))
+    struct provider_helper_msg_header configure;
+    uint64_t last_sequence = 0;
+    if (!noop_read_header(fd, &configure, &last_sequence))
     {
         return 5;
     }
-
-    struct provider_helper_msg_header configure;
-    uint64_t last_sequence = 0;
-    if (provider_helper_ipc_decode_header(header_buf, sizeof(header_buf), &configure,
-                                          PROVIDER_HELPER_IPC_MAX_MESSAGE,
-                                          &last_sequence) != PROVIDER_HELPER_IPC_OK
-        || configure.type != PROVIDER_HELPER_MSG_CONFIGURE
+    if (configure.type == PROVIDER_HELPER_MSG_HELLO_REPLY)
+    {
+        uint8_t feature_payload[PROVIDER_HELPER_FEATURE_SET_SIZE];
+        struct provider_helper_feature_set features;
+        if (configure.payload_len != sizeof(feature_payload)
+            || !noop_read_all(fd, feature_payload, sizeof(feature_payload))
+            || !provider_helper_ipc_decode_feature_set(
+                feature_payload, sizeof(feature_payload), &features)
+            || !noop_read_header(fd, &configure, &last_sequence))
+        {
+            return 6;
+        }
+    }
+    if (configure.type != PROVIDER_HELPER_MSG_CONFIGURE
         || configure.payload_len != PROVIDER_HELPER_RUNTIME_CONFIG_SIZE)
     {
         return 6;
