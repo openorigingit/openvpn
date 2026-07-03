@@ -4438,21 +4438,6 @@ test_send_ikev2_encrypted_create_child_rekey_from(
 }
 
 static void
-test_send_ikev2_encrypted_create_child_rekey_esn_from(
-    int fd,
-    uint16_t port,
-    uint64_t initiator_spi,
-    const struct test_ikev2_sa_init_response_material *material,
-    bool natt,
-    uint32_t message_id)
-{
-    test_send_ikev2_encrypted_create_child_impl(
-        fd, port, initiator_spi, material, natt, message_id,
-        PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16, true, true, 0x0a580002,
-        0x0a580002, 0x0a580001, 0x0a580001);
-}
-
-static void
 test_send_ikev2_encrypted_create_child_rekey_esn_full_tunnel_from(
     int fd,
     uint16_t port,

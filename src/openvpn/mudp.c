@@ -40,7 +40,7 @@
 static void
 send_hmac_reset_packet(struct multi_context *m, struct tls_pre_decrypt_state *state,
                        struct tls_auth_standalone *tas, struct session_id *sid,
-                       bool request_resend_wkc)
+                       bool request_resend_wkc, struct link_socket *sock)
 {
     reset_packet_id_send(&state->tls_wrap_tmp.opt.packet_id.send);
     state->tls_wrap_tmp.opt.packet_id.rec.initialized = true;
@@ -54,16 +54,30 @@ send_hmac_reset_packet(struct multi_context *m, struct tls_pre_decrypt_state *st
     ASSERT(buf_init(&c->c2.buffers->aux_buf, buf.offset));
 
     buf_copy(&c->c2.buffers->aux_buf, &buf);
-    m->hmac_reply = c->c2.buffers->aux_buf;
-    m->hmac_reply_dest = &m->top.c2.from;
+
+    /*
+     * We do not want to keep any state here, so we send the reply to the
+     * initial packet synchronously without queueing anything.
+     *
+     * If we hit EAGAIN on a busy socket, the packet will be lost and the
+     * client will have to retransmit its HARD_RESET. This is considered an
+     * acceptable compromise to avoid consuming server resources under attack.
+     */
+    msg_set_prefix("Connection Attempt");
+    c->c2.to_link = c->c2.buffers->aux_buf;
+    c->c2.to_link_addr = &c->c2.from;
     msg(D_MULTI_DEBUG, "Reset packet from client, sending HMAC based reset challenge");
+    process_outgoing_link(c, sock);
+    c->c2.to_link.len = 0;
+    c->c2.to_link_addr = NULL;
+    msg_set_prefix(NULL);
 }
 
 
 /* Returns true if this packet should create a new session */
 static bool
 do_pre_decrypt_check(struct multi_context *m, struct tls_pre_decrypt_state *state,
-                     struct mroute_addr addr)
+                     struct mroute_addr addr, struct link_socket *sock)
 {
     ASSERT(m->top.c2.tls_auth_standalone);
 
@@ -106,7 +120,7 @@ do_pre_decrypt_check(struct multi_context *m, struct tls_pre_decrypt_state *stat
             /* Calculate the session ID HMAC for our reply and create reset packet */
             struct session_id sid =
                 calculate_session_id_hmac(state->peer_session_id, from, hmac, handwindow, 0);
-            send_hmac_reset_packet(m, state, tas, &sid, true);
+            send_hmac_reset_packet(m, state, tas, &sid, true, sock);
 
             return false;
         }
@@ -139,7 +153,7 @@ do_pre_decrypt_check(struct multi_context *m, struct tls_pre_decrypt_state *stat
         struct session_id sid =
             calculate_session_id_hmac(state->peer_session_id, from, hmac, handwindow, 0);
 
-        send_hmac_reset_packet(m, state, tas, &sid, false);
+        send_hmac_reset_packet(m, state, tas, &sid, false, sock);
 
         /* We have a reply do not create a new session */
         return false;
@@ -180,12 +194,81 @@ do_pre_decrypt_check(struct multi_context *m, struct tls_pre_decrypt_state *stat
     return false;
 }
 
-/*
+/**
+ * Handles a packet if no existing session exists for this incoming packet.
+ *
+ * It will either send a reply with a hmac cookie if this is the first
+ * packet of a three-way handshake or create a multi_instance if it is a
+ * packet that completes the three-way handshake.
+ */
+static struct multi_instance *
+handle_connection_attempt(struct multi_context *m,
+                          struct link_socket *sock,
+                          struct mroute_addr *real,
+                          const uint64_t hv,
+                          struct hash_bucket *bucket)
+{
+    struct hash *hash = m->hash;
+    struct tls_pre_decrypt_state state = { 0 };
+    struct multi_instance *mi = NULL;
+    struct gc_arena gc = gc_new();
+
+    if (m->deferred_shutdown_signal.signal_received)
+    {
+        msg(D_MULTI_ERRORS,
+            "MULTI: Connection attempt from %s ignored while server is "
+            "shutting down",
+            mroute_addr_print(real, &gc));
+    }
+    else if (do_pre_decrypt_check(m, &state, *real, sock))
+    {
+        /* This is an unknown session but with valid tls-auth/tls-crypt
+         * (or no auth at all).  If this is the initial packet of a
+         * session, we just send a reply with a HMAC session id and
+         * do not generate a session slot */
+
+        if (frequency_limit_event_allowed(m->new_connection_limiter))
+        {
+            /* a successful three-way handshake only counts against
+             * connect-freq but not against connect-freq-initial */
+            reflect_filter_rate_limit_decrease(m->initial_rate_limiter);
+
+            mi = multi_create_instance(m, real, sock);
+            if (mi)
+            {
+                hash_add_fast(hash, bucket, &mi->real, hv, mi);
+                mi->did_real_hash = true;
+                multi_assign_peer_id(m, mi);
+
+                /* If we have a session id already, ensure that the
+                 * state is using the same */
+                if (session_id_defined(&state.server_session_id)
+                    && session_id_defined((&state.peer_session_id)))
+                {
+                    mi->context.c2.tls_multi->n_sessions++;
+                    struct tls_session *session =
+                        &mi->context.c2.tls_multi->session[TM_INITIAL];
+                    session_skip_to_pre_start(session, &state, &m->top.c2.from);
+                }
+            }
+        }
+        else
+        {
+            msg(D_MULTI_ERRORS,
+                "MULTI: Connection from %s would exceed new connection frequency limit as controlled by --connect-freq",
+                mroute_addr_print(real, &gc));
+        }
+    }
+    free_tls_pre_decrypt_state(&state);
+    gc_free(&gc);
+    return mi;
+}
+
+/**
  * Get a client instance based on real address.  If
  * the instance doesn't exist, create it while
  * maintaining real address hash table atomicity.
  */
-
 struct multi_instance *
 multi_get_create_instance_udp(struct multi_context *m, bool *floated, struct link_socket *sock)
 {
@@ -194,12 +277,11 @@ multi_get_create_instance_udp(struct multi_context *m, bool *floated, struct lin
     struct multi_instance *mi = NULL;
     struct hash *hash = m->hash;
     real.proto = sock->info.proto;
-    m->hmac_reply_ls = sock;
 
     if (mroute_extract_openvpn_sockaddr(&real, &m->top.c2.from.dest, true) && m->top.c2.buf.len > 0)
     {
         struct hash_element *he;
-        const uint32_t hv = hash_value(hash, &real);
+        const uint64_t hv = hash_value(hash, &real);
         struct hash_bucket *bucket = hash_bucket(hash, hv);
         uint8_t *ptr = BPTR(&m->top.c2.buf);
         uint8_t op = ptr[0] >> P_OPCODE_SHIFT;
@@ -245,54 +327,7 @@ multi_get_create_instance_udp(struct multi_context *m, bool *floated, struct lin
         /* we have no existing multi instance for this connection */
         if (!mi)
         {
-            struct tls_pre_decrypt_state state = { 0 };
-            if (m->deferred_shutdown_signal.signal_received)
-            {
-                msg(D_MULTI_ERRORS,
-                    "MULTI: Connection attempt from %s ignored while server is "
-                    "shutting down",
-                    mroute_addr_print(&real, &gc));
-            }
-            else if (do_pre_decrypt_check(m, &state, real))
-            {
-                /* This is an unknown session but with valid tls-auth/tls-crypt
-                 * (or no auth at all).  If this is the initial packet of a
-                 * session, we just send a reply with a HMAC session id and
-                 * do not generate a session slot */
-
-                if (frequency_limit_event_allowed(m->new_connection_limiter))
-                {
-                    /* a successful three-way handshake only counts against
-                     * connect-freq but not against connect-freq-initial */
-                    reflect_filter_rate_limit_decrease(m->initial_rate_limiter);
-
-                    mi = multi_create_instance(m, &real, sock);
-                    if (mi)
-                    {
-                        hash_add_fast(hash, bucket, &mi->real, hv, mi);
-                        mi->did_real_hash = true;
-                        multi_assign_peer_id(m, mi);
-
-                        /* If we have a session id already, ensure that the
-                         * state is using the same */
-                        if (session_id_defined(&state.server_session_id)
-                            && session_id_defined((&state.peer_session_id)))
-                        {
-                            mi->context.c2.tls_multi->n_sessions++;
-                            struct tls_session *session =
-                                &mi->context.c2.tls_multi->session[TM_INITIAL];
-                            session_skip_to_pre_start(session, &state, &m->top.c2.from);
-                        }
-                    }
-                }
-                else
-                {
-                    msg(D_MULTI_ERRORS,
-                        "MULTI: Connection from %s would exceed new connection frequency limit as controlled by --connect-freq",
-                        mroute_addr_print(&real, &gc));
-                }
-            }
-            free_tls_pre_decrypt_state(&state);
+            mi = handle_connection_attempt(m, sock, &real, hv, bucket);
         }
 
 #ifdef ENABLE_DEBUG
@@ -321,33 +356,23 @@ multi_process_outgoing_link(struct multi_context *m, const unsigned int mpp_flag
     {
         multi_process_outgoing_link_dowork(m, mi, mpp_flags);
     }
-    if (m->hmac_reply_dest && m->hmac_reply.len > 0)
-    {
-        msg_set_prefix("Connection Attempt");
-        m->top.c2.to_link = m->hmac_reply;
-        m->top.c2.to_link_addr = m->hmac_reply_dest;
-        process_outgoing_link(&m->top, m->hmac_reply_ls);
-        m->hmac_reply_ls = NULL;
-        m->hmac_reply_dest = NULL;
-    }
 }
 
 /*
  * Process a UDP socket event.
  */
 void
-multi_process_io_udp(struct multi_context *m, struct link_socket *sock)
+multi_process_io_udp(struct multi_context *m, struct link_socket *sock, unsigned int rwflags)
 {
-    const unsigned int status = m->multi_io->udp_flags;
     const unsigned int mpp_flags = (MPP_PRE_SELECT | MPP_CLOSE_ON_SIGNAL);
 
     /* UDP port ready to accept write */
-    if (status & SOCKET_WRITE)
+    if (rwflags & SOCKET_WRITE)
     {
         multi_process_outgoing_link(m, mpp_flags);
     }
     /* Incoming data on UDP port */
-    else if (status & SOCKET_READ)
+    else if (rwflags & SOCKET_READ)
     {
         read_incoming_link(&m->top, sock);
         if (!IS_SIG(&m->top))
@@ -355,40 +380,4 @@ multi_process_io_udp(struct multi_context *m, struct link_socket *sock)
             multi_process_incoming_link(m, NULL, mpp_flags, sock);
         }
     }
-
-    m->multi_io->udp_flags = ES_ERROR;
-}
-
-/*
- * Return the io_wait() flags appropriate for
- * a point-to-multipoint tunnel.
- */
-unsigned int
-p2mp_iow_flags(const struct multi_context *m)
-{
-    unsigned int flags = IOW_WAIT_SIGNAL;
-    if (m->pending)
-    {
-        if (TUN_OUT(&m->pending->context))
-        {
-            flags |= IOW_TO_TUN;
-        }
-        if (LINK_OUT(&m->pending->context))
-        {
-            flags |= IOW_TO_LINK;
-        }
-    }
-    else if (mbuf_defined(m->mbuf))
-    {
-        flags |= IOW_MBUF;
-    }
-    else if (m->hmac_reply_dest)
-    {
-        flags |= IOW_TO_LINK;
-    }
-    else
-    {
-        flags |= IOW_READ;
-    }
-    return flags;
 }
