@@ -904,6 +904,90 @@ provider_xfrm_linux_message_plan_apply(
                                                           result);
 }
 
+static bool
+provider_xfrm_linux_default_apply_hook(
+    const struct provider_xfrm_linux_message_plan *messages,
+    void *arg,
+    struct provider_xfrm_result *result)
+{
+    (void)arg;
+    return provider_xfrm_linux_message_plan_apply(messages, result);
+}
+
+static bool
+provider_xfrm_linux_default_rollback_hook(
+    const struct provider_xfrm_child_sa_plan *plan,
+    void *arg,
+    struct provider_xfrm_result *result)
+{
+    (void)arg;
+    return provider_xfrm_linux_child_sa_reconcile_delete(plan, result);
+}
+
+bool
+provider_xfrm_linux_child_sa_plan_apply_with_hooks(
+    const struct provider_xfrm_child_sa_plan *plan,
+    provider_xfrm_linux_child_sa_apply_hook apply_fn,
+    provider_xfrm_linux_child_sa_rollback_hook rollback_fn,
+    void *arg,
+    struct provider_xfrm_result *result)
+{
+    struct provider_xfrm_linux_message_plan messages;
+    struct provider_xfrm_result apply_result;
+    struct provider_xfrm_result rollback_result;
+    provider_xfrm_result_init(&apply_result);
+    provider_xfrm_result_init(&rollback_result);
+
+    if (!apply_fn || !rollback_fn)
+    {
+        provider_xfrm_linux_set_error(result, "missing XFRM apply hooks");
+        return false;
+    }
+    if (!provider_xfrm_linux_child_sa_messages_build(&messages, plan, result))
+    {
+        return false;
+    }
+
+    if (apply_fn(&messages, arg, &apply_result))
+    {
+        if (result)
+        {
+            *result = apply_result;
+        }
+        provider_xfrm_linux_message_plan_clear(&messages);
+        return true;
+    }
+
+    const bool rollback_ok = rollback_fn(plan, arg, &rollback_result);
+    if (result)
+    {
+        result->ok = false;
+        if (!rollback_ok)
+        {
+            snprintf(result->reason, sizeof(result->reason), "%s",
+                     "XFRM apply failed and rollback failed");
+        }
+        else
+        {
+            snprintf(result->reason, sizeof(result->reason), "%s",
+                     apply_result.reason[0] ? apply_result.reason
+                                            : "XFRM apply failed");
+        }
+    }
+    provider_xfrm_linux_message_plan_clear(&messages);
+    return false;
+}
+
+bool
+provider_xfrm_linux_child_sa_plan_apply(
+    const struct provider_xfrm_child_sa_plan *plan,
+    struct provider_xfrm_result *result)
+{
+    return provider_xfrm_linux_child_sa_plan_apply_with_hooks(
+        plan, provider_xfrm_linux_default_apply_hook,
+        provider_xfrm_linux_default_rollback_hook, NULL, result);
+}
+
 #else  /* if defined(TARGET_LINUX) */
 
 void
@@ -950,6 +1034,36 @@ provider_xfrm_linux_child_sa_reconcile_delete(
     struct provider_xfrm_result *result)
 {
     (void)plan;
+    provider_xfrm_result_init(result);
+    provider_xfrm_linux_set_error(result,
+                                  "Linux XFRM backend is unavailable");
+    return false;
+}
+
+bool
+provider_xfrm_linux_child_sa_plan_apply(
+    const struct provider_xfrm_child_sa_plan *plan,
+    struct provider_xfrm_result *result)
+{
+    (void)plan;
+    provider_xfrm_result_init(result);
+    provider_xfrm_linux_set_error(result,
+                                  "Linux XFRM backend is unavailable");
+    return false;
+}
+
+bool
+provider_xfrm_linux_child_sa_plan_apply_with_hooks(
+    const struct provider_xfrm_child_sa_plan *plan,
+    provider_xfrm_linux_child_sa_apply_hook apply_fn,
+    provider_xfrm_linux_child_sa_rollback_hook rollback_fn,
+    void *arg,
+    struct provider_xfrm_result *result)
+{
+    (void)plan;
+    (void)apply_fn;
+    (void)rollback_fn;
+    (void)arg;
     provider_xfrm_result_init(result);
     provider_xfrm_linux_set_error(result,
                                   "Linux XFRM backend is unavailable");

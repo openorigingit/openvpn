@@ -7990,18 +7990,14 @@ ikev2_helper_migrate_child_sa_xfrm(
 
     struct provider_xfrm_child_sa_plan old_plan = sa->child_sa.xfrm_plan;
     struct provider_xfrm_child_sa_plan new_plan;
-    struct provider_xfrm_linux_message_plan messages;
     struct provider_xfrm_result result;
     CLEAR(new_plan);
-    CLEAR(messages);
 
     enum ikev2_helper_child_sa_xfrm_migrate_result ret =
         IKEV2_HELPER_CHILD_SA_XFRM_MIGRATE_FAILED_UNCHANGED;
 
     if (!ikev2_helper_build_migrated_child_sa_xfrm_plan(
-            sa, &sa->child_sa, &new_plan, &result)
-        || !provider_xfrm_linux_child_sa_messages_build(&messages, &new_plan,
-                                                        &result))
+            sa, &sa->child_sa, &new_plan, &result))
     {
         goto done;
     }
@@ -8020,7 +8016,7 @@ ikev2_helper_migrate_child_sa_xfrm(
     }
     sa->child_sa.xfrm_applied = false;
 
-    if (!provider_xfrm_linux_message_plan_apply(&messages, &result))
+    if (!provider_xfrm_linux_child_sa_plan_apply(&new_plan, &result))
     {
         if (counters)
         {
@@ -8041,7 +8037,6 @@ ikev2_helper_migrate_child_sa_xfrm(
     ret = IKEV2_HELPER_CHILD_SA_XFRM_MIGRATE_OK;
 
 done:
-    provider_xfrm_linux_message_plan_clear(&messages);
     ikev2_helper_secure_zero(&old_plan, sizeof(old_plan));
     ikev2_helper_secure_zero(&new_plan, sizeof(new_plan));
     return ret;
@@ -8904,13 +8899,10 @@ ikev2_helper_build_child_sa_xfrm_plan(
     };
 
     struct provider_xfrm_result result;
-    struct provider_xfrm_linux_message_plan messages;
     bool ret = provider_xfrm_child_sa_plan_build(&child->xfrm_plan,
-                                                 &spec, &result)
-               && provider_xfrm_linux_child_sa_messages_build(
-                   &messages, &child->xfrm_plan, &result);
+                                                 &spec, &result);
     if (ret && apply_xfrm
-        && !provider_xfrm_linux_message_plan_apply(&messages, &result))
+        && !provider_xfrm_linux_child_sa_plan_apply(&child->xfrm_plan, &result))
     {
         ret = false;
         if (xfrm_apply_failed)
@@ -8918,7 +8910,6 @@ ikev2_helper_build_child_sa_xfrm_plan(
             *xfrm_apply_failed = true;
         }
     }
-    provider_xfrm_linux_message_plan_clear(&messages);
     return ret;
 }
 

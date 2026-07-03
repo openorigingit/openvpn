@@ -33,6 +33,16 @@ struct provider_xfrm_linux_message_plan {
         messages[PROVIDER_XFRM_LINUX_MAX_MESSAGES];
 };
 
+typedef bool (*provider_xfrm_linux_child_sa_apply_hook)(
+    const struct provider_xfrm_linux_message_plan *messages,
+    void *arg,
+    struct provider_xfrm_result *result);
+
+typedef bool (*provider_xfrm_linux_child_sa_rollback_hook)(
+    const struct provider_xfrm_child_sa_plan *plan,
+    void *arg,
+    struct provider_xfrm_result *result);
+
 void provider_xfrm_linux_message_plan_clear(
     struct provider_xfrm_linux_message_plan *messages);
 
@@ -48,6 +58,17 @@ bool provider_xfrm_linux_child_sa_delete_messages_build(
 
 bool provider_xfrm_linux_child_sa_reconcile_delete(
     const struct provider_xfrm_child_sa_plan *plan,
+    struct provider_xfrm_result *result);
+
+bool provider_xfrm_linux_child_sa_plan_apply(
+    const struct provider_xfrm_child_sa_plan *plan,
+    struct provider_xfrm_result *result);
+
+bool provider_xfrm_linux_child_sa_plan_apply_with_hooks(
+    const struct provider_xfrm_child_sa_plan *plan,
+    provider_xfrm_linux_child_sa_apply_hook apply_fn,
+    provider_xfrm_linux_child_sa_rollback_hook rollback_fn,
+    void *arg,
     struct provider_xfrm_result *result);
 
 bool provider_xfrm_linux_message_plan_apply(

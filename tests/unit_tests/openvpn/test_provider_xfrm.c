@@ -648,6 +648,78 @@ test_provider_xfrm_linux_builds_child_sa_delete_messages(void **state)
 #endif
 }
 
+#if defined(TARGET_LINUX)
+struct provider_xfrm_linux_rollback_test_state {
+    unsigned int apply_calls;
+    unsigned int rollback_calls;
+    size_t applied_message_count;
+    uint64_t rollback_lease_id;
+};
+
+static bool
+test_provider_xfrm_linux_apply_fails(
+    const struct provider_xfrm_linux_message_plan *messages,
+    void *arg,
+    struct provider_xfrm_result *result)
+{
+    struct provider_xfrm_linux_rollback_test_state *test_state = arg;
+    assert_non_null(messages);
+    assert_non_null(test_state);
+    ++test_state->apply_calls;
+    test_state->applied_message_count = messages->count;
+    result->ok = false;
+    snprintf(result->reason, sizeof(result->reason), "%s",
+             "forced apply failure");
+    return false;
+}
+
+static bool
+test_provider_xfrm_linux_rollback_records_plan(
+    const struct provider_xfrm_child_sa_plan *plan,
+    void *arg,
+    struct provider_xfrm_result *result)
+{
+    struct provider_xfrm_linux_rollback_test_state *test_state = arg;
+    assert_non_null(plan);
+    assert_non_null(test_state);
+    ++test_state->rollback_calls;
+    test_state->rollback_lease_id = plan->lease_id;
+    result->ok = true;
+    snprintf(result->reason, sizeof(result->reason), "%s", "rollback ok");
+    return true;
+}
+#endif
+
+static void
+test_provider_xfrm_linux_rolls_back_failed_child_sa_apply(void **state)
+{
+    (void)state;
+#if !defined(TARGET_LINUX)
+    skip();
+#else
+    struct provider_xfrm_child_sa_plan plan;
+    struct provider_xfrm_result result;
+    struct provider_xfrm_child_sa_spec spec = default_child_sa_spec();
+    struct provider_xfrm_linux_rollback_test_state test_state;
+    CLEAR(test_state);
+
+    assert_true(provider_xfrm_child_sa_plan_build(&plan, &spec, &result));
+    assert_false(provider_xfrm_linux_child_sa_plan_apply_with_hooks(
+                     &plan, test_provider_xfrm_linux_apply_fails,
+                     test_provider_xfrm_linux_rollback_records_plan,
+                     &test_state, &result));
+    assert_false(result.ok);
+    assert_non_null(strstr(result.reason, "forced apply failure"));
+    assert_int_equal(test_state.apply_calls, 1);
+    assert_int_equal(test_state.applied_message_count,
+                     PROVIDER_XFRM_LINUX_MAX_MESSAGES);
+    assert_int_equal(test_state.rollback_calls, 1);
+    assert_int_equal(test_state.rollback_lease_id, plan.lease_id);
+
+    provider_xfrm_child_sa_plan_clear(&plan);
+#endif
+}
+
 static void
 test_provider_xfrm_linux_rejects_empty_apply(void **state)
 {
@@ -767,6 +839,7 @@ main(void)
         cmocka_unit_test(test_provider_xfrm_linux_builds_child_sa_messages),
         cmocka_unit_test(test_provider_xfrm_linux_rejects_unrepresentable_selectors),
         cmocka_unit_test(test_provider_xfrm_linux_builds_child_sa_delete_messages),
+        cmocka_unit_test(test_provider_xfrm_linux_rolls_back_failed_child_sa_apply),
         cmocka_unit_test(test_provider_xfrm_linux_rejects_empty_apply),
         cmocka_unit_test(test_provider_xfrm_linux_applies_in_private_netns),
     };
