@@ -779,6 +779,8 @@ struct provider_helper_supervisor {
     uint64_t negotiated_features;
     uint8_t launch_nonce[PROVIDER_HELPER_LAUNCH_NONCE_SIZE];
     bool launch_nonce_required;
+    bool peer_cred_required;
+    bool peer_cred_verified;
     struct provider_helper_runtime_config runtime_config;
     struct provider_helper_runtime_stats runtime_stats;
     unsigned int restart_count;

@@ -8226,6 +8226,64 @@ test_provider_helper_accepts_matching_launch_nonce_hello(void **state)
 }
 
 static void
+test_provider_helper_rejects_unexpected_peer_credentials(void **state)
+{
+    (void)state;
+
+#if !defined(TARGET_LINUX)
+    skip();
+#else
+    int fds[2] = { -1, -1 };
+    assert_int_equal(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    const int on = 1;
+    assert_int_equal(setsockopt(fds[0], SOL_SOCKET, SO_PASSCRED, &on,
+                                sizeof(on)), 0);
+
+    struct provider_helper_supervisor supervisor;
+    provider_helper_supervisor_init(&supervisor);
+    supervisor.ipc_fd = fds[0];
+    supervisor.peer_cred_required = true;
+    provider_helper_supervisor_set_state(&supervisor,
+                                         PROVIDER_HELPER_STATE_STARTING);
+
+    const pid_t pid = fork();
+    assert_true(pid >= 0);
+    if (pid == 0)
+    {
+        close(fds[0]);
+        uint8_t payload[PROVIDER_HELPER_FEATURE_SET_SIZE];
+        const struct provider_helper_feature_set features = { 0 };
+        if (!provider_helper_ipc_encode_feature_set(payload, sizeof(payload),
+                                                    &features))
+        {
+            _exit(2);
+        }
+        write_helper_hello_with_payload(fds[1], payload, sizeof(payload));
+        close(fds[1]);
+        _exit(0);
+    }
+
+    close(fds[1]);
+    for (int i = 0; i < 100 && supervisor.ipc_fd >= 0; ++i)
+    {
+        provider_helper_process_event(&supervisor);
+        usleep(10000);
+    }
+
+    int status = 0;
+    assert_int_equal(waitpid(pid, &status, 0), pid);
+    assert_true(WIFEXITED(status));
+    assert_int_equal(WEXITSTATUS(status), 0);
+    assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_DEGRADED);
+    assert_int_equal(supervisor.ipc_fd, -1);
+    assert_false(supervisor.peer_cred_verified);
+
+    provider_helper_supervisor_free(&supervisor);
+#endif
+}
+
+static void
 test_provider_helper_start_timeout_fails_closed(void **state)
 {
     (void)state;
@@ -8455,6 +8513,9 @@ test_provider_helper_spawn_closes_unlisted_child_fds(void **state)
 
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_READY);
     assert_true(supervisor.pid > 0);
+#if defined(TARGET_LINUX)
+    assert_true(supervisor.peer_cred_verified);
+#endif
     provider_helper_supervisor_stop(&supervisor);
     assert_int_equal(supervisor.state, PROVIDER_HELPER_STATE_STOPPED);
     assert_int_equal(supervisor.ipc_fd, -1);
@@ -14106,6 +14167,7 @@ main(void)
         cmocka_unit_test(test_provider_helper_processes_partial_header),
         cmocka_unit_test(test_provider_helper_rejects_missing_launch_nonce_hello),
         cmocka_unit_test(test_provider_helper_accepts_matching_launch_nonce_hello),
+        cmocka_unit_test(test_provider_helper_rejects_unexpected_peer_credentials),
         cmocka_unit_test(test_provider_helper_auth_request_callback),
         cmocka_unit_test(test_provider_helper_session_close_callback),
         cmocka_unit_test(test_provider_helper_session_update_callback),

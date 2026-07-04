@@ -195,6 +195,8 @@ provider_helper_close_ipc(struct provider_helper_supervisor *supervisor)
     CLEAR(supervisor->pending_header);
     secure_memzero(supervisor->launch_nonce, sizeof(supervisor->launch_nonce));
     supervisor->launch_nonce_required = false;
+    supervisor->peer_cred_required = false;
+    supervisor->peer_cred_verified = false;
 }
 
 void
@@ -743,6 +745,92 @@ provider_helper_launch_nonce_equal(const uint8_t *a, const uint8_t *b)
     }
     return diff == 0;
 }
+
+#if defined(TARGET_LINUX)
+static bool
+provider_helper_supervisor_verify_peer_cred(
+    struct provider_helper_supervisor *supervisor,
+    const struct msghdr *msg)
+{
+    if (!supervisor || !msg || !supervisor->peer_cred_required
+        || supervisor->peer_cred_verified || supervisor->pid <= 0)
+    {
+        return false;
+    }
+
+    for (const struct cmsghdr *cmsg = CMSG_FIRSTHDR((struct msghdr *)msg);
+         cmsg;
+         cmsg = CMSG_NXTHDR((struct msghdr *)msg, (struct cmsghdr *)cmsg))
+    {
+        if (cmsg->cmsg_level == SOL_SOCKET
+            && cmsg->cmsg_type == SCM_CREDENTIALS
+            && cmsg->cmsg_len >= CMSG_LEN(sizeof(struct ucred)))
+        {
+            const struct ucred *cred =
+                (const struct ucred *)CMSG_DATA((struct cmsghdr *)cmsg);
+            if (cred->pid != supervisor->pid || cred->uid != geteuid())
+            {
+                return false;
+            }
+            supervisor->peer_cred_verified = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+static ssize_t
+provider_helper_supervisor_read_ipc(struct provider_helper_supervisor *supervisor,
+                                    uint8_t *data, size_t len)
+{
+    if (!supervisor || supervisor->ipc_fd < 0 || !data || !len)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (supervisor->peer_cred_required && !supervisor->peer_cred_verified)
+    {
+        char control[CMSG_SPACE(sizeof(struct ucred))];
+        struct iovec iov = {
+            .iov_base = data,
+            .iov_len = len,
+        };
+        struct msghdr msg = {
+            .msg_iov = &iov,
+            .msg_iovlen = 1,
+            .msg_control = control,
+            .msg_controllen = sizeof(control),
+        };
+        CLEAR(control);
+        const ssize_t ret = recvmsg(supervisor->ipc_fd, &msg, 0);
+        if (ret <= 0)
+        {
+            return ret;
+        }
+        if (!provider_helper_supervisor_verify_peer_cred(supervisor, &msg))
+        {
+            errno = EPERM;
+            return -1;
+        }
+        return ret;
+    }
+
+    return read(supervisor->ipc_fd, data, len);
+}
+#else  /* if defined(TARGET_LINUX) */
+static ssize_t
+provider_helper_supervisor_read_ipc(struct provider_helper_supervisor *supervisor,
+                                    uint8_t *data, size_t len)
+{
+    if (!supervisor || supervisor->ipc_fd < 0 || !data || !len)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    return read(supervisor->ipc_fd, data, len);
+}
+#endif /* if defined(TARGET_LINUX) */
 
 static bool
 provider_helper_supervisor_send_hello_reply(
@@ -1294,6 +1382,18 @@ provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
         return false;
     }
 
+#if defined(TARGET_LINUX)
+    const int passcred = 1;
+    if (setsockopt(fds[0], SOL_SOCKET, SO_PASSCRED, &passcred,
+                   sizeof(passcred)) != 0)
+    {
+        msg(M_WARN | M_ERRNO, "provider-helper: SO_PASSCRED failed");
+        close(fds[0]);
+        close(fds[1]);
+        return false;
+    }
+#endif
+
     char nonce_hex[PROVIDER_HELPER_LAUNCH_NONCE_HEX_SIZE + 1];
     if (!rand_bytes(supervisor->launch_nonce,
                     (int)sizeof(supervisor->launch_nonce))
@@ -1355,6 +1455,10 @@ provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
     supervisor->has_spawned = true;
     supervisor->ipc_fd = fds[0];
     supervisor->pid = pid;
+#if defined(TARGET_LINUX)
+    supervisor->peer_cred_required = true;
+    supervisor->peer_cred_verified = false;
+#endif
     supervisor->last_rx_sequence = 0;
     supervisor->header_len = 0;
     supervisor->payload_len = 0;
@@ -1564,9 +1668,10 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
     if (supervisor->payload_len)
     {
         const size_t remaining = supervisor->payload_len - supervisor->payload_received;
-        const ssize_t n = read(supervisor->ipc_fd,
-                               supervisor->payload_buf + supervisor->payload_received,
-                               remaining);
+        const ssize_t n = provider_helper_supervisor_read_ipc(
+            supervisor,
+            supervisor->payload_buf + supervisor->payload_received,
+            remaining);
         if (n < 0)
         {
             if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -1700,8 +1805,9 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
     }
 
     const size_t remaining = sizeof(supervisor->header_buf) - supervisor->header_len;
-    const ssize_t n = read(supervisor->ipc_fd, supervisor->header_buf + supervisor->header_len,
-                           remaining);
+    const ssize_t n = provider_helper_supervisor_read_ipc(
+        supervisor, supervisor->header_buf + supervisor->header_len,
+        remaining);
     if (n < 0)
     {
         if (errno == EAGAIN || errno == EWOULDBLOCK)
