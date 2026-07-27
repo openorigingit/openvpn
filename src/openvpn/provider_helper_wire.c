@@ -34,22 +34,33 @@
 
 #include "memdbg.h"
 
-#define PROVIDER_HELPER_EAP_HEADER_SIZE 4
-#define PROVIDER_HELPER_EAP_TYPE_HEADER_SIZE 5
-#define PROVIDER_HELPER_EAP_TLS_HEADER_SIZE 6
-#define PROVIDER_HELPER_EAP_TLS_LENGTH_SIZE 4
-#define PROVIDER_HELPER_EAP_CODE_REQUEST 1
-#define PROVIDER_HELPER_EAP_CODE_RESPONSE 2
-#define PROVIDER_HELPER_EAP_CODE_SUCCESS 3
-#define PROVIDER_HELPER_EAP_CODE_FAILURE 4
-#define PROVIDER_HELPER_EAP_TYPE_IDENTITY 1
-#define PROVIDER_HELPER_EAP_TYPE_TLS 13
-#define PROVIDER_HELPER_EAP_TLS_FLAG_START 0x20
-#define PROVIDER_HELPER_EAP_TLS_FLAG_MORE_FRAGMENTS 0x40
+#define PROVIDER_HELPER_EAP_HEADER_SIZE              4
+#define PROVIDER_HELPER_EAP_TYPE_HEADER_SIZE         5
+#define PROVIDER_HELPER_EAP_TLS_HEADER_SIZE          6
+#define PROVIDER_HELPER_EAP_TLS_LENGTH_SIZE          4
+#define PROVIDER_HELPER_EAP_CODE_REQUEST             1
+#define PROVIDER_HELPER_EAP_CODE_RESPONSE            2
+#define PROVIDER_HELPER_EAP_CODE_SUCCESS             3
+#define PROVIDER_HELPER_EAP_CODE_FAILURE             4
+#define PROVIDER_HELPER_EAP_TYPE_IDENTITY            1
+#define PROVIDER_HELPER_EAP_TYPE_TLS                 13
+#define PROVIDER_HELPER_EAP_TLS_FLAG_START           0x20
+#define PROVIDER_HELPER_EAP_TLS_FLAG_MORE_FRAGMENTS  0x40
 #define PROVIDER_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED 0x80
-#define PROVIDER_HELPER_EAP_TLS_FLAGS_ALLOWED \
+#define PROVIDER_HELPER_EAP_TLS_FLAGS_ALLOWED     \
     (PROVIDER_HELPER_EAP_TLS_FLAG_LENGTH_INCLUDED \
      | PROVIDER_HELPER_EAP_TLS_FLAG_MORE_FRAGMENTS)
+
+bool
+provider_helper_revision_next(uint64_t current, uint64_t *next)
+{
+    if (!current || current == UINT64_MAX || !next)
+    {
+        return false;
+    }
+    *next = current + 1;
+    return *next != 0;
+}
 
 void
 provider_helper_runtime_config_default(struct provider_helper_runtime_config *config)
@@ -103,7 +114,8 @@ provider_helper_runtime_config_valid(const struct provider_helper_runtime_config
     const uint32_t allowed_flags = PROVIDER_HELPER_CONFIG_FORCE_NATT
                                    | PROVIDER_HELPER_CONFIG_IPV4_ONLY
                                    | PROVIDER_HELPER_CONFIG_APPLY_XFRM
-                                   | PROVIDER_HELPER_CONFIG_TEST_AUTH_CONTINUATION;
+                                   | PROVIDER_HELPER_CONFIG_TEST_AUTH_CONTINUATION
+                                   | PROVIDER_HELPER_CONFIG_TEST_XFRM_DELETE_FAILURE;
 
     if (!config)
     {
@@ -819,7 +831,8 @@ provider_helper_server_auth_config_valid(
                                       "server auth config revision must be nonzero");
         return false;
     }
-    if (config->flags || config->reserved)
+    if ((config->flags & ~PROVIDER_HELPER_SERVER_AUTH_FLAGS_SUPPORTED)
+        || config->reserved)
     {
         provider_helper_config_reason(reason, reason_size,
                                       "server auth config reserved fields must be zero");
@@ -852,6 +865,26 @@ provider_helper_server_auth_config_valid(
     {
         provider_helper_config_reason(reason, reason_size,
                                       "invalid server certificate chain length");
+        return false;
+    }
+    if (!config->client_ca_bundle_len
+        || config->client_ca_bundle_len > sizeof(config->client_ca_bundle))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "invalid client CA bundle length");
+        return false;
+    }
+    if (config->client_crl_bundle_len > sizeof(config->client_crl_bundle))
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "invalid client CRL bundle length");
+        return false;
+    }
+    if ((config->flags & PROVIDER_HELPER_SERVER_AUTH_CLIENT_CRL_REQUIRED)
+        && !config->client_crl_bundle_len)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "configured client CRL is missing");
         return false;
     }
     if (!config->allowed_sigalgs
@@ -904,7 +937,7 @@ provider_helper_server_sign_request_valid(
         return false;
     }
     if (request->auth_method
-        != PROVIDER_HELPER_SERVER_AUTH_METHOD_DIGITAL_SIGNATURE
+            != PROVIDER_HELPER_SERVER_AUTH_METHOD_DIGITAL_SIGNATURE
         && request->auth_method
                != PROVIDER_HELPER_SERVER_AUTH_METHOD_ECDSA_SHA256_P256)
     {
@@ -986,6 +1019,98 @@ provider_helper_server_sign_response_valid(
         provider_helper_config_reason(reason, reason_size,
                                       "failed server sign response must not carry signature");
         return false;
+    }
+
+    provider_helper_config_reason(reason, reason_size, "ok");
+    return true;
+}
+
+bool
+provider_helper_client_trust_refresh_request_valid(
+    const struct provider_helper_client_trust_refresh_request *request,
+    char *reason,
+    size_t reason_size)
+{
+    if (!request)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "missing client trust refresh request");
+        return false;
+    }
+    if (!request->request_id || !request->config_revision)
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "client trust refresh request ids must be nonzero");
+        return false;
+    }
+
+    provider_helper_config_reason(reason, reason_size, "ok");
+    return true;
+}
+
+bool
+provider_helper_client_trust_refresh_response_valid(
+    const struct provider_helper_client_trust_refresh_response *response,
+    char *reason,
+    size_t reason_size)
+{
+    if (!response)
+    {
+        provider_helper_config_reason(reason, reason_size,
+                                      "missing client trust refresh response");
+        return false;
+    }
+    if (!response->request_id || !response->config_revision)
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "client trust refresh response ids must be nonzero");
+        return false;
+    }
+    if (response->flags || response->reserved)
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "client trust refresh response reserved fields must be zero");
+        return false;
+    }
+    if (response->status != PROVIDER_HELPER_CLIENT_TRUST_REFRESH_OK
+        && response->status != PROVIDER_HELPER_CLIENT_TRUST_REFRESH_FAILED)
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "unsupported client trust refresh response status");
+        return false;
+    }
+    if (response->status == PROVIDER_HELPER_CLIENT_TRUST_REFRESH_OK)
+    {
+        if (response->reason_len)
+        {
+            provider_helper_config_reason(
+                reason, reason_size,
+                "successful client trust refresh must not carry a reason");
+            return false;
+        }
+    }
+    else if (!response->reason_len
+             || response->reason_len >= sizeof(response->reason))
+    {
+        provider_helper_config_reason(
+            reason, reason_size,
+            "failed client trust refresh requires a bounded reason");
+        return false;
+    }
+    for (uint32_t i = 0; i < response->reason_len; ++i)
+    {
+        if (!provider_helper_auth_reason_byte_allowed(
+                (uint8_t)response->reason[i]))
+        {
+            provider_helper_config_reason(
+                reason, reason_size,
+                "client trust refresh reason contains invalid characters");
+            return false;
+        }
     }
 
     provider_helper_config_reason(reason, reason_size, "ok");
@@ -1121,7 +1246,7 @@ provider_helper_ipc_encode_hello(
     const uint8_t *launch_nonce)
 {
     const size_t required_len = launch_nonce ? PROVIDER_HELPER_HELLO_SIZE
-                                            : PROVIDER_HELPER_FEATURE_SET_SIZE;
+                                             : PROVIDER_HELPER_FEATURE_SET_SIZE;
     if (!dst || dst_len < required_len || !features)
     {
         return false;
@@ -2090,6 +2215,8 @@ provider_helper_ipc_encode_server_auth_config(
     provider_helper_wire_write_u32(&pos, config->ikev2_id_type);
     provider_helper_wire_write_u32(&pos, config->server_id_len);
     provider_helper_wire_write_u32(&pos, config->cert_chain_len);
+    provider_helper_wire_write_u32(&pos, config->client_ca_bundle_len);
+    provider_helper_wire_write_u32(&pos, config->client_crl_bundle_len);
     provider_helper_wire_write_u32(&pos, config->allowed_sigalgs);
     provider_helper_wire_write_u32(&pos, config->flags);
     provider_helper_wire_write_u32(&pos, config->reserved);
@@ -2097,6 +2224,12 @@ provider_helper_ipc_encode_server_auth_config(
     pos += sizeof(config->server_id);
     memcpy(pos, config->cert_chain, sizeof(config->cert_chain));
     pos += sizeof(config->cert_chain);
+    memcpy(pos, config->client_ca_bundle,
+           sizeof(config->client_ca_bundle));
+    pos += sizeof(config->client_ca_bundle);
+    memcpy(pos, config->client_crl_bundle,
+           sizeof(config->client_crl_bundle));
+    pos += sizeof(config->client_crl_bundle);
 
     return (size_t)(pos - dst) == PROVIDER_HELPER_SERVER_AUTH_CONFIG_SIZE;
 }
@@ -2118,6 +2251,8 @@ provider_helper_ipc_decode_server_auth_config(
     config->ikev2_id_type = provider_helper_wire_read_u32(&pos);
     config->server_id_len = provider_helper_wire_read_u32(&pos);
     config->cert_chain_len = provider_helper_wire_read_u32(&pos);
+    config->client_ca_bundle_len = provider_helper_wire_read_u32(&pos);
+    config->client_crl_bundle_len = provider_helper_wire_read_u32(&pos);
     config->allowed_sigalgs = provider_helper_wire_read_u32(&pos);
     config->flags = provider_helper_wire_read_u32(&pos);
     config->reserved = provider_helper_wire_read_u32(&pos);
@@ -2125,6 +2260,12 @@ provider_helper_ipc_decode_server_auth_config(
     pos += sizeof(config->server_id);
     memcpy(config->cert_chain, pos, sizeof(config->cert_chain));
     pos += sizeof(config->cert_chain);
+    memcpy(config->client_ca_bundle, pos,
+           sizeof(config->client_ca_bundle));
+    pos += sizeof(config->client_ca_bundle);
+    memcpy(config->client_crl_bundle, pos,
+           sizeof(config->client_crl_bundle));
+    pos += sizeof(config->client_crl_bundle);
 
     return (size_t)(pos - src) == PROVIDER_HELPER_SERVER_AUTH_CONFIG_SIZE
            && provider_helper_server_auth_config_valid(config, NULL, 0);
@@ -2244,6 +2385,104 @@ provider_helper_ipc_decode_server_sign_response(
 
     return (size_t)(pos - src) == PROVIDER_HELPER_SERVER_SIGN_RESPONSE_SIZE
            && provider_helper_server_sign_response_valid(response, NULL, 0);
+}
+
+bool
+provider_helper_ipc_encode_client_trust_refresh_request(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_client_trust_refresh_request *request)
+{
+    if (!dst || dst_len < PROVIDER_HELPER_CLIENT_TRUST_REFRESH_REQUEST_SIZE
+        || !provider_helper_client_trust_refresh_request_valid(request, NULL,
+                                                               0))
+    {
+        return false;
+    }
+
+    uint8_t *pos = dst;
+    provider_helper_wire_write_u64(&pos, request->request_id);
+    provider_helper_wire_write_u64(&pos, request->config_revision);
+    return (size_t)(pos - dst)
+           == PROVIDER_HELPER_CLIENT_TRUST_REFRESH_REQUEST_SIZE;
+}
+
+bool
+provider_helper_ipc_decode_client_trust_refresh_request(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_client_trust_refresh_request *request)
+{
+    if (!src
+        || src_len != PROVIDER_HELPER_CLIENT_TRUST_REFRESH_REQUEST_SIZE
+        || !request)
+    {
+        return false;
+    }
+
+    const uint8_t *pos = src;
+    CLEAR(*request);
+    request->request_id = provider_helper_wire_read_u64(&pos);
+    request->config_revision = provider_helper_wire_read_u64(&pos);
+    return (size_t)(pos - src)
+               == PROVIDER_HELPER_CLIENT_TRUST_REFRESH_REQUEST_SIZE
+           && provider_helper_client_trust_refresh_request_valid(request, NULL,
+                                                                 0);
+}
+
+bool
+provider_helper_ipc_encode_client_trust_refresh_response(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_client_trust_refresh_response *response)
+{
+    if (!dst || dst_len < PROVIDER_HELPER_CLIENT_TRUST_REFRESH_RESPONSE_SIZE
+        || !provider_helper_client_trust_refresh_response_valid(response, NULL,
+                                                                0))
+    {
+        return false;
+    }
+
+    uint8_t *pos = dst;
+    provider_helper_wire_write_u64(&pos, response->request_id);
+    provider_helper_wire_write_u64(&pos, response->config_revision);
+    provider_helper_wire_write_u32(&pos, response->status);
+    provider_helper_wire_write_u32(&pos, response->reason_len);
+    provider_helper_wire_write_u32(&pos, response->flags);
+    provider_helper_wire_write_u32(&pos, response->reserved);
+    memcpy(pos, response->reason, sizeof(response->reason));
+    pos += sizeof(response->reason);
+    return (size_t)(pos - dst)
+           == PROVIDER_HELPER_CLIENT_TRUST_REFRESH_RESPONSE_SIZE;
+}
+
+bool
+provider_helper_ipc_decode_client_trust_refresh_response(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_client_trust_refresh_response *response)
+{
+    if (!src
+        || src_len != PROVIDER_HELPER_CLIENT_TRUST_REFRESH_RESPONSE_SIZE
+        || !response)
+    {
+        return false;
+    }
+
+    const uint8_t *pos = src;
+    CLEAR(*response);
+    response->request_id = provider_helper_wire_read_u64(&pos);
+    response->config_revision = provider_helper_wire_read_u64(&pos);
+    response->status = provider_helper_wire_read_u32(&pos);
+    response->reason_len = provider_helper_wire_read_u32(&pos);
+    response->flags = provider_helper_wire_read_u32(&pos);
+    response->reserved = provider_helper_wire_read_u32(&pos);
+    memcpy(response->reason, pos, sizeof(response->reason));
+    pos += sizeof(response->reason);
+    return (size_t)(pos - src)
+               == PROVIDER_HELPER_CLIENT_TRUST_REFRESH_RESPONSE_SIZE
+           && provider_helper_client_trust_refresh_response_valid(response,
+                                                                  NULL, 0);
 }
 
 const char *
@@ -2776,8 +3015,8 @@ provider_helper_ikev2_validate_transforms(const uint8_t *packet,
     }
 
     return pos == end && saw_last && parsed == transform_count
-           ? PROVIDER_HELPER_IKEV2_PARSE_OK
-           : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+               ? PROVIDER_HELPER_IKEV2_PARSE_OK
+               : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
 }
 
 static enum provider_helper_ikev2_parse_result
@@ -2788,7 +3027,7 @@ provider_helper_ikev2_validate_sa_payload(const uint8_t *packet,
 {
     if (!provider_helper_ikev2_body_inside(packet_len, body_offset, body_len)
         || body_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
-                      + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
+                          + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
     {
         return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
     }
@@ -2822,7 +3061,7 @@ provider_helper_ikev2_validate_sa_payload(const uint8_t *packet,
             return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
         }
         if (proposal_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
-                           + spi_size
+                               + spi_size
             || proposal_len > end - pos || !proposal_number
             || (proposal_count == 1 && proposal_number != 1)
             || proposal_number < previous_proposal_number
@@ -2856,8 +3095,8 @@ provider_helper_ikev2_validate_sa_payload(const uint8_t *packet,
     }
 
     return pos == end && saw_last && proposal_count
-           ? PROVIDER_HELPER_IKEV2_PARSE_OK
-           : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+               ? PROVIDER_HELPER_IKEV2_PARSE_OK
+               : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
 }
 
 static enum provider_helper_ikev2_parse_result
@@ -2868,7 +3107,7 @@ provider_helper_ikev2_validate_child_sa_payload(const uint8_t *packet,
 {
     if (!provider_helper_ikev2_body_inside(packet_len, body_offset, body_len)
         || body_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE + 4
-                      + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
+                          + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
     {
         return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
     }
@@ -2902,8 +3141,8 @@ provider_helper_ikev2_validate_child_sa_payload(const uint8_t *packet,
             return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
         }
         if (proposal_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
-                           + spi_size
-                           + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
+                               + spi_size
+                               + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE
             || proposal_len > end - pos || !proposal_number
             || (proposal_count == 1 && proposal_number != 1)
             || proposal_number < previous_proposal_number
@@ -2937,8 +3176,8 @@ provider_helper_ikev2_validate_child_sa_payload(const uint8_t *packet,
     }
 
     return pos == end && saw_last && proposal_count
-           ? PROVIDER_HELPER_IKEV2_PARSE_OK
-           : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
+               ? PROVIDER_HELPER_IKEV2_PARSE_OK
+               : PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
 }
 
 static enum provider_helper_ikev2_parse_result
@@ -3133,7 +3372,7 @@ provider_helper_ikev2_select_ike_sa_init_proposal(
         || !provider_helper_ikev2_body_inside(packet_len, summary->sa_offset,
                                               summary->sa_len)
         || summary->sa_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
-                           + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
+                                 + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
     {
         return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
     }
@@ -3166,7 +3405,7 @@ provider_helper_ikev2_select_ike_sa_init_proposal(
         const uint8_t spi_size = packet[pos + 6];
         const uint8_t transform_count = packet[pos + 7];
         if (proposal_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
-                           + spi_size
+                               + spi_size
             || proposal_len > end - pos || protocol_id != PROVIDER_HELPER_IKEV2_PROTOCOL_IKE
             || spi_size != 0 || !transform_count)
         {
@@ -3353,7 +3592,7 @@ provider_helper_ikev2_select_child_sa_proposal(
         || !provider_helper_ikev2_body_inside(packet_len, summary->sa_offset,
                                               summary->sa_len)
         || summary->sa_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE + 4
-                           + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
+                                 + PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE)
     {
         return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
     }
@@ -3386,7 +3625,7 @@ provider_helper_ikev2_select_child_sa_proposal(
         const uint8_t spi_size = packet[pos + 6];
         const uint8_t transform_count = packet[pos + 7];
         if (proposal_len < PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE
-                           + spi_size
+                               + spi_size
             || proposal_len > end - pos
             || protocol_id != PROVIDER_HELPER_IKEV2_PROTOCOL_ESP
             || spi_size != 4 || !transform_count)
@@ -3633,7 +3872,7 @@ provider_helper_ikev2_parse_eap_tls_fragment(
     if (length_included)
     {
         if (body_len < PROVIDER_HELPER_EAP_TLS_HEADER_SIZE
-                       + PROVIDER_HELPER_EAP_TLS_LENGTH_SIZE)
+                           + PROVIDER_HELPER_EAP_TLS_LENGTH_SIZE)
         {
             return PROVIDER_HELPER_IKEV2_PARSE_BAD_PAYLOAD_LENGTH;
         }
@@ -3717,7 +3956,7 @@ provider_helper_ikev2_validate_eap_payload(
                 return PROVIDER_HELPER_IKEV2_PARSE_UNEXPECTED_PAYLOAD;
             }
             return provider_helper_ikev2_parse_eap_tls_fragment(body, body_len,
-                                                          config, NULL);
+                                                                config, NULL);
 
         case PROVIDER_HELPER_EAP_CODE_REQUEST:
         case PROVIDER_HELPER_EAP_CODE_SUCCESS:
@@ -3758,7 +3997,8 @@ provider_helper_ikev2_build_notify_response(
                              + PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE
                              + (uint32_t)data_len;
     const size_t offset = request->natt
-                          ? PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE : 0;
+                              ? PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE
+                              : 0;
     const size_t packet_len = offset + ike_len;
     if (dst_len < packet_len)
     {
@@ -3959,8 +4199,8 @@ provider_helper_ikev2_write_ipv4_ts(uint8_t **pos,
     *(*pos)++ = 0;
     provider_helper_wire_write_u16(
         pos, PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE
-             + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE
-             + PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
+                 + PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE
+                 + PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE);
     *(*pos)++ = 1;
     *(*pos)++ = 0;
     *(*pos)++ = 0;
@@ -4205,7 +4445,7 @@ provider_helper_ikev2_build_sa_init_response(
         || !provider_helper_ikev2_selected_suite_valid(selection)
         || !responder_ke || !responder_nonce
         || responder_ke_len
-           != provider_helper_ikev2_dh_public_bytes(selection->dh_id)
+               != provider_helper_ikev2_dh_public_bytes(selection->dh_id)
         || responder_nonce_len < PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES
         || responder_nonce_len > PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES
         || request->exchange_type != PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT
@@ -4240,8 +4480,8 @@ provider_helper_ikev2_build_sa_init_response(
         + PROVIDER_HELPER_IKEV2_NAT_DETECTION_HASH_BYTES;
     const uint16_t signature_hash_notify_payload_len =
         advertise_signature_hash_algorithms
-        ? PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE + 2
-        : 0;
+            ? PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE + 2
+            : 0;
     const uint16_t natt_payloads_len =
         force_natt ? (uint16_t)(2 * natt_notify_payload_len) : 0;
     const uint32_t ike_len = PROVIDER_HELPER_IKEV2_HEADER_SIZE
@@ -4250,7 +4490,8 @@ provider_helper_ikev2_build_sa_init_response(
                              + signature_hash_notify_payload_len
                              + natt_payloads_len;
     const size_t offset = request->natt
-                          ? PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE : 0;
+                              ? PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE
+                              : 0;
     const size_t packet_len = offset + ike_len;
     if (dst_len < packet_len)
     {
@@ -4299,8 +4540,8 @@ provider_helper_ikev2_build_sa_init_response(
     pos += responder_ke_len;
 
     *pos++ = advertise_signature_hash_algorithms || force_natt
-             ? PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY
-             : PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
+                 ? PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY
+                 : PROVIDER_HELPER_IKEV2_PAYLOAD_NONE;
     *pos++ = 0;
     provider_helper_wire_write_u16(&pos, nonce_payload_len);
     memcpy(pos, responder_nonce, responder_nonce_len);
@@ -4309,11 +4550,11 @@ provider_helper_ikev2_build_sa_init_response(
     if (advertise_signature_hash_algorithms)
     {
         const uint8_t signature_hash_algorithms[] = {
-            0x00, PROVIDER_HELPER_IKEV2_HASH_ALGORITHM_SHA2_256,
+            0x00,
+            PROVIDER_HELPER_IKEV2_HASH_ALGORITHM_SHA2_256,
         };
         provider_helper_ikev2_write_notify(
-            &pos, force_natt ? PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY
-                             : PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
+            &pos, force_natt ? PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY : PROVIDER_HELPER_IKEV2_PAYLOAD_NONE,
             PROVIDER_HELPER_IKEV2_NOTIFY_SIGNATURE_HASH_ALGORITHMS,
             signature_hash_algorithms, sizeof(signature_hash_algorithms));
     }
@@ -4325,15 +4566,49 @@ provider_helper_ikev2_build_sa_init_response(
          * expose raw ESP.  Send non-matching NAT-D values so clients switch to
          * UDP 4500 even on networks without NAT.
          */
-        static const uint8_t forced_source_hash[
-            PROVIDER_HELPER_IKEV2_NAT_DETECTION_HASH_BYTES] = {
-            0x4f, 0x56, 0x50, 0x4e, 0x2d, 0x66, 0x6f, 0x72, 0x63, 0x65,
-            0x2d, 0x6e, 0x61, 0x74, 0x74, 0x2d, 0x73, 0x72, 0x63, 0x31,
+        static const uint8_t forced_source_hash[PROVIDER_HELPER_IKEV2_NAT_DETECTION_HASH_BYTES] = {
+            0x4f,
+            0x56,
+            0x50,
+            0x4e,
+            0x2d,
+            0x66,
+            0x6f,
+            0x72,
+            0x63,
+            0x65,
+            0x2d,
+            0x6e,
+            0x61,
+            0x74,
+            0x74,
+            0x2d,
+            0x73,
+            0x72,
+            0x63,
+            0x31,
         };
-        static const uint8_t forced_destination_hash[
-            PROVIDER_HELPER_IKEV2_NAT_DETECTION_HASH_BYTES] = {
-            0x4f, 0x56, 0x50, 0x4e, 0x2d, 0x66, 0x6f, 0x72, 0x63, 0x65,
-            0x2d, 0x6e, 0x61, 0x74, 0x74, 0x2d, 0x64, 0x73, 0x74, 0x31,
+        static const uint8_t forced_destination_hash[PROVIDER_HELPER_IKEV2_NAT_DETECTION_HASH_BYTES] = {
+            0x4f,
+            0x56,
+            0x50,
+            0x4e,
+            0x2d,
+            0x66,
+            0x6f,
+            0x72,
+            0x63,
+            0x65,
+            0x2d,
+            0x6e,
+            0x61,
+            0x74,
+            0x74,
+            0x2d,
+            0x64,
+            0x73,
+            0x74,
+            0x31,
         };
         provider_helper_ikev2_write_notify(
             &pos, PROVIDER_HELPER_IKEV2_PAYLOAD_NOTIFY,

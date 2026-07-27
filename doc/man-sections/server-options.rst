@@ -195,24 +195,63 @@ fast hardware. SSL/TLS authentication must be used in this mode.
   must use the provider policy SHA-256 fingerprint form.
 
 --experimental-ikev2-helper-allow-fingerprint-file file
-  Load persistently authorized IKEv2 credential fingerprints from ``file``.
-  The management command ``provider-allow-fingerprint`` appends to this file
-  when it is configured.
+  Load persistently authorized provider credential fingerprints from ``file``.
+  The management command ``provider-allow-fingerprint`` appends to this file.
+  The same source applies to ordinary TLS clients when
+  ``--experimental-provider-policy-openvpn`` is enabled.
 
 --experimental-ikev2-helper-revocation-file file
-  Load persistently revoked IKEv2 credential fingerprints from ``file``.
+  Load persistently revoked provider credential fingerprints from ``file``.
   The management commands ``provider-revoke`` and
   ``provider-revoke-fingerprint`` append to this file when it is configured.
 
 --experimental-ikev2-helper-principal-revocation-file file
-  Load persistently revoked IKEv2 principals from ``file``. The management
+  Load persistently revoked provider principals from ``file``. The management
   command ``provider-revoke-principal`` appends to this file when it is
-  configured.
+  configured. Principals are printable, non-whitespace ASCII, exclude ``#``,
+  and are stored in lowercase ASCII canonical form. ``#`` starts a comment
+  only when it is the first non-whitespace character on a line.
 
 --experimental-ikev2-helper-cert-revocation-file file
-  Load persistently revoked IKEv2 certificate identities from ``file``. The
+  Load persistently revoked provider certificate identities from ``file``. The
   management command ``provider-revoke-cert`` appends to this file when it is
   configured.
+
+--experimental-provider-policy-openvpn
+  Apply the provider certificate allowlist and fingerprint, principal, and
+  certificate-identity revocations to ordinary OpenVPN TLS clients. This is a
+  server-only, OpenSSL-only, disabled-by-default compatibility gate; ordinary
+  OpenVPN admission is unchanged when it is absent.
+
+  All four provider policy files must be configured, readable, and valid at
+  startup. Empty files are valid and mean deny-all/no revocations, permitting
+  a zero-enrollment bootstrap. Management updates are persisted before runtime
+  policy changes, and revocation commands immediately terminate matching IKEv2
+  and ordinary OpenVPN sessions.
+
+  Both protocol paths derive the principal from the verified leaf certificate
+  using the same deterministic rule: exactly one supported DNS or RFC822
+  subjectAltName is authoritative; if no supported subjectAltName exists, the
+  certificate must contain exactly one subject common name. Multiple supported
+  identities are rejected. IKEv2 IDi and EAP identity must match the derived
+  principal (and the subjectAltName type when one is present). Configuration
+  with ``--username-as-common-name`` is rejected because a post-verification
+  username must not replace this certificate-bound identity.
+
+--experimental-provider-effective-policy-state file
+  Enable the server-side effective-policy metadata store and persist it at
+  ``file``. ``file`` must be an absolute path so daemon working-directory
+  changes cannot redirect durable state. A missing file starts as an empty
+  store; an existing malformed or unreadable file fails server startup. The
+  parent directory must already exist and remain writable by the OpenVPN
+  process.
+
+  This store contains only Saving Jane policy object references (registered
+  user, monotonic source revision, SHA-256 digest, and object ID), child
+  credential bindings, and per-binding projection status. It never stores,
+  interprets, or enforces destination allowlist or blacklist contents.
+  Authenticated control-plane code is responsible for validating Saving Jane
+  provenance before submitting metadata through the management commands.
 
 --experimental-ikev2-helper-dpd-idle-seconds n
   Send an IKEv2 Dead Peer Detection liveness probe after ``n`` seconds without
@@ -230,10 +269,9 @@ fast hardware. SSL/TLS authentication must be used in this mode.
   state.
 
 --experimental-ikev2-helper-full-tunnel
-  Enable test-only full-tunnel IKEv2 policy for the helper. This requires
-  ``--experimental-ikev2-helper-apply-xfrm`` and is not a substitute for the
-  production VPN DMZ, firewall, and application gateway policy described by
-  the deployment profile.
+  Authorize full-tunnel IPv4 ``0.0.0.0/0`` traffic selectors for IKEv2
+  clients. This requires ``--experimental-ikev2-helper-apply-xfrm``. The VPN
+  DMZ, firewall, and application gateway policy remain deployment concerns.
 
 --disable
   Disable a particular client (based on the common name) from connecting.

@@ -119,6 +119,8 @@ openvpn_SOURCES = \
 	ping.c ping.h \
 	plugin.c plugin.h \
 	pool.c pool.h \
+	provider_client_auth.c provider_client_auth.h \
+	provider_effective_policy.c provider_effective_policy.h \
 	provider_helper.c provider_helper.h \
 	provider_helper_ipc.c \
 	provider_helper_wire.c \
@@ -185,6 +187,8 @@ if !WIN32
 openvpn_ikev2_helper_CFLAGS = $(AM_CFLAGS)
 openvpn_ikev2_helper_SOURCES = \
 	openvpn_ikev2_helper.c \
+	provider_client_auth.c \
+	provider_client_auth.h \
 	provider_helper.h \
 	provider_helper_wire.c \
 	provider_xfrm.c \

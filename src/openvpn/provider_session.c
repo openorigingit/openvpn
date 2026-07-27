@@ -150,11 +150,69 @@ provider_session_table_count(const struct provider_session_table *table)
     return table ? table->n_sessions : 0;
 }
 
+void
+provider_session_table_begin_draining(struct provider_session_table *table)
+{
+    if (table)
+    {
+        table->draining = true;
+    }
+}
+
+bool
+provider_session_table_is_draining(const struct provider_session_table *table)
+{
+    return table && table->draining;
+}
+
+size_t
+provider_session_table_quarantine_for_terminal_shutdown(
+    struct provider_session_table *table,
+    const char *reason)
+{
+    if (!table)
+    {
+        return 0;
+    }
+
+    table->draining = true;
+    table->gateway_must_terminate = true;
+    size_t quarantined = 0;
+    for (struct provider_session *session = table->head;
+         session;
+         session = session->next)
+    {
+        if (session->halt)
+        {
+            continue;
+        }
+        session->xfrm_delete_pending = false;
+        session->xfrm_delete_reconciliation_failed = true;
+        session->state = PROVIDER_SESSION_STATE_CLOSED;
+        (void)provider_session_replace_string(&session->helper_state,
+                                              "terminal-failure");
+        (void)provider_session_replace_string(&session->child_sa_state,
+                                              "unreconciled-xfrm");
+        (void)provider_session_replace_string(
+            &session->disconnect_reason,
+            reason ? reason : "terminal XFRM reconciliation failure");
+        ++quarantined;
+    }
+    return quarantined;
+}
+
+bool
+provider_session_table_gateway_must_terminate(
+    const struct provider_session_table *table)
+{
+    return table && table->gateway_must_terminate;
+}
+
 struct provider_session *
 provider_session_create(struct provider_session_table *table,
                         const struct provider_session_create *create)
 {
-    if (!table || !create)
+    if (!table || !create || table->draining || table->gateway_must_terminate)
     {
         return NULL;
     }
@@ -172,8 +230,7 @@ provider_session_create(struct provider_session_table *table,
         do
         {
             cid = table->next_management_cid++;
-        }
-        while (provider_session_lookup_by_cid_any(table, cid));
+        } while (provider_session_lookup_by_cid_any(table, cid));
     }
 
     struct provider_session *session;
@@ -337,7 +394,7 @@ provider_session_kill_by_cid(struct provider_session_table *table,
                              const char *reason)
 {
     struct provider_session *session = provider_session_lookup_by_cid(table, cid);
-    if (!session)
+    if (!session || session->has_address_pool_handle)
     {
         return false;
     }
@@ -354,10 +411,66 @@ provider_session_kill_by_cid(struct provider_session_table *table,
 }
 
 bool
+provider_session_table_drain_reconciled(
+    struct provider_session_table *table,
+    const char *reason,
+    provider_session_xfrm_reconcile_fn reconcile,
+    provider_session_vip_release_fn release,
+    void *arg,
+    size_t *closed)
+{
+    if (closed)
+    {
+        *closed = 0;
+    }
+    if (!table || !reconcile || !release)
+    {
+        return false;
+    }
+
+    provider_session_table_begin_draining(table);
+    if (provider_session_table_gateway_must_terminate(table))
+    {
+        return false;
+    }
+
+    size_t n_closed = 0;
+    for (struct provider_session *session = table->head;
+         session;
+         session = session->next)
+    {
+        if (session->halt)
+        {
+            continue;
+        }
+        if (session->xfrm_delete_reconciliation_failed
+            || !reconcile(arg, session, reason))
+        {
+            return false;
+        }
+
+        release(arg, session);
+        if (session->has_address_pool_handle
+            || !provider_session_kill_by_cid(table, session->management_cid,
+                                             reason))
+        {
+            return false;
+        }
+        ++n_closed;
+        if (closed)
+        {
+            *closed = n_closed;
+        }
+    }
+
+    return true;
+}
+
+bool
 provider_session_delete(struct provider_session_table *table,
                         struct provider_session *target)
 {
-    if (!table || !target)
+    if (!table || !target || target->has_address_pool_handle)
     {
         return false;
     }
@@ -394,9 +507,9 @@ provider_session_print_status_v1(const struct provider_session_table *table,
 {
     status_printf(so, "PROVIDER SESSION LIST");
     status_printf(so, "Provider,Management CID,Principal,Credential Fingerprint,"
-                  "Assigned Address,Authorized Selectors,Bytes Received,Bytes Sent,"
-                  "Connected Since,State,Helper State,Child SA State,"
-                  "Policy Revision,XFRM Lease ID");
+                      "Assigned Address,Authorized Selectors,Bytes Received,Bytes Sent,"
+                      "Connected Since,State,Helper State,Child SA State,"
+                      "Policy Revision,XFRM Lease ID");
 
     for (const struct provider_session *session = table->head;
          session;
@@ -408,8 +521,7 @@ provider_session_print_status_v1(const struct provider_session_table *table,
         }
 
         struct gc_arena gc = gc_new();
-        status_printf(so, "%s,%lu,%s,%s,%s,%s," counter_format ","
-                      counter_format ",%s,%s,%s,%s,%" PRIu64 ",%" PRIu64,
+        status_printf(so, "%s,%lu,%s,%s,%s,%s," counter_format "," counter_format ",%s,%s,%s,%s,%" PRIu64 ",%" PRIu64,
                       session->provider_name,
                       session->management_cid,
                       session->principal,
@@ -436,9 +548,9 @@ provider_session_print_status_v2(const struct provider_session_table *table,
     const char sep = (version == 3) ? '\t' : ',';
 
     status_printf(so, "HEADER%cPROVIDER_SESSION%cProvider%cManagement CID%cPrincipal%c"
-                  "Credential Fingerprint%cAssigned Address%cAuthorized Selectors%c"
-                  "Bytes Received%cBytes Sent%cConnected Since%cState%c"
-                  "Helper State%cChild SA State%cPolicy Revision%cXFRM Lease ID",
+                      "Credential Fingerprint%cAssigned Address%cAuthorized Selectors%c"
+                      "Bytes Received%cBytes Sent%cConnected Since%cState%c"
+                      "Helper State%cChild SA State%cPolicy Revision%cXFRM Lease ID",
                   sep, sep, sep, sep, sep, sep, sep, sep, sep, sep, sep, sep, sep,
                   sep, sep);
 
@@ -452,9 +564,7 @@ provider_session_print_status_v2(const struct provider_session_table *table,
         }
 
         struct gc_arena gc = gc_new();
-        status_printf(so, "PROVIDER_SESSION%c%s%c%lu%c%s%c%s%c%s%c%s%c"
-                      counter_format "%c" counter_format "%c%s%c%s%c%s%c%s%c%"
-                      PRIu64 "%c%" PRIu64,
+        status_printf(so, "PROVIDER_SESSION%c%s%c%lu%c%s%c%s%c%s%c%s%c" counter_format "%c" counter_format "%c%s%c%s%c%s%c%s%c%" PRIu64 "%c%" PRIu64,
                       sep,
                       session->provider_name,
                       sep,

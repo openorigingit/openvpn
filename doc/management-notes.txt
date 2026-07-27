@@ -833,11 +833,12 @@ Immediately kill a client instance by CID.
 CID -- client ID.  See documentation for ">CLIENT:" notification for more
 info.
 
-COMMAND -- provider-allow-fingerprint  (experimental IKEv2 provider)
---------------------------------------------------------------------
+COMMAND -- provider-allow-fingerprint  (experimental provider policy)
+---------------------------------------------------------------------
 
-Authorize an IKEv2 provider credential fingerprint without restarting
-OpenVPN.
+Authorize a provider credential fingerprint without restarting OpenVPN. With
+--experimental-provider-policy-openvpn, this also controls subsequent ordinary
+OpenVPN TLS admission.
 
   provider-allow-fingerprint {FINGERPRINT} ["reason-text"]
 
@@ -846,41 +847,41 @@ FINGERPRINT -- provider credential SHA-256 fingerprint.
 If --experimental-ikev2-helper-allow-fingerprint-file is configured, OpenVPN
 persists the fingerprint before updating the runtime allowlist. The command
 fails if the fingerprint is invalid or currently revoked. A successful command
-increments the provider policy revision and affects subsequent IKEv2 provider
+increments the provider policy revision and affects subsequent provider-policy
 authorization requests.
 
-COMMAND -- provider-revoke  (experimental IKEv2 provider)
---------------------------------------------------------
+COMMAND -- provider-revoke  (experimental provider policy)
+-----------------------------------------------------------
 
-Revoke the credential fingerprint associated with an active provider session
-and kill that provider session.
+Revoke the credential fingerprint associated with an active provider-policy
+client and kill all matching IKEv2 and gated ordinary OpenVPN sessions.
 
   provider-revoke {CID} ["reason-text"]
 
-CID -- provider session management CID. Use the "status" command to see active
-provider sessions and their management CIDs.
+CID -- provider session or gated ordinary OpenVPN client management CID. Use
+the "status" command to see active clients and their management CIDs.
 
 If --experimental-ikev2-helper-revocation-file is configured, OpenVPN persists
 the credential fingerprint revocation before terminating matching provider
 state. The command fails closed if the revocation cannot be persisted.
 
-COMMAND -- provider-revoke-cert  (experimental IKEv2 provider)
--------------------------------------------------------------
+COMMAND -- provider-revoke-cert  (experimental provider policy)
+----------------------------------------------------------------
 
-Revoke the certificate identity associated with an active provider session and
-kill matching provider sessions.
+Revoke the certificate identity associated with an active provider-policy
+client and kill matching IKEv2 and gated ordinary OpenVPN sessions.
 
   provider-revoke-cert {CID} ["reason-text"]
 
-CID -- provider session management CID. OpenVPN persists the certificate
-issuer/serial revocation to --experimental-ikev2-helper-cert-revocation-file
-when that file is configured.
+CID -- provider session or gated ordinary OpenVPN client management CID.
+OpenVPN persists the certificate issuer/serial revocation to
+--experimental-ikev2-helper-cert-revocation-file when that file is configured.
 
-COMMAND -- provider-revoke-fingerprint  (experimental IKEv2 provider)
---------------------------------------------------------------------
+COMMAND -- provider-revoke-fingerprint  (experimental provider policy)
+----------------------------------------------------------------------
 
-Revoke a provider credential fingerprint and kill all active provider sessions
-using that fingerprint.
+Revoke a provider credential fingerprint and kill all active IKEv2 and gated
+ordinary OpenVPN sessions using that fingerprint.
 
   provider-revoke-fingerprint {FINGERPRINT} ["reason-text"]
 
@@ -890,19 +891,98 @@ If --experimental-ikev2-helper-revocation-file is configured, OpenVPN persists
 the revocation before updating runtime policy and terminating matching provider
 state.
 
-COMMAND -- provider-revoke-principal  (experimental IKEv2 provider)
-------------------------------------------------------------------
+COMMAND -- provider-revoke-principal  (experimental provider policy)
+--------------------------------------------------------------------
 
-Revoke a provider principal and kill all active provider sessions using that
-principal.
+Revoke a provider principal and kill all active IKEv2 and gated ordinary
+OpenVPN sessions using that principal. For ordinary TLS clients, the principal
+is the canonical OpenVPN certificate identity.
 
   provider-revoke-principal {PRINCIPAL} ["reason-text"]
 
 PRINCIPAL -- provider principal string as recorded in provider status output.
+Principals use lowercase ASCII canonical form, contain no whitespace, and
+exclude '#'. The same verified-leaf extraction rule is used for IKEv2 and
+gated ordinary TLS clients: one DNS/RFC822 subjectAltName, or exactly one
+subject common name only when no supported subjectAltName exists.
 
 If --experimental-ikev2-helper-principal-revocation-file is configured,
 OpenVPN persists the revocation before updating runtime policy and terminating
 matching provider state.
+
+COMMANDS -- provider-effective-policy-*  (experimental metadata control)
+-------------------------------------------------------------------------
+
+These commands are available in server mode when
+--experimental-provider-effective-policy-state is configured. They use the
+normal OpenVPN management authentication and authorization boundary. The
+management client must authenticate Saving Jane provenance before submitting a
+snapshot; OpenVPN stores the supplied reference metadata but does not fetch or
+parse the referenced policy object.
+
+Bind or retire a child credential:
+
+  provider-effective-policy-bind-child {FINGERPRINT} {REGISTERED_USER_ID} {DEVICE_ID} {GENERATION}
+  provider-effective-policy-unbind-child {FINGERPRINT}
+
+GENERATION is positive and monotonic within each REGISTERED_USER_ID/DEVICE_ID
+lineage. A new fingerprint must use a generation greater than every retained
+binding in that lineage; a lower generation is stale and an equal generation
+with a different fingerprint conflicts. An exact active bind replay is
+idempotent. An exact retired bind replay is stale and never reactivates the
+credential. A higher generation is added without automatically retiring an
+older active generation so credential rotation can be staged; retire the old
+fingerprint explicitly after cutover. Retired bindings remain as generation
+tombstones in status and no longer receive snapshot fan-out.
+
+Accept a Saving Jane metadata snapshot:
+
+  provider-effective-policy-snapshot {REGISTERED_USER_ID} {REVISION} {SHA256} {OBJECT_ID}
+
+REVISION must be positive and strictly newer than the current revision, except
+that an exact revision/digest/object-ID replay is idempotent. Reusing a revision
+with a different digest or object ID is rejected. Acceptance sets every active
+binding for that registered user to pending at the new desired revision. No
+destination-list contents cross this interface.
+
+Record the projection result for one bound credential:
+
+  provider-effective-policy-projection {FINGERPRINT} {REVISION} applied|error
+
+The revision must equal that binding's current desired revision. An applied
+revision cannot regress to error. A desired revision of zero means no Saving
+Jane snapshot has been accepted and is never policy-ready, even though the
+zero/zero baseline projection is reported as applied. Successful mutations are
+flushed to the configured state file and atomically replace its prior contents
+before the management command reports success. This is normal application
+persistence, not a crash or power-loss durability guarantee.
+
+Read the metadata store:
+
+  provider-effective-policy-status
+  provider-effective-policy-status user {REGISTERED_USER_ID}
+  provider-effective-policy-status credential {FINGERPRINT}
+
+The unscoped form emits every USER and BINDING record. Scoped forms emit only
+the selected registered user (and its bindings) or credential. This command is
+read-only and emits references and projection state, never policy contents.
+
+Each recognized effective-policy command then emits one stable result record,
+followed by the normal ``SUCCESS:`` or ``ERROR:`` management terminal line:
+
+  PROVIDER_EFFECTIVE_POLICY RESULT command={COMMAND} result={RESULT}
+
+RESULT is one of ``ok``, ``idempotent``, ``invalid``, ``not_found``,
+``conflict``, ``stale``, ``io_error``, or ``no_memory``. Status USER and
+BINDING records, when present, precede the RESULT record.
+
+For every active native session matched by a revocation command, success is
+reported only after the helper acknowledges the correlated kernel XFRM delete.
+If the helper exits, the acknowledgement times out, or reconciliation otherwise
+fails, OpenVPN retains every native session VIP lease, refuses new native
+session allocation, and exits fatally. The deployment must treat OpenVPN as a
+critical container process so this exit tears down the VPN network namespace
+and its remaining XFRM state before any retained VIP can be reused.
 
 Provider sessions in status output
 ----------------------------------

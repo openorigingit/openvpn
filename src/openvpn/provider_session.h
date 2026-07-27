@@ -31,7 +31,8 @@ struct status_output;
 #define PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX 4
 #endif
 
-struct provider_session_xfrm_lease {
+struct provider_session_xfrm_lease
+{
     uint64_t lease_id;
     uint64_t provider_session_id;
     uint64_t policy_revision;
@@ -57,7 +58,8 @@ struct provider_session_xfrm_lease {
     uint32_t reserved;
 };
 
-enum provider_session_state {
+enum provider_session_state
+{
     PROVIDER_SESSION_STATE_UNDEF = 0,
     PROVIDER_SESSION_STATE_NEW,
     PROVIDER_SESSION_STATE_AUTH_PENDING,
@@ -66,7 +68,8 @@ enum provider_session_state {
     PROVIDER_SESSION_STATE_CLOSED,
 };
 
-struct provider_session {
+struct provider_session
+{
     struct provider_session *next;
     uint64_t id;
     unsigned long management_cid;
@@ -87,6 +90,8 @@ struct provider_session {
     int address_pool_handle;
     bool has_address_pool_handle;
     bool has_xfrm_lease;
+    bool xfrm_delete_pending;
+    bool xfrm_delete_reconciliation_failed;
     struct provider_session_xfrm_lease xfrm_lease;
 
     counter_type bytes_received;
@@ -99,14 +104,18 @@ struct provider_session {
     bool halt;
 };
 
-struct provider_session_table {
+struct provider_session_table
+{
     struct provider_session *head;
     uint64_t next_session_id;
     unsigned long next_management_cid;
     size_t n_sessions;
+    bool draining;
+    bool gateway_must_terminate;
 };
 
-struct provider_session_create {
+struct provider_session_create
+{
     const char *provider_name;
     uint64_t provider_session_id;
     unsigned long management_cid;
@@ -123,7 +132,8 @@ struct provider_session_create {
     time_t now;
 };
 
-struct provider_session_update {
+struct provider_session_update
+{
     enum provider_session_state state;
     const char *helper_state;
     const char *child_sa_state;
@@ -133,11 +143,34 @@ struct provider_session_update {
     uint64_t packets_sent;
 };
 
+typedef bool (*provider_session_xfrm_reconcile_fn)(
+    void *arg,
+    struct provider_session *session,
+    const char *operation);
+typedef void (*provider_session_vip_release_fn)(
+    void *arg,
+    struct provider_session *session);
+
 const char *provider_session_state_name(enum provider_session_state state);
 
 void provider_session_table_init(struct provider_session_table *table);
 void provider_session_table_free(struct provider_session_table *table);
 size_t provider_session_table_count(const struct provider_session_table *table);
+void provider_session_table_begin_draining(struct provider_session_table *table);
+bool provider_session_table_is_draining(
+    const struct provider_session_table *table);
+size_t provider_session_table_quarantine_for_terminal_shutdown(
+    struct provider_session_table *table,
+    const char *reason);
+bool provider_session_table_gateway_must_terminate(
+    const struct provider_session_table *table);
+bool provider_session_table_drain_reconciled(
+    struct provider_session_table *table,
+    const char *reason,
+    provider_session_xfrm_reconcile_fn reconcile,
+    provider_session_vip_release_fn release,
+    void *arg,
+    size_t *closed);
 
 struct provider_session *provider_session_create(struct provider_session_table *table,
                                                  const struct provider_session_create *create);

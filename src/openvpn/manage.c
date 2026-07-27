@@ -47,6 +47,9 @@
 
 #include "memdbg.h"
 
+#include <errno.h>
+#include <inttypes.h>
+
 #ifdef ENABLE_PKCS11
 #include "pkcs11.h"
 #endif
@@ -129,10 +132,15 @@ man_help(void)
         "                                      to the client and wait for a final client-auth/client-deny");
     msg(M_CLIENT, "client-kill CID [M]    : Kill client instance CID with message M (def=RESTART)");
     msg(M_CLIENT, "provider-allow-fingerprint FPR [M]: Allow provider credential fingerprint");
-    msg(M_CLIENT, "provider-revoke CID [M]: Revoke provider session credential and kill CID");
-    msg(M_CLIENT, "provider-revoke-cert CID [M]: Revoke provider session certificate identity");
-    msg(M_CLIENT, "provider-revoke-fingerprint FPR [M]: Revoke provider credential fingerprint");
-    msg(M_CLIENT, "provider-revoke-principal P [M]: Revoke provider principal");
+    msg(M_CLIENT, "provider-revoke CID [M]: Revoke provider-policy client credential and kill matches");
+    msg(M_CLIENT, "provider-revoke-cert CID [M]: Revoke provider-policy certificate identity");
+    msg(M_CLIENT, "provider-revoke-fingerprint FPR [M]: Revoke credential and kill provider-policy matches");
+    msg(M_CLIENT, "provider-revoke-principal P [M]: Revoke principal and kill provider-policy matches");
+    msg(M_CLIENT, "provider-effective-policy-bind-child FPR USER DEVICE GEN: Bind child credential metadata");
+    msg(M_CLIENT, "provider-effective-policy-unbind-child FPR: Retire child credential binding");
+    msg(M_CLIENT, "provider-effective-policy-snapshot USER REV SHA256 OBJECT: Accept Saving Jane metadata");
+    msg(M_CLIENT, "provider-effective-policy-projection FPR REV applied|error: Record projection result");
+    msg(M_CLIENT, "provider-effective-policy-status [user USER|credential FPR]: Show metadata status");
     msg(M_CLIENT, "env-filter [level]     : Set env-var filter level");
     msg(M_CLIENT, "rsa-sig                : Enter a signature in response to >RSA_SIGN challenge");
     msg(M_CLIENT,
@@ -332,6 +340,17 @@ report_command_status(const bool status, const char *command)
     {
         msg(M_CLIENT, "ERROR: %s command failed", command);
     }
+}
+
+static void
+report_provider_effective_policy_result(
+    enum provider_effective_policy_result result, const char *command)
+{
+    msg(M_CLIENT, "PROVIDER_EFFECTIVE_POLICY RESULT command=%s result=%s",
+        command, provider_effective_policy_result_name(result));
+    report_command_status(result == PROVIDER_EFFECTIVE_POLICY_OK
+                              || result == PROVIDER_EFFECTIVE_POLICY_IDEMPOTENT,
+                          command);
 }
 
 static void
@@ -1163,6 +1182,26 @@ parse_uint(const char *str, const char *what, unsigned int *uint)
     }
 }
 
+static bool
+parse_positive_uint64(const char *str, uint64_t *value)
+{
+    if (!str || !*str || !value || *str == '+' || *str == '-')
+    {
+        return false;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    const uintmax_t parsed = strtoumax(str, &end, 10);
+    if (errno == ERANGE || end == str || *end != '\0' || parsed == 0
+        || parsed > UINT64_MAX)
+    {
+        return false;
+    }
+    *value = (uint64_t)parsed;
+    return true;
+}
+
 /**
  * Will send a notification to the client that succesful authentication
  * will require an additional step (web based SSO/2-factor auth/etc)
@@ -1408,6 +1447,130 @@ man_provider_revoke_principal(struct management *man, const char *principal,
     {
         man_command_unsupported("provider-revoke-principal");
     }
+}
+
+static void
+man_provider_effective_policy_bind_child(
+    struct management *man, const char *credential_fingerprint,
+    const char *registered_user_id, const char *device_id,
+    const char *credential_generation_str)
+{
+    uint64_t credential_generation = 0;
+    if (!parse_positive_uint64(credential_generation_str,
+                               &credential_generation))
+    {
+        report_provider_effective_policy_result(
+            PROVIDER_EFFECTIVE_POLICY_INVALID,
+            "provider-effective-policy-bind-child");
+        return;
+    }
+    if (!man->persist.callback.provider_effective_policy_bind_child)
+    {
+        man_command_unsupported("provider-effective-policy-bind-child");
+        return;
+    }
+
+    const enum provider_effective_policy_result result =
+        (*man->persist.callback.provider_effective_policy_bind_child)(
+            man->persist.callback.arg, credential_fingerprint,
+            registered_user_id, device_id, credential_generation);
+    report_provider_effective_policy_result(
+        result, "provider-effective-policy-bind-child");
+}
+
+static void
+man_provider_effective_policy_unbind_child(
+    struct management *man, const char *credential_fingerprint)
+{
+    if (!man->persist.callback.provider_effective_policy_unbind_child)
+    {
+        man_command_unsupported("provider-effective-policy-unbind-child");
+        return;
+    }
+
+    const enum provider_effective_policy_result result =
+        (*man->persist.callback.provider_effective_policy_unbind_child)(
+            man->persist.callback.arg, credential_fingerprint);
+    report_provider_effective_policy_result(
+        result, "provider-effective-policy-unbind-child");
+}
+
+static void
+man_provider_effective_policy_snapshot(
+    struct management *man, const char *registered_user_id,
+    const char *source_revision_str, const char *sha256_digest,
+    const char *object_id)
+{
+    uint64_t source_revision = 0;
+    if (!parse_positive_uint64(source_revision_str, &source_revision))
+    {
+        report_provider_effective_policy_result(
+            PROVIDER_EFFECTIVE_POLICY_INVALID,
+            "provider-effective-policy-snapshot");
+        return;
+    }
+    if (!man->persist.callback.provider_effective_policy_accept_snapshot)
+    {
+        man_command_unsupported("provider-effective-policy-snapshot");
+        return;
+    }
+
+    const enum provider_effective_policy_result result =
+        (*man->persist.callback.provider_effective_policy_accept_snapshot)(
+            man->persist.callback.arg, registered_user_id, source_revision,
+            sha256_digest, object_id);
+    report_provider_effective_policy_result(
+        result, "provider-effective-policy-snapshot");
+}
+
+static void
+man_provider_effective_policy_projection(
+    struct management *man, const char *credential_fingerprint,
+    const char *source_revision_str, const char *state)
+{
+    uint64_t source_revision = 0;
+    if (!parse_positive_uint64(source_revision_str, &source_revision))
+    {
+        report_provider_effective_policy_result(
+            PROVIDER_EFFECTIVE_POLICY_INVALID,
+            "provider-effective-policy-projection");
+        return;
+    }
+    if (!streq(state, "applied") && !streq(state, "error"))
+    {
+        report_provider_effective_policy_result(
+            PROVIDER_EFFECTIVE_POLICY_INVALID,
+            "provider-effective-policy-projection");
+        return;
+    }
+    if (!man->persist.callback.provider_effective_policy_mark_projection)
+    {
+        man_command_unsupported("provider-effective-policy-projection");
+        return;
+    }
+
+    const enum provider_effective_policy_result result =
+        (*man->persist.callback.provider_effective_policy_mark_projection)(
+            man->persist.callback.arg, credential_fingerprint,
+            source_revision, streq(state, "applied"));
+    report_provider_effective_policy_result(
+        result, "provider-effective-policy-projection");
+}
+
+static void
+man_provider_effective_policy_status(struct management *man,
+                                     const char *scope, const char *key)
+{
+    if (!man->persist.callback.provider_effective_policy_status)
+    {
+        man_command_unsupported("provider-effective-policy-status");
+        return;
+    }
+    const enum provider_effective_policy_result result =
+        (*man->persist.callback.provider_effective_policy_status)(
+            man->persist.callback.arg, scope, key);
+    report_provider_effective_policy_result(
+        result, "provider-effective-policy-status");
 }
 
 static void
@@ -1903,6 +2066,80 @@ man_dispatch_command(struct management *man, struct status_output *so, const cha
         if (man_need(man, p, 1, MN_AT_LEAST))
         {
             man_provider_revoke_principal(man, p[1], p[2]);
+        }
+    }
+    else if (streq(p[0], "provider-effective-policy-bind-child"))
+    {
+        if (nparms == 5)
+        {
+            man_provider_effective_policy_bind_child(
+                man, p[1], p[2], p[3], p[4]);
+        }
+        else
+        {
+            report_provider_effective_policy_result(
+                PROVIDER_EFFECTIVE_POLICY_INVALID,
+                "provider-effective-policy-bind-child");
+        }
+    }
+    else if (streq(p[0], "provider-effective-policy-unbind-child"))
+    {
+        if (nparms == 2)
+        {
+            man_provider_effective_policy_unbind_child(man, p[1]);
+        }
+        else
+        {
+            report_provider_effective_policy_result(
+                PROVIDER_EFFECTIVE_POLICY_INVALID,
+                "provider-effective-policy-unbind-child");
+        }
+    }
+    else if (streq(p[0], "provider-effective-policy-snapshot"))
+    {
+        if (nparms == 5)
+        {
+            man_provider_effective_policy_snapshot(
+                man, p[1], p[2], p[3], p[4]);
+        }
+        else
+        {
+            report_provider_effective_policy_result(
+                PROVIDER_EFFECTIVE_POLICY_INVALID,
+                "provider-effective-policy-snapshot");
+        }
+    }
+    else if (streq(p[0], "provider-effective-policy-projection"))
+    {
+        if (nparms == 4)
+        {
+            man_provider_effective_policy_projection(
+                man, p[1], p[2], p[3]);
+        }
+        else
+        {
+            report_provider_effective_policy_result(
+                PROVIDER_EFFECTIVE_POLICY_INVALID,
+                "provider-effective-policy-projection");
+        }
+    }
+    else if (streq(p[0], "provider-effective-policy-status"))
+    {
+        if (nparms == 1)
+        {
+            man_provider_effective_policy_status(man, NULL, NULL);
+        }
+        else if (nparms == 3
+                 && (streq(p[1], "user")
+                     || streq(p[1], "credential")))
+        {
+            man_provider_effective_policy_status(man, p[1], p[2]);
+        }
+        else
+        {
+            report_provider_effective_policy_result(
+                PROVIDER_EFFECTIVE_POLICY_INVALID,
+                "provider-effective-policy-status");
         }
     }
     else if (streq(p[0], "client-deny"))

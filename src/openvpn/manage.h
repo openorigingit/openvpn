@@ -47,6 +47,7 @@
 
 #include "misc.h"
 #include "event.h"
+#include "provider_effective_policy.h"
 #include "socket_util.h"
 #include "mroute.h"
 
@@ -195,6 +196,20 @@ struct management_callback
                                            const char *reason);
     bool (*provider_revoke_by_principal)(void *arg, const char *principal,
                                          const char *reason);
+    enum provider_effective_policy_result (*provider_effective_policy_bind_child)(
+        void *arg, const char *credential_fingerprint,
+        const char *registered_user_id, const char *device_id,
+        uint64_t credential_generation);
+    enum provider_effective_policy_result (*provider_effective_policy_unbind_child)(
+        void *arg, const char *credential_fingerprint);
+    enum provider_effective_policy_result (*provider_effective_policy_accept_snapshot)(
+        void *arg, const char *registered_user_id, uint64_t source_revision,
+        const char *sha256_digest, const char *object_id);
+    enum provider_effective_policy_result (*provider_effective_policy_mark_projection)(
+        void *arg, const char *credential_fingerprint,
+        uint64_t source_revision, bool applied);
+    enum provider_effective_policy_result (*provider_effective_policy_status)(
+        void *arg, const char *scope, const char *key);
     bool (*client_auth)(void *arg, const unsigned long cid, const unsigned int mda_key_id,
                         const bool auth, const char *reason, const char *client_reason,
                         struct buffer_list *cc_config); /* ownership transferred */

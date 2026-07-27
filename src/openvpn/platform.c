@@ -173,8 +173,9 @@ platform_group_set(const struct platform_state_group *state)
 }
 
 /*
- * Determine if we need to retain process capabilities. DCO and SITNL need it.
- * Enforce it for DCO, but only try and soft-fail for SITNL to keep backwards compat.
+ * Determine if we need to retain process capabilities. DCO, SITNL, and the
+ * native IKEv2 provider need them. Enforce it for DCO and native IKEv2, but
+ * only try and soft-fail for SITNL to keep backwards compatibility.
  *
  * Returns the tri-state expected by platform_user_group_set.
  * -1: try to keep caps, but continue if impossible
@@ -200,6 +201,17 @@ need_keep_caps(struct context *c)
 #endif
     }
 
+#ifdef TARGET_LINUX
+    /*
+     * The OpenVPN parent binds UDP/500 and UDP/4500 after its UID/GID
+     * downgrade, then passes those listener descriptors to the helper.
+     */
+    if (c->options.ikev2_helper_path)
+    {
+        return 1;
+    }
+#endif
+
 #ifdef ENABLE_SITNL
     return -1;
 #else
@@ -221,11 +233,22 @@ platform_user_group_set(const struct platform_state_user *user_state,
     int keep_caps = need_keep_caps(c);
     unsigned int err_flags = (keep_caps > 0) ? M_FATAL : M_NONFATAL;
 #ifdef HAVE_LIBCAPNG
+    const bool keep_bind_service = c && c->options.ikev2_helper_path;
     int new_gid = -1, new_uid = -1;
     int res;
 
     if (keep_caps == 0)
     {
+        goto fallback;
+    }
+
+    if (keep_bind_service
+        && (!capng_have_capability(CAPNG_PERMITTED, CAP_NET_ADMIN)
+            || !capng_have_capability(CAPNG_PERMITTED,
+                                      CAP_NET_BIND_SERVICE)))
+    {
+        msg(err_flags,
+            "native IKEv2 requires CAP_NET_ADMIN and CAP_NET_BIND_SERVICE in the permitted capability set");
         goto fallback;
     }
 
@@ -250,6 +273,16 @@ platform_user_group_set(const struct platform_state_user *user_state,
         msg(err_flags, "capng_update(CAP_NET_ADMIN) failed: %d", res);
         goto fallback;
     }
+    if (keep_bind_service)
+    {
+        res = capng_update(CAPNG_ADD, CAPNG_EFFECTIVE | CAPNG_PERMITTED,
+                           CAP_NET_BIND_SERVICE);
+        if (res < 0)
+        {
+            msg(err_flags, "capng_update(CAP_NET_BIND_SERVICE) failed: %d", res);
+            goto fallback;
+        }
+    }
 
     /* Change to new UID/GID.
      * capng_change_id() internally calls capng_apply() to apply prepared capabilities.
@@ -265,7 +298,8 @@ platform_user_group_set(const struct platform_state_user *user_state,
     else if (res == -3)
     {
         msg(M_NONFATAL | M_ERRNO, "capng_change_id() failed applying capabilities");
-        msg(err_flags, "NOTE: previous error likely due to missing capability CAP_SETPCAP.");
+        msg(err_flags,
+            "NOTE: previous error likely means CAP_SETPCAP or a retained network capability is unavailable.");
         goto fallback;
     }
     else if (res < 0)
@@ -284,7 +318,15 @@ platform_user_group_set(const struct platform_state_user *user_state,
         msg(M_INFO, "GID set to %s", group_state->groupname);
     }
 
-    msg(M_INFO, "Capabilities retained: CAP_NET_ADMIN");
+    if (keep_bind_service)
+    {
+        msg(M_INFO,
+            "Capabilities retained: CAP_NET_ADMIN CAP_NET_BIND_SERVICE");
+    }
+    else
+    {
+        msg(M_INFO, "Capabilities retained: CAP_NET_ADMIN");
+    }
     return;
 
 fallback:

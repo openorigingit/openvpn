@@ -40,6 +40,7 @@ x509_metadata_fuzzer_LDADD = \
 	$(SOCKETS_LIBS)
 x509_metadata_fuzzer_SOURCES = x509_metadata_fuzzer.c \
 	$(top_srcdir)/src/openvpn/openvpn_ikev2_helper.c \
+	$(top_srcdir)/src/openvpn/provider_client_auth.c \
 	$(top_srcdir)/src/openvpn/provider_helper_wire.c \
 	$(top_srcdir)/src/openvpn/provider_xfrm.c \
 	$(top_srcdir)/src/openvpn/provider_xfrm_linux.c

@@ -438,9 +438,9 @@ static const char usage_message[] =
     "--experimental-ikev2-helper-allow-fingerprint fp : Authorize an IKEv2\n"
     "                  provider client credential fingerprint. Repeatable.\n"
     "--experimental-ikev2-helper-allow-fingerprint-file file : Persistently\n"
-    "                  authorize IKEv2 credential fingerprints, one per line.\n"
+    "                  authorize provider credential fingerprints, one per line.\n"
     "--experimental-ikev2-helper-revocation-file file : Persistently revoke\n"
-    "                  IKEv2 credential fingerprints, one fingerprint per line.\n"
+    "                  provider credential fingerprints, one per line.\n"
     "--experimental-ikev2-helper-principal-revocation-file file : Persistently\n"
     "                  revoke IKEv2 principals, one principal per line.\n"
     "--experimental-ikev2-helper-cert-revocation-file file : Persistently\n"
@@ -452,8 +452,14 @@ static const char usage_message[] =
     "                  IKEv2 DPD liveness probe after n seconds.\n"
     "--experimental-ikev2-helper-apply-xfrm : Allow the experimental IKEv2\n"
     "                  helper to install OpenVPN-issued Linux XFRM state.\n"
-    "--experimental-ikev2-helper-full-tunnel : Test-only mode authorizing\n"
-    "                  IPv4 0.0.0.0/0 traffic selectors for IKEv2 clients.\n"
+    "--experimental-ikev2-helper-full-tunnel : Authorize IPv4 0.0.0.0/0\n"
+    "                  traffic selectors for IKEv2 clients.\n"
+    "--experimental-provider-policy-openvpn : Apply the provider certificate\n"
+    "                  allow/revoke policy to ordinary OpenVPN TLS clients.\n"
+    "                  Requires all four readable provider policy files; empty\n"
+    "                  files are valid and the empty allow file denies all.\n"
+    "--experimental-provider-effective-policy-state absolute-file : Persist Saving Jane\n"
+    "                  policy metadata references and child credential bindings.\n"
     "--push \"option\" : Push a config file option back to the peer for remote\n"
     "                  execution.  Peer must specify --pull in its config file.\n"
     "--push-reset    : Don't inherit global push list for specific\n"
@@ -1839,6 +1845,8 @@ show_settings(const struct options *o)
     SHOW_INT(ikev2_helper_dpd_retry_seconds);
     SHOW_BOOL(ikev2_helper_apply_xfrm);
     SHOW_BOOL(ikev2_helper_full_tunnel);
+    SHOW_BOOL(provider_policy_openvpn);
+    SHOW_STR(provider_effective_policy_state_file);
 
     show_dns_options(&o->dns_options);
 
@@ -2555,25 +2563,19 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
         }
 #ifdef _WIN32
         if (options->ikev2_helper_path || options->ikev2_helper_server_id
-            || options->ikev2_helper_allow_file
-            || options->ikev2_helper_revocation_file
-            || options->ikev2_helper_principal_revocation_file
-            || options->ikev2_helper_cert_revocation_file
             || options->ikev2_helper_dpd_idle_seconds
             || options->ikev2_helper_dpd_retry_seconds
             || options->ikev2_helper_apply_xfrm
-            || options->ikev2_helper_full_tunnel
-            || provider_policy_fingerprint_list_defined(
-                &options->ikev2_helper_allowed_fingerprints))
+            || options->ikev2_helper_full_tunnel)
         {
             msg(M_USAGE, "--experimental-ikev2-helper is not supported on Windows");
         }
 #endif
 #if !defined(ENABLE_CRYPTO_OPENSSL)
-        if (options->ikev2_helper_path)
+        if (options->ikev2_helper_path || options->provider_policy_openvpn)
         {
             msg(M_USAGE,
-                "--experimental-ikev2-helper currently requires the OpenSSL TLS backend");
+                "experimental provider policy currently requires the OpenSSL TLS backend");
         }
 #endif
 #if !defined(TARGET_LINUX)
@@ -2604,27 +2606,31 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
             msg(M_USAGE,
                 "--experimental-ikev2-helper-server-id requires --experimental-ikev2-helper");
         }
-        if (options->ikev2_helper_allow_file && !options->ikev2_helper_path)
+        if (options->ikev2_helper_allow_file && !options->ikev2_helper_path
+            && !options->provider_policy_openvpn)
         {
             msg(M_USAGE,
-                "--experimental-ikev2-helper-allow-fingerprint-file requires --experimental-ikev2-helper");
+                "--experimental-ikev2-helper-allow-fingerprint-file requires --experimental-ikev2-helper or --experimental-provider-policy-openvpn");
         }
-        if (options->ikev2_helper_revocation_file && !options->ikev2_helper_path)
+        if (options->ikev2_helper_revocation_file && !options->ikev2_helper_path
+            && !options->provider_policy_openvpn)
         {
             msg(M_USAGE,
-                "--experimental-ikev2-helper-revocation-file requires --experimental-ikev2-helper");
+                "--experimental-ikev2-helper-revocation-file requires --experimental-ikev2-helper or --experimental-provider-policy-openvpn");
         }
         if (options->ikev2_helper_principal_revocation_file
-            && !options->ikev2_helper_path)
+            && !options->ikev2_helper_path
+            && !options->provider_policy_openvpn)
         {
             msg(M_USAGE,
-                "--experimental-ikev2-helper-principal-revocation-file requires --experimental-ikev2-helper");
+                "--experimental-ikev2-helper-principal-revocation-file requires --experimental-ikev2-helper or --experimental-provider-policy-openvpn");
         }
         if (options->ikev2_helper_cert_revocation_file
-            && !options->ikev2_helper_path)
+            && !options->ikev2_helper_path
+            && !options->provider_policy_openvpn)
         {
             msg(M_USAGE,
-                "--experimental-ikev2-helper-cert-revocation-file requires --experimental-ikev2-helper");
+                "--experimental-ikev2-helper-cert-revocation-file requires --experimental-ikev2-helper or --experimental-provider-policy-openvpn");
         }
         if (options->ikev2_helper_dpd_idle_seconds
             && !options->ikev2_helper_path)
@@ -2640,10 +2646,26 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
         }
         if (provider_policy_fingerprint_list_defined(
                 &options->ikev2_helper_allowed_fingerprints)
-            && !options->ikev2_helper_path)
+            && !options->ikev2_helper_path
+            && !options->provider_policy_openvpn)
         {
             msg(M_USAGE,
-                "--experimental-ikev2-helper-allow-fingerprint requires --experimental-ikev2-helper");
+                "--experimental-ikev2-helper-allow-fingerprint requires --experimental-ikev2-helper or --experimental-provider-policy-openvpn");
+        }
+        char provider_policy_reason[PROVIDER_POLICY_REASON_SIZE];
+        if (!provider_policy_openvpn_config_valid(
+                options, provider_policy_reason,
+                sizeof(provider_policy_reason)))
+        {
+            msg(M_USAGE, "--experimental-provider-policy-openvpn: %s",
+                provider_policy_reason);
+        }
+        if (options->provider_effective_policy_state_file
+            && !platform_absolute_pathname(
+                options->provider_effective_policy_state_file))
+        {
+            msg(M_USAGE,
+                "--experimental-provider-effective-policy-state requires an absolute path");
         }
         MUST_BE_FALSE(ce->remote, "remote");
         MUST_BE_FALSE(!ce->bind_local, "nobind");
@@ -2781,6 +2803,10 @@ options_postprocess_verify_ce(const struct options *options, const struct connec
                       "experimental-ikev2-helper-apply-xfrm");
         MUST_BE_FALSE(options->ikev2_helper_full_tunnel,
                       "experimental-ikev2-helper-full-tunnel");
+        MUST_BE_FALSE(options->provider_policy_openvpn,
+                      "experimental-provider-policy-openvpn");
+        MUST_BE_UNDEF(provider_effective_policy_state_file,
+                      "experimental-provider-effective-policy-state");
         MUST_BE_FALSE(provider_policy_fingerprint_list_defined(
                           &options->ikev2_helper_allowed_fingerprints),
                       "experimental-ikev2-helper-allow-fingerprint");
@@ -7499,6 +7525,17 @@ add_option(struct options *options, char *p[], bool is_inline, const char *file,
     {
         VERIFY_PERMISSION(OPT_P_GENERAL);
         options->ikev2_helper_full_tunnel = true;
+    }
+    else if (streq(p[0], "experimental-provider-policy-openvpn") && !p[1])
+    {
+        VERIFY_PERMISSION(OPT_P_GENERAL);
+        options->provider_policy_openvpn = true;
+    }
+    else if (streq(p[0], "experimental-provider-effective-policy-state")
+             && p[1] && !p[2])
+    {
+        VERIFY_PERMISSION(OPT_P_GENERAL);
+        options->provider_effective_policy_state_file = p[1];
     }
     else if (streq(p[0], "push") && p[1] && !p[2])
     {

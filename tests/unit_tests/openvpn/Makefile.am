@@ -17,6 +17,7 @@ test_binaries = argv_testdriver \
 	options_parse_testdriver \
 	packet_id_testdriver \
 	pkt_testdriver \
+	provider_effective_policy_testdriver \
 	provider_policy_testdriver \
 	provider_session_testdriver \
 	provider_testdriver \
@@ -273,6 +274,14 @@ provider_session_testdriver_SOURCES = test_provider_session.c \
 	$(top_srcdir)/src/openvpn/platform.c \
 	$(top_srcdir)/src/openvpn/win32-util.c
 
+provider_effective_policy_testdriver_CFLAGS  = \
+	-I$(top_srcdir)/include -I$(top_srcdir)/src/compat -I$(top_srcdir)/src/openvpn \
+	@TEST_CFLAGS@
+provider_effective_policy_testdriver_LDFLAGS = @TEST_LDFLAGS@
+provider_effective_policy_testdriver_SOURCES = \
+	test_provider_effective_policy.c \
+	$(top_srcdir)/src/openvpn/provider_effective_policy.c
+
 provider_policy_testdriver_CFLAGS  = \
 	-I$(top_srcdir)/include -I$(top_srcdir)/src/compat -I$(top_srcdir)/src/openvpn \
 	@TEST_CFLAGS@
@@ -305,6 +314,7 @@ provider_helper_testdriver_SOURCES = test_provider_helper.c \
 	mock_get_random.c \
 	$(top_srcdir)/src/openvpn/provider_helper.c \
 	$(top_srcdir)/src/openvpn/provider_helper_ipc.c \
+	$(top_srcdir)/src/openvpn/provider_client_auth.c \
 	$(top_srcdir)/src/openvpn/provider_helper_wire.c \
 	$(top_srcdir)/src/openvpn/status.c \
 	$(top_srcdir)/src/openvpn/buffer.c \

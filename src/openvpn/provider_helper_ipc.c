@@ -262,6 +262,38 @@ provider_helper_ipc_write_server_sign_response(
            && buf_write(buf, payload, sizeof(payload));
 }
 
+bool
+provider_helper_ipc_write_client_trust_refresh_request(
+    struct buffer *buf,
+    const struct provider_helper_client_trust_refresh_request *request)
+{
+    if (!buf || !request)
+    {
+        return false;
+    }
+
+    uint8_t payload[PROVIDER_HELPER_CLIENT_TRUST_REFRESH_REQUEST_SIZE];
+    return provider_helper_ipc_encode_client_trust_refresh_request(
+               payload, sizeof(payload), request)
+           && buf_write(buf, payload, sizeof(payload));
+}
+
+bool
+provider_helper_ipc_write_client_trust_refresh_response(
+    struct buffer *buf,
+    const struct provider_helper_client_trust_refresh_response *response)
+{
+    if (!buf || !response)
+    {
+        return false;
+    }
+
+    uint8_t payload[PROVIDER_HELPER_CLIENT_TRUST_REFRESH_RESPONSE_SIZE];
+    return provider_helper_ipc_encode_client_trust_refresh_response(
+               payload, sizeof(payload), response)
+           && buf_write(buf, payload, sizeof(payload));
+}
+
 enum provider_helper_ipc_result
 provider_helper_ipc_read_header(struct buffer *buf,
                                 struct provider_helper_msg_header *header,

@@ -40,6 +40,7 @@
 
 #ifndef _WIN32
 #include <dirent.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
@@ -167,6 +168,76 @@ provider_helper_supervisor_now(void)
     return now ? now : time(NULL);
 }
 
+static bool
+provider_helper_system_monotonic_ms(uint64_t *now_ms)
+{
+    if (!now_ms)
+    {
+        return false;
+    }
+
+#ifdef _WIN32
+    *now_ms = (uint64_t)GetTickCount64();
+    return true;
+#elif defined(CLOCK_MONOTONIC)
+    struct timespec current;
+    if (clock_gettime(CLOCK_MONOTONIC, &current) != 0 || current.tv_sec < 0
+        || current.tv_nsec < 0)
+    {
+        return false;
+    }
+    if ((uint64_t)current.tv_sec > UINT64_MAX / 1000u)
+    {
+        return false;
+    }
+    *now_ms = (uint64_t)current.tv_sec * 1000u
+              + (uint64_t)current.tv_nsec / 1000000u;
+    return true;
+#else
+    return false;
+#endif
+}
+
+static bool
+provider_helper_supervisor_monotonic_ms(
+    const struct provider_helper_supervisor *supervisor,
+    uint64_t *now_ms)
+{
+    if (supervisor && supervisor->monotonic_ms_fn)
+    {
+        return supervisor->monotonic_ms_fn(supervisor->time_wait_arg, now_ms);
+    }
+    return provider_helper_system_monotonic_ms(now_ms);
+}
+
+static int
+provider_helper_supervisor_wait_readable(
+    const struct provider_helper_supervisor *supervisor,
+    int timeout_ms)
+{
+    if (!supervisor || supervisor->ipc_fd < 0 || timeout_ms < 0)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if (supervisor->wait_readable_fn)
+    {
+        return supervisor->wait_readable_fn(supervisor->time_wait_arg,
+                                            supervisor->ipc_fd, timeout_ms);
+    }
+
+#ifndef _WIN32
+    struct pollfd pfd = {
+        .fd = supervisor->ipc_fd,
+        .events = POLLIN,
+    };
+    return poll(&pfd, 1, timeout_ms);
+#else
+    errno = EINVAL;
+    return -1;
+#endif
+}
+
 void
 provider_helper_supervisor_init(struct provider_helper_supervisor *supervisor)
 {
@@ -184,6 +255,11 @@ provider_helper_supervisor_init(struct provider_helper_supervisor *supervisor)
 static void
 provider_helper_close_ipc(struct provider_helper_supervisor *supervisor)
 {
+    if (supervisor->xfrm_delete_state
+        == PROVIDER_HELPER_XFRM_DELETE_PENDING)
+    {
+        supervisor->xfrm_delete_state = PROVIDER_HELPER_XFRM_DELETE_FAILED;
+    }
     if (supervisor->ipc_fd >= 0)
     {
         close(supervisor->ipc_fd);
@@ -193,6 +269,13 @@ provider_helper_close_ipc(struct provider_helper_supervisor *supervisor)
     supervisor->payload_len = 0;
     supervisor->payload_received = 0;
     CLEAR(supervisor->pending_header);
+    supervisor->server_auth_config_pending_correlation_id = 0;
+    supervisor->server_auth_config_ack_correlation_id = 0;
+    supervisor->server_auth_config_pending_revision = 0;
+    supervisor->server_auth_config_ack_revision = 0;
+    supervisor->heartbeat_pending_sequence = 0;
+    supervisor->heartbeat_ack_sequence = 0;
+    supervisor->heartbeat_deadline_ms = 0;
     secure_memzero(supervisor->launch_nonce, sizeof(supervisor->launch_nonce));
     supervisor->launch_nonce_required = false;
     supervisor->peer_cred_required = false;
@@ -209,6 +292,9 @@ provider_helper_supervisor_set_state(struct provider_helper_supervisor *supervis
         {
             supervisor->restart_backoff_seconds = 0;
             supervisor->next_restart_time = 0;
+            supervisor->heartbeat_pending_sequence = 0;
+            supervisor->heartbeat_ack_sequence = 0;
+            supervisor->heartbeat_deadline_ms = 0;
         }
         supervisor->state = state;
         supervisor->last_state_change = provider_helper_supervisor_now();
@@ -384,7 +470,8 @@ provider_helper_supervisor_fail_ipc(struct provider_helper_supervisor *superviso
 #endif
 }
 
-struct provider_helper_status_counter {
+struct provider_helper_status_counter
+{
     const char *name;
     uint64_t value;
 };
@@ -617,8 +704,7 @@ provider_helper_print_status(const struct provider_helper_supervisor *supervisor
                       "Runtime Flags%cApply XFRM%cDPD Idle Seconds%c"
                       "DPD Retry Seconds",
                       sep, sep, sep, sep, sep, sep, sep, sep, sep, sep, sep);
-        status_printf(so, "PROVIDER_HELPER%c%s%c%ld%c%u%c%u%c%u%c0x%" PRIx64
-                      "%c0x%" PRIx32 "%c%d%c%u%c%u",
+        status_printf(so, "PROVIDER_HELPER%c%s%c%ld%c%u%c%u%c%u%c0x%" PRIx64 "%c0x%" PRIx32 "%c%d%c%u%c%u",
                       sep, provider_helper_state_name(supervisor->state),
                       sep, pid,
                       sep, supervisor->restart_count,
@@ -688,6 +774,19 @@ provider_helper_supervisor_set_server_sign_callback(
     {
         supervisor->server_sign_request_cb = cb;
         supervisor->server_sign_request_arg = arg;
+    }
+}
+
+void
+provider_helper_supervisor_set_client_trust_refresh_callback(
+    struct provider_helper_supervisor *supervisor,
+    provider_helper_client_trust_refresh_request_cb cb,
+    void *arg)
+{
+    if (supervisor)
+    {
+        supervisor->client_trust_refresh_request_cb = cb;
+        supervisor->client_trust_refresh_request_arg = arg;
     }
 }
 
@@ -907,6 +1006,8 @@ provider_helper_supervisor_send_server_auth_config(
 {
     if (!supervisor || supervisor->ipc_fd < 0 || !config
         || supervisor->state != PROVIDER_HELPER_STATE_READY
+        || supervisor->server_auth_config_pending_correlation_id
+        || !correlation_id
         || !provider_helper_server_auth_config_valid(config, NULL, 0))
     {
         return false;
@@ -935,6 +1036,13 @@ provider_helper_supervisor_send_server_auth_config(
     {
         provider_helper_supervisor_fail_ipc(supervisor,
                                             PROVIDER_HELPER_STATE_DEGRADED);
+    }
+    else
+    {
+        supervisor->server_auth_config_pending_correlation_id =
+            header.sequence;
+        supervisor->server_auth_config_pending_revision =
+            config->config_revision;
     }
     return written;
 }
@@ -1054,10 +1162,10 @@ provider_helper_supervisor_build_auth_response(
     }
 
     return provider_helper_supervisor_default_auth_deny(
-        request,
-        supervisor->auth_request_cb ? "provider auth policy callback failed"
-                                    : "provider auth policy bridge not wired",
-        response)
+               request,
+               supervisor->auth_request_cb ? "provider auth policy callback failed"
+                                           : "provider auth policy bridge not wired",
+               response)
            && provider_helper_auth_response_valid(response, NULL, 0);
 }
 
@@ -1092,6 +1200,133 @@ provider_helper_supervisor_send_auth_response(
     const bool written = encoded
                          && provider_helper_write_all(supervisor->ipc_fd, BPTR(&buf),
                                                       (size_t)BLEN(&buf));
+    free_buf(&buf);
+    if (!written)
+    {
+        provider_helper_supervisor_fail_ipc(supervisor,
+                                            PROVIDER_HELPER_STATE_DEGRADED);
+    }
+    return written;
+}
+
+static bool
+provider_helper_client_trust_refresh_response_set_reason(
+    struct provider_helper_client_trust_refresh_response *response,
+    const char *reason)
+{
+    if (!response || !reason)
+    {
+        return false;
+    }
+    const size_t reason_len = strlen(reason);
+    if (!reason_len || reason_len >= sizeof(response->reason))
+    {
+        return false;
+    }
+    memcpy(response->reason, reason, reason_len);
+    response->reason_len = (uint32_t)reason_len;
+    return true;
+}
+
+static bool
+provider_helper_supervisor_default_client_trust_refresh_failure(
+    const struct provider_helper_client_trust_refresh_request *request,
+    const char *reason,
+    struct provider_helper_client_trust_refresh_response *response)
+{
+    if (!request || !response)
+    {
+        return false;
+    }
+
+    CLEAR(*response);
+    response->request_id = request->request_id;
+    response->config_revision = request->config_revision;
+    response->status = PROVIDER_HELPER_CLIENT_TRUST_REFRESH_FAILED;
+    return provider_helper_client_trust_refresh_response_set_reason(response,
+                                                                    reason)
+           && provider_helper_client_trust_refresh_response_valid(response,
+                                                                  NULL, 0);
+}
+
+static bool
+provider_helper_supervisor_client_trust_refresh_response_matches_request(
+    const struct provider_helper_client_trust_refresh_request *request,
+    const struct provider_helper_client_trust_refresh_response *response)
+{
+    if (!request || !response || response->request_id != request->request_id)
+    {
+        return false;
+    }
+    if (response->status == PROVIDER_HELPER_CLIENT_TRUST_REFRESH_OK)
+    {
+        return response->config_revision > request->config_revision;
+    }
+    return response->config_revision == request->config_revision;
+}
+
+static bool
+provider_helper_supervisor_build_client_trust_refresh_response(
+    struct provider_helper_supervisor *supervisor,
+    const struct provider_helper_client_trust_refresh_request *request,
+    struct provider_helper_client_trust_refresh_response *response)
+{
+    if (!supervisor || !request || !response)
+    {
+        return false;
+    }
+
+    if (supervisor->client_trust_refresh_request_cb
+        && supervisor->client_trust_refresh_request_cb(
+            supervisor->client_trust_refresh_request_arg, request, response)
+        && provider_helper_client_trust_refresh_response_valid(response, NULL,
+                                                               0)
+        && provider_helper_supervisor_client_trust_refresh_response_matches_request(
+            request, response))
+    {
+        return true;
+    }
+
+    return provider_helper_supervisor_default_client_trust_refresh_failure(
+        request,
+        supervisor->client_trust_refresh_request_cb
+            ? "client trust refresh callback failed"
+            : "client trust refresh bridge not wired",
+        response);
+}
+
+static bool
+provider_helper_supervisor_send_client_trust_refresh_response(
+    struct provider_helper_supervisor *supervisor,
+    const struct provider_helper_client_trust_refresh_response *response,
+    uint64_t correlation_id)
+{
+    if (!supervisor || supervisor->ipc_fd < 0 || !response
+        || supervisor->state != PROVIDER_HELPER_STATE_READY
+        || !provider_helper_client_trust_refresh_response_valid(response, NULL,
+                                                                0))
+    {
+        return false;
+    }
+
+    struct buffer buf = alloc_buf(
+        PROVIDER_HELPER_IPC_HEADER_SIZE
+        + PROVIDER_HELPER_CLIENT_TRUST_REFRESH_RESPONSE_SIZE);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_CLIENT_TRUST_REFRESH_RESPONSE,
+        .sequence = supervisor->next_tx_sequence++,
+        .correlation_id = correlation_id,
+        .payload_len = PROVIDER_HELPER_CLIENT_TRUST_REFRESH_RESPONSE_SIZE,
+    };
+    const bool encoded = provider_helper_ipc_write_header(&buf, &header)
+                         && provider_helper_ipc_write_client_trust_refresh_response(
+                             &buf, response);
+    const bool written = encoded
+                         && provider_helper_write_all(
+                             supervisor->ipc_fd, BPTR(&buf), (size_t)BLEN(&buf));
     free_buf(&buf);
     if (!written)
     {
@@ -1152,7 +1387,7 @@ provider_helper_supervisor_build_server_sign_response(
     }
 
     return provider_helper_supervisor_default_server_sign_failure(request,
-                                                                 response);
+                                                                  response);
 }
 
 static bool
@@ -1282,8 +1517,13 @@ provider_helper_supervisor_send_xfrm_lease_msg(
     struct provider_helper_supervisor *supervisor,
     const struct provider_helper_xfrm_lease *lease,
     uint32_t msg_type,
-    uint64_t correlation_id)
+    uint64_t correlation_id,
+    uint64_t *request_sequence)
 {
+    if (request_sequence)
+    {
+        *request_sequence = 0;
+    }
     if (!supervisor || supervisor->ipc_fd < 0
         || supervisor->state != PROVIDER_HELPER_STATE_READY
         || !provider_helper_xfrm_lease_allowed_by_config(
@@ -1315,6 +1555,10 @@ provider_helper_supervisor_send_xfrm_lease_msg(
         provider_helper_supervisor_fail_ipc(supervisor,
                                             PROVIDER_HELPER_STATE_DEGRADED);
     }
+    else if (request_sequence)
+    {
+        *request_sequence = header.sequence;
+    }
     return written;
 }
 
@@ -1326,7 +1570,51 @@ provider_helper_supervisor_send_xfrm_lease(
 {
     return provider_helper_supervisor_send_xfrm_lease_msg(
         supervisor, lease, PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL,
-        correlation_id);
+        correlation_id, NULL);
+}
+
+bool
+provider_helper_supervisor_send_xfrm_lease_delete_tracked(
+    struct provider_helper_supervisor *supervisor,
+    const struct provider_helper_xfrm_lease *lease,
+    uint64_t correlation_id,
+    uint64_t *request_sequence)
+{
+    if (!supervisor
+        || supervisor->xfrm_delete_state
+               == PROVIDER_HELPER_XFRM_DELETE_PENDING)
+    {
+        return false;
+    }
+
+    supervisor->xfrm_delete_state = PROVIDER_HELPER_XFRM_DELETE_PENDING;
+    supervisor->xfrm_delete_pending_sequence = supervisor->next_tx_sequence;
+    supervisor->xfrm_delete_ack_sequence = 0;
+    uint64_t sent_sequence = 0;
+    const bool sent = provider_helper_supervisor_send_xfrm_lease_msg(
+        supervisor, lease, PROVIDER_HELPER_MSG_XFRM_LEASE_DELETE,
+        correlation_id, &sent_sequence);
+    if (!sent || !sent_sequence
+        || sent_sequence != supervisor->xfrm_delete_pending_sequence)
+    {
+        if (supervisor->xfrm_delete_state
+            == PROVIDER_HELPER_XFRM_DELETE_PENDING)
+        {
+            supervisor->xfrm_delete_state = PROVIDER_HELPER_XFRM_DELETE_FAILED;
+        }
+        if (supervisor->ipc_fd >= 0
+            || supervisor->state == PROVIDER_HELPER_STATE_READY)
+        {
+            provider_helper_supervisor_fail_ipc(
+                supervisor, PROVIDER_HELPER_STATE_DEGRADED);
+        }
+        return false;
+    }
+    if (request_sequence)
+    {
+        *request_sequence = sent_sequence;
+    }
+    return true;
 }
 
 bool
@@ -1335,9 +1623,126 @@ provider_helper_supervisor_send_xfrm_lease_delete(
     const struct provider_helper_xfrm_lease *lease,
     uint64_t correlation_id)
 {
-    return provider_helper_supervisor_send_xfrm_lease_msg(
-        supervisor, lease, PROVIDER_HELPER_MSG_XFRM_LEASE_DELETE,
-        correlation_id);
+    return provider_helper_supervisor_send_xfrm_lease_delete_tracked(
+        supervisor, lease, correlation_id, NULL);
+}
+
+bool
+provider_helper_supervisor_wait_xfrm_lease_delete_ack(
+    struct provider_helper_supervisor *supervisor,
+    uint64_t request_sequence,
+    unsigned int timeout_ms,
+    char *reason,
+    size_t reason_size)
+{
+    if (reason && reason_size)
+    {
+        snprintf(reason, reason_size, "invalid XFRM lease delete wait");
+    }
+    if (!supervisor || !request_sequence || !timeout_ms
+        || supervisor->xfrm_delete_state
+               != PROVIDER_HELPER_XFRM_DELETE_PENDING
+        || supervisor->xfrm_delete_pending_sequence != request_sequence)
+    {
+        return false;
+    }
+
+    uint64_t current_ms = 0;
+    if (!provider_helper_supervisor_monotonic_ms(supervisor, &current_ms)
+        || current_ms > UINT64_MAX - timeout_ms)
+    {
+        supervisor->xfrm_delete_state = PROVIDER_HELPER_XFRM_DELETE_FAILED;
+        provider_helper_supervisor_fail_ipc(
+            supervisor, PROVIDER_HELPER_STATE_DEGRADED);
+        return false;
+    }
+    const uint64_t deadline_ms = current_ms + timeout_ms;
+
+    while (supervisor->xfrm_delete_state
+               == PROVIDER_HELPER_XFRM_DELETE_PENDING
+           && supervisor->state == PROVIDER_HELPER_STATE_READY
+           && supervisor->ipc_fd >= 0)
+    {
+        if (!provider_helper_supervisor_monotonic_ms(supervisor, &current_ms))
+        {
+            supervisor->xfrm_delete_state =
+                PROVIDER_HELPER_XFRM_DELETE_FAILED;
+            break;
+        }
+        if (current_ms >= deadline_ms)
+        {
+            supervisor->xfrm_delete_state =
+                PROVIDER_HELPER_XFRM_DELETE_TIMED_OUT;
+            break;
+        }
+
+        provider_helper_process_event(supervisor);
+        if (supervisor->xfrm_delete_state
+            != PROVIDER_HELPER_XFRM_DELETE_PENDING)
+        {
+            break;
+        }
+
+        if (!provider_helper_supervisor_monotonic_ms(supervisor, &current_ms))
+        {
+            supervisor->xfrm_delete_state =
+                PROVIDER_HELPER_XFRM_DELETE_FAILED;
+            break;
+        }
+        if (current_ms >= deadline_ms)
+        {
+            supervisor->xfrm_delete_state =
+                PROVIDER_HELPER_XFRM_DELETE_TIMED_OUT;
+            break;
+        }
+
+        const uint64_t remaining = deadline_ms - current_ms;
+        const int poll_timeout = remaining > INT_MAX
+                                     ? INT_MAX
+                                     : (int)remaining;
+        const int wait_status =
+            provider_helper_supervisor_wait_readable(supervisor, poll_timeout);
+        if (wait_status < 0 && errno != EINTR)
+        {
+            supervisor->xfrm_delete_state =
+                PROVIDER_HELPER_XFRM_DELETE_FAILED;
+            break;
+        }
+    }
+
+    if (supervisor->xfrm_delete_state == PROVIDER_HELPER_XFRM_DELETE_ACKED
+        && supervisor->xfrm_delete_ack_sequence == request_sequence)
+    {
+        if (reason && reason_size)
+        {
+            snprintf(reason, reason_size,
+                     "correlated XFRM lease delete acknowledged");
+        }
+        return true;
+    }
+
+    const bool timed_out =
+        supervisor->xfrm_delete_state
+        == PROVIDER_HELPER_XFRM_DELETE_TIMED_OUT;
+    if (supervisor->xfrm_delete_state
+        == PROVIDER_HELPER_XFRM_DELETE_PENDING)
+    {
+        supervisor->xfrm_delete_state = PROVIDER_HELPER_XFRM_DELETE_FAILED;
+    }
+    if (reason && reason_size)
+    {
+        snprintf(reason, reason_size,
+                 timed_out
+                     ? "timed out waiting for correlated XFRM lease delete ACK"
+                     : "helper failed before correlated XFRM lease delete ACK");
+    }
+    if (supervisor->ipc_fd >= 0
+        || supervisor->state == PROVIDER_HELPER_STATE_READY)
+    {
+        provider_helper_supervisor_fail_ipc(
+            supervisor, PROVIDER_HELPER_STATE_DEGRADED);
+    }
+    return false;
 }
 
 bool
@@ -1385,7 +1790,8 @@ provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
 #if defined(TARGET_LINUX)
     const int passcred = 1;
     if (setsockopt(fds[0], SOL_SOCKET, SO_PASSCRED, &passcred,
-                   sizeof(passcred)) != 0)
+                   sizeof(passcred))
+        != 0)
     {
         msg(M_WARN | M_ERRNO, "provider-helper: SO_PASSCRED failed");
         close(fds[0]);
@@ -1463,6 +1869,9 @@ provider_helper_supervisor_spawn(struct provider_helper_supervisor *supervisor,
     supervisor->header_len = 0;
     supervisor->payload_len = 0;
     supervisor->payload_received = 0;
+    supervisor->xfrm_delete_state = PROVIDER_HELPER_XFRM_DELETE_IDLE;
+    supervisor->xfrm_delete_pending_sequence = 0;
+    supervisor->xfrm_delete_ack_sequence = 0;
     provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_STARTING);
     return true;
 }
@@ -1538,6 +1947,60 @@ provider_helper_supervisor_send_stats_request(
     return written;
 }
 
+bool
+provider_helper_supervisor_send_heartbeat(
+    struct provider_helper_supervisor *supervisor)
+{
+    if (!supervisor || supervisor->ipc_fd < 0
+        || supervisor->state != PROVIDER_HELPER_STATE_READY)
+    {
+        return false;
+    }
+    if (supervisor->heartbeat_pending_sequence)
+    {
+        return true;
+    }
+
+    uint64_t current_ms = 0;
+    if (!provider_helper_supervisor_monotonic_ms(supervisor, &current_ms)
+        || current_ms > UINT64_MAX - PROVIDER_HELPER_HEARTBEAT_TIMEOUT_MS)
+    {
+        provider_helper_supervisor_fail_ipc(supervisor,
+                                            PROVIDER_HELPER_STATE_DEGRADED);
+        return false;
+    }
+
+    const uint64_t request_sequence = supervisor->next_tx_sequence++;
+    struct buffer buf = alloc_buf(PROVIDER_HELPER_IPC_HEADER_SIZE);
+    const struct provider_helper_msg_header header = {
+        .magic = PROVIDER_HELPER_IPC_MAGIC,
+        .version_major = PROVIDER_HELPER_IPC_VERSION_MAJOR,
+        .version_minor = PROVIDER_HELPER_IPC_VERSION_MINOR,
+        .type = PROVIDER_HELPER_MSG_PING,
+        .sequence = request_sequence,
+        .correlation_id = request_sequence,
+        .payload_len = 0,
+    };
+    const bool written =
+        request_sequence
+        && provider_helper_ipc_write_header(&buf, &header)
+        && provider_helper_write_all(supervisor->ipc_fd, BPTR(&buf),
+                                     (size_t)BLEN(&buf));
+    free_buf(&buf);
+    if (!written)
+    {
+        provider_helper_supervisor_fail_ipc(supervisor,
+                                            PROVIDER_HELPER_STATE_DEGRADED);
+        return false;
+    }
+
+    supervisor->heartbeat_pending_sequence = request_sequence;
+    supervisor->heartbeat_ack_sequence = 0;
+    supervisor->heartbeat_deadline_ms =
+        current_ms + PROVIDER_HELPER_HEARTBEAT_TIMEOUT_MS;
+    return true;
+}
+
 #ifndef _WIN32
 static void
 provider_helper_wait_or_kill(pid_t pid)
@@ -1569,7 +2032,23 @@ provider_helper_state_timeout_elapsed(const struct provider_helper_supervisor *s
     const time_t current = provider_helper_supervisor_now();
     return current >= supervisor->last_state_change
            && (unsigned int)(current - supervisor->last_state_change)
-              > timeout_seconds;
+                  > timeout_seconds;
+}
+
+static bool
+provider_helper_heartbeat_timeout_elapsed(
+    const struct provider_helper_supervisor *supervisor)
+{
+    if (!supervisor || supervisor->state != PROVIDER_HELPER_STATE_READY
+        || !supervisor->heartbeat_pending_sequence
+        || !supervisor->heartbeat_deadline_ms)
+    {
+        return false;
+    }
+
+    uint64_t current_ms = 0;
+    return !provider_helper_supervisor_monotonic_ms(supervisor, &current_ms)
+           || current_ms >= supervisor->heartbeat_deadline_ms;
 }
 
 static void
@@ -1631,6 +2110,13 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
 {
     if (!supervisor)
     {
+        return;
+    }
+
+    if (provider_helper_heartbeat_timeout_elapsed(supervisor))
+    {
+        provider_helper_supervisor_fail_ipc(supervisor,
+                                            PROVIDER_HELPER_STATE_DEGRADED);
         return;
     }
 
@@ -1796,6 +2282,26 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
             return;
         }
 
+        if (header.type == PROVIDER_HELPER_MSG_CLIENT_TRUST_REFRESH_REQUEST
+            && payload_len
+                   == PROVIDER_HELPER_CLIENT_TRUST_REFRESH_REQUEST_SIZE
+            && supervisor->state == PROVIDER_HELPER_STATE_READY)
+        {
+            struct provider_helper_client_trust_refresh_request request;
+            struct provider_helper_client_trust_refresh_response response;
+            if (!provider_helper_ipc_decode_client_trust_refresh_request(
+                    supervisor->payload_buf, payload_len, &request)
+                || !provider_helper_supervisor_build_client_trust_refresh_response(
+                    supervisor, &request, &response)
+                || !provider_helper_supervisor_send_client_trust_refresh_response(
+                    supervisor, &response, header.sequence))
+            {
+                provider_helper_supervisor_fail_ipc(
+                    supervisor, PROVIDER_HELPER_STATE_FAILED);
+            }
+            return;
+        }
+
         if (supervisor->ipc_fd >= 0)
         {
             provider_helper_supervisor_fail_ipc(supervisor,
@@ -1886,10 +2392,27 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
             provider_helper_supervisor_set_state(supervisor, PROVIDER_HELPER_STATE_READY);
             break;
 
-        case PROVIDER_HELPER_MSG_LISTENER_FD_ACK:
         case PROVIDER_HELPER_MSG_SERVER_AUTH_CONFIG_ACK:
+            if (supervisor->state != PROVIDER_HELPER_STATE_READY
+                || !supervisor->server_auth_config_pending_correlation_id
+                || header.correlation_id
+                       != supervisor
+                              ->server_auth_config_pending_correlation_id)
+            {
+                provider_helper_supervisor_fail_ipc(
+                    supervisor, PROVIDER_HELPER_STATE_FAILED);
+                break;
+            }
+            supervisor->server_auth_config_ack_correlation_id =
+                header.correlation_id;
+            supervisor->server_auth_config_ack_revision =
+                supervisor->server_auth_config_pending_revision;
+            supervisor->server_auth_config_pending_correlation_id = 0;
+            supervisor->server_auth_config_pending_revision = 0;
+            break;
+
+        case PROVIDER_HELPER_MSG_LISTENER_FD_ACK:
         case PROVIDER_HELPER_MSG_XFRM_LEASE_INSTALL_ACK:
-        case PROVIDER_HELPER_MSG_XFRM_LEASE_DELETE_ACK:
             if (supervisor->state != PROVIDER_HELPER_STATE_READY)
             {
                 provider_helper_supervisor_fail_ipc(supervisor,
@@ -1897,8 +2420,48 @@ provider_helper_process_event(struct provider_helper_supervisor *supervisor)
             }
             break;
 
-        case PROVIDER_HELPER_MSG_PING:
+        case PROVIDER_HELPER_MSG_XFRM_LEASE_DELETE_ACK:
+            if (supervisor->state != PROVIDER_HELPER_STATE_READY)
+            {
+                provider_helper_supervisor_fail_ipc(supervisor,
+                                                    PROVIDER_HELPER_STATE_FAILED);
+            }
+            else if (supervisor->xfrm_delete_state
+                         == PROVIDER_HELPER_XFRM_DELETE_PENDING
+                     && header.correlation_id
+                            == supervisor->xfrm_delete_pending_sequence)
+            {
+                supervisor->xfrm_delete_state =
+                    PROVIDER_HELPER_XFRM_DELETE_ACKED;
+                supervisor->xfrm_delete_ack_sequence = header.correlation_id;
+            }
+            else if (supervisor->xfrm_delete_stale_acks < UINT64_MAX)
+            {
+                ++supervisor->xfrm_delete_stale_acks;
+            }
+            break;
+
         case PROVIDER_HELPER_MSG_PONG:
+            if (supervisor->state != PROVIDER_HELPER_STATE_READY)
+            {
+                provider_helper_supervisor_fail_ipc(supervisor,
+                                                    PROVIDER_HELPER_STATE_FAILED);
+            }
+            else if (supervisor->heartbeat_pending_sequence
+                     && header.correlation_id
+                            == supervisor->heartbeat_pending_sequence)
+            {
+                supervisor->heartbeat_ack_sequence = header.correlation_id;
+                supervisor->heartbeat_pending_sequence = 0;
+                supervisor->heartbeat_deadline_ms = 0;
+            }
+            else if (supervisor->heartbeat_stale_acks < UINT64_MAX)
+            {
+                ++supervisor->heartbeat_stale_acks;
+            }
+            break;
+
+        case PROVIDER_HELPER_MSG_PING:
             break;
 
         default:

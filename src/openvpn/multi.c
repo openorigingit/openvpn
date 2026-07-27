@@ -44,8 +44,10 @@
 #include "route.h"
 #include "platform.h"
 #include "provider_policy.h"
+#include "provider_client_auth.h"
 #include "fdmisc.h"
 #include <inttypes.h>
+#include <ctype.h>
 #include <string.h>
 
 #include "memdbg.h"
@@ -56,22 +58,24 @@
 #ifdef ENABLE_CRYPTO_OPENSSL
 #include "openssl_compat.h"
 #include <openssl/evp.h>
+#include <openssl/pem.h>
 #include <openssl/rsa.h>
 #include <openssl/x509.h>
 #endif
 #include "dco.h"
 #include "reflect_filter.h"
 
-#define PROVIDER_HELPER_STATS_INTERVAL 5
-#define MULTI_IKEV2_HELPER_IKE_PORT 500
-#define MULTI_IKEV2_HELPER_NATT_PORT 4500
-#define MULTI_IKEV2_HELPER_IKE_LISTENER_ID 1
-#define MULTI_IKEV2_HELPER_NATT_LISTENER_ID 2
-#define MULTI_IKEV2_HELPER_PROVIDER_NAME "ikev2"
-#define MULTI_IKEV2_HELPER_XFRM_ID_BASE 0x0f000000u
-#define MULTI_IKEV2_HELPER_XFRM_ID_MAX  0x00ffffffu
-#define MULTI_IKEV2_HELPER_INITIAL_POLICY_REVISION 1
-#define MULTI_IKEV2_HELPER_SERVER_AUTH_CONFIG_REVISION 1u
+#define PROVIDER_HELPER_STATS_INTERVAL                 5
+#define MULTI_IKEV2_HELPER_IKE_PORT                    500
+#define MULTI_IKEV2_HELPER_NATT_PORT                   4500
+#define MULTI_IKEV2_HELPER_IKE_LISTENER_ID             1
+#define MULTI_IKEV2_HELPER_NATT_LISTENER_ID            2
+#define MULTI_IKEV2_HELPER_PROVIDER_NAME               "ikev2"
+#define MULTI_IKEV2_HELPER_XFRM_ID_BASE                0x0f000000u
+#define MULTI_IKEV2_HELPER_XFRM_ID_MAX                 0x00ffffffu
+#define MULTI_IKEV2_HELPER_INITIAL_POLICY_REVISION     1
+#define MULTI_IKEV2_HELPER_SERVER_AUTH_CONFIG_REVISION 2u
+#define MULTI_IKEV2_HELPER_CLIENT_CRL_PEM_MAX          (64u * 1024u)
 
 /*#define MULTI_DEBUG_EVENT_LOOP*/
 
@@ -566,8 +570,322 @@ multi_ikev2_helper_copy_server_certificate(
 }
 
 static bool
+multi_ikev2_helper_copy_client_ca(
+    const struct multi_context *m,
+    struct provider_helper_server_auth_config *config)
+{
+    if (!m || !config || !m->top.c1.ks.ssl_ctx
+        || !m->top.c1.ks.ssl_ctx->ctx)
+    {
+        return false;
+    }
+
+    X509_STORE *store =
+        SSL_CTX_get_cert_store(m->top.c1.ks.ssl_ctx->ctx);
+    STACK_OF(X509_OBJECT) *objects =
+        store ? X509_STORE_get0_objects(store) : NULL;
+    unsigned char *ca_pos = config->client_ca_bundle;
+    size_t ca_remaining = sizeof(config->client_ca_bundle);
+    size_t ca_count = 0;
+
+    for (int i = 0; objects && i < sk_X509_OBJECT_num(objects); ++i)
+    {
+        X509_OBJECT *object = sk_X509_OBJECT_value(objects, i);
+        X509 *cert = object ? X509_OBJECT_get0_X509(object) : NULL;
+        if (!cert)
+        {
+            continue;
+        }
+        const int der_len = i2d_X509(cert, NULL);
+        if (der_len <= 0 || (size_t)der_len > ca_remaining
+            || i2d_X509(cert, &ca_pos) != der_len)
+        {
+            msg(M_WARN, "IKEv2 helper client CA bundle is outside IPC bounds");
+            return false;
+        }
+        ca_remaining -= (size_t)der_len;
+        ++ca_count;
+    }
+    if (!ca_count)
+    {
+        msg(M_WARN, "IKEv2 helper client auth has no loaded CA certificates");
+        return false;
+    }
+    config->client_ca_bundle_len =
+        (uint32_t)(sizeof(config->client_ca_bundle) - ca_remaining);
+    return true;
+}
+
+static bool
+multi_ikev2_helper_copy_client_crls(
+    const struct multi_context *m,
+    STACK_OF(X509_CRL) *crls,
+    struct provider_helper_server_auth_config *config)
+{
+    if (!m || !config)
+    {
+        return false;
+    }
+
+    const bool crl_configured = m->top.options.crl_file != NULL;
+    if (crl_configured
+        && (m->top.options.ssl_flags & SSLF_CRL_VERIFY_DIR))
+    {
+        msg(M_WARN, "IKEv2 helper does not support directory-based CRLs");
+        return false;
+    }
+    if (crl_configured)
+    {
+        config->flags |= PROVIDER_HELPER_SERVER_AUTH_CLIENT_CRL_REQUIRED;
+    }
+
+    unsigned char *crl_pos = config->client_crl_bundle;
+    size_t crl_remaining = sizeof(config->client_crl_bundle);
+    for (int i = 0; crls && i < sk_X509_CRL_num(crls); ++i)
+    {
+        X509_CRL *crl = sk_X509_CRL_value(crls, i);
+        const int der_len = crl ? i2d_X509_CRL(crl, NULL) : -1;
+        if (der_len <= 0 || (size_t)der_len > crl_remaining
+            || i2d_X509_CRL(crl, &crl_pos) != der_len)
+        {
+            msg(M_WARN, "IKEv2 helper client CRL bundle is outside IPC bounds");
+            return false;
+        }
+        crl_remaining -= (size_t)der_len;
+    }
+    config->client_crl_bundle_len =
+        (uint32_t)(sizeof(config->client_crl_bundle) - crl_remaining);
+    if (crl_configured && !config->client_crl_bundle_len)
+    {
+        msg(M_WARN, "IKEv2 helper configured CRL did not load");
+        return false;
+    }
+    return true;
+}
+
+static bool
+multi_ikev2_helper_copy_client_trust(
+    const struct multi_context *m,
+    struct provider_helper_server_auth_config *config)
+{
+    return m && m->top.c1.ks.ssl_ctx
+           && multi_ikev2_helper_copy_client_ca(m, config)
+           && multi_ikev2_helper_copy_client_crls(
+               m, m->top.c1.ks.ssl_ctx->crls, config);
+}
+
+static bool
+multi_ikev2_helper_read_crl_file(const char *path,
+                                 STACK_OF(X509_CRL) **crls_out,
+                                 char *reason,
+                                 size_t reason_size)
+{
+    static const char begin_marker[] = "-----BEGIN X509 CRL-----";
+    static const char end_marker[] = "-----END X509 CRL-----";
+    if (crls_out)
+    {
+        *crls_out = NULL;
+    }
+    if (!path || !crls_out)
+    {
+        snprintf(reason, reason_size, "missing client CRL path");
+        return false;
+    }
+
+    platform_stat_t st;
+    if (platform_stat(path, &st) < 0 || st.st_size <= 0
+        || (uint64_t)st.st_size > MULTI_IKEV2_HELPER_CLIENT_CRL_PEM_MAX)
+    {
+        snprintf(reason, reason_size,
+                 "client CRL file is missing, empty, or outside bounds");
+        return false;
+    }
+
+    char *pem = calloc(1, (size_t)st.st_size + 1);
+    BIO *file = BIO_new_file(path, "r");
+    STACK_OF(X509_CRL) *crls = sk_X509_CRL_new_null();
+    bool ret = false;
+    if (!pem || !file || !crls)
+    {
+        snprintf(reason, reason_size, "cannot allocate client CRL input");
+        goto done;
+    }
+
+    size_t received = 0;
+    while (received < (size_t)st.st_size)
+    {
+        const int n = BIO_read(file, pem + received,
+                               (int)((size_t)st.st_size - received));
+        if (n <= 0)
+        {
+            snprintf(reason, reason_size, "cannot read client CRL file");
+            goto done;
+        }
+        received += (size_t)n;
+    }
+    if (memchr(pem, '\0', received))
+    {
+        snprintf(reason, reason_size, "client CRL file contains binary data");
+        goto done;
+    }
+
+    char *pos = pem;
+    char *end = pem + received;
+    while (pos < end)
+    {
+        while (pos < end && isspace((unsigned char)*pos))
+        {
+            ++pos;
+        }
+        if (pos == end)
+        {
+            break;
+        }
+        if ((size_t)(end - pos) < sizeof(begin_marker) - 1
+            || memcmp(pos, begin_marker, sizeof(begin_marker) - 1) != 0)
+        {
+            snprintf(reason, reason_size,
+                     "client CRL file contains unexpected data");
+            goto done;
+        }
+
+        char *footer = strstr(pos + sizeof(begin_marker) - 1, end_marker);
+        if (!footer)
+        {
+            snprintf(reason, reason_size,
+                     "client CRL PEM block is incomplete");
+            goto done;
+        }
+        char *block_end = footer + sizeof(end_marker) - 1;
+        const size_t block_len = (size_t)(block_end - pos);
+        if (block_len > INT_MAX)
+        {
+            snprintf(reason, reason_size, "client CRL PEM block is too large");
+            goto done;
+        }
+        BIO *block = BIO_new_mem_buf(pos, (int)block_len);
+        X509_CRL *crl =
+            block ? PEM_read_bio_X509_CRL(block, NULL, NULL, NULL) : NULL;
+        BIO_free(block);
+        if (!crl || !sk_X509_CRL_push(crls, crl))
+        {
+            X509_CRL_free(crl);
+            snprintf(reason, reason_size, "client CRL PEM is malformed");
+            goto done;
+        }
+        pos = block_end;
+    }
+    if (sk_X509_CRL_num(crls) == 0)
+    {
+        snprintf(reason, reason_size, "client CRL file contains no CRLs");
+        goto done;
+    }
+
+    *crls_out = crls;
+    crls = NULL;
+    ret = true;
+
+done:
+    sk_X509_CRL_pop_free(crls, X509_CRL_free);
+    BIO_free(file);
+    if (pem)
+    {
+        secure_memzero(pem, (size_t)st.st_size + 1);
+        free(pem);
+    }
+    ERR_clear_error();
+    return ret;
+}
+
+static bool
+multi_ikev2_helper_validate_client_trust(
+    const struct provider_helper_server_auth_config *config,
+    char *reason,
+    size_t reason_size)
+{
+    return config
+           && provider_client_auth_trust_bundle_valid(
+               config->client_ca_bundle, config->client_ca_bundle_len,
+               config->client_crl_bundle, config->client_crl_bundle_len,
+               (config->flags
+                & PROVIDER_HELPER_SERVER_AUTH_CLIENT_CRL_REQUIRED)
+                   != 0,
+               time(NULL), reason, reason_size);
+}
+
+static bool
+multi_ikev2_helper_refresh_client_trust(struct multi_context *m,
+                                        char *reason,
+                                        size_t reason_size)
+{
+    if (!m || !m->top.c1.ks.ssl_ctx)
+    {
+        snprintf(reason, reason_size, "client trust context is unavailable");
+        return false;
+    }
+    if (m->top.options.ssl_flags & SSLF_CRL_VERIFY_DIR)
+    {
+        snprintf(reason, reason_size,
+                 "directory-based client CRLs are unsupported");
+        return false;
+    }
+
+    struct tls_root_ctx *root = m->top.c1.ks.ssl_ctx;
+    const char *crl_file = m->top.options.crl_file;
+    STACK_OF(X509_CRL) *candidate = NULL;
+    platform_stat_t st;
+    CLEAR(st);
+    bool changed = false;
+    if (crl_file && !m->top.options.crl_file_inline)
+    {
+        if (platform_stat(crl_file, &st) < 0)
+        {
+            snprintf(reason, reason_size, "client CRL file is unavailable");
+            return false;
+        }
+        changed = root->crl_last_mtime != st.st_mtime
+                  || root->crl_last_size != st.st_size;
+        if (!multi_ikev2_helper_read_crl_file(
+                crl_file, &candidate, reason, reason_size))
+        {
+            return false;
+        }
+    }
+
+    struct provider_helper_server_auth_config trust;
+    CLEAR(trust);
+    STACK_OF(X509_CRL) *selected = candidate ? candidate : root->crls;
+    const bool copied = multi_ikev2_helper_copy_client_ca(m, &trust)
+                        && multi_ikev2_helper_copy_client_crls(
+                            m, selected, &trust);
+    const bool valid = copied
+                       && multi_ikev2_helper_validate_client_trust(
+                           &trust, reason, reason_size);
+    secure_memzero(&trust, sizeof(trust));
+    if (!valid)
+    {
+        sk_X509_CRL_pop_free(candidate, X509_CRL_free);
+        return false;
+    }
+
+    if (candidate)
+    {
+        STACK_OF(X509_CRL) *old = root->crls;
+        root->crls = candidate;
+        root->crl_last_mtime = st.st_mtime;
+        root->crl_last_size = st.st_size;
+        sk_X509_CRL_pop_free(old, X509_CRL_free);
+        msg(changed ? M_INFO : D_MULTI_LOW,
+            "IKEv2 helper reloaded validated client CRL material");
+    }
+    snprintf(reason, reason_size, changed ? "client trust refreshed" : "client trust current");
+    return true;
+}
+
+static bool
 multi_ikev2_helper_build_server_auth_config(
     const struct multi_context *m,
+    uint64_t config_revision,
     struct provider_helper_server_auth_config *config)
 {
     if (!m || !config)
@@ -592,7 +910,7 @@ multi_ikev2_helper_build_server_auth_config(
         return false;
     }
 
-    config->config_revision = MULTI_IKEV2_HELPER_SERVER_AUTH_CONFIG_REVISION;
+    config->config_revision = config_revision;
     config->ikev2_id_type = PROVIDER_HELPER_IKEV2_ID_FQDN;
     config->server_id_len = (uint32_t)server_id_len;
     memcpy(config->server_id, server_id, server_id_len);
@@ -604,6 +922,18 @@ multi_ikev2_helper_build_server_auth_config(
     }
     if (!multi_ikev2_helper_copy_server_certificate(ssl_ctx, config))
     {
+        return false;
+    }
+    if (!multi_ikev2_helper_copy_client_trust(m, config))
+    {
+        return false;
+    }
+
+    char trust_reason[128];
+    if (!multi_ikev2_helper_validate_client_trust(
+            config, trust_reason, sizeof(trust_reason)))
+    {
+        msg(M_WARN, "IKEv2 helper client trust invalid: %s", trust_reason);
         return false;
     }
 
@@ -709,8 +1039,10 @@ multi_ikev2_helper_server_sign_request(
     }
 
     if (!provider_helper_server_sign_request_valid(request, NULL, 0)
-        || request->config_revision
-               != MULTI_IKEV2_HELPER_SERVER_AUTH_CONFIG_REVISION)
+        || (request->config_revision
+                != m->provider_helper.server_auth_config_ack_revision
+            && request->config_revision
+                   != m->provider_helper.server_auth_config_pending_revision))
     {
         return multi_ikev2_helper_server_sign_failure(request, response);
     }
@@ -736,6 +1068,67 @@ multi_ikev2_helper_server_sign_request(
 }
 
 static bool
+multi_ikev2_helper_next_server_auth_revision(struct multi_context *m,
+                                             uint64_t *revision)
+{
+    if (!m || !revision)
+    {
+        return false;
+    }
+    if (m->provider_helper_server_auth_next_revision
+        < MULTI_IKEV2_HELPER_SERVER_AUTH_CONFIG_REVISION)
+    {
+        m->provider_helper_server_auth_next_revision =
+            MULTI_IKEV2_HELPER_SERVER_AUTH_CONFIG_REVISION;
+    }
+    if (!m->provider_helper_server_auth_next_revision
+        || m->provider_helper_server_auth_next_revision == UINT64_MAX)
+    {
+        msg(M_WARN, "IKEv2 helper server auth config revision exhausted");
+        return false;
+    }
+    *revision = m->provider_helper_server_auth_next_revision;
+    return true;
+}
+
+static bool
+multi_send_ikev2_helper_server_auth_config_revision(
+    struct multi_context *m,
+    uint64_t revision)
+{
+    uint64_t next_revision = 0;
+    if (!m || !provider_helper_revision_next(revision, &next_revision)
+        || m->provider_helper.state != PROVIDER_HELPER_STATE_READY)
+    {
+        return false;
+    }
+
+#ifndef ENABLE_CRYPTO_OPENSSL
+    msg(M_WARN, "IKEv2 helper server auth requires the OpenSSL TLS backend");
+    return false;
+#else
+    struct provider_helper_server_auth_config config;
+    if (!multi_ikev2_helper_build_server_auth_config(m, revision, &config))
+    {
+        secure_memzero(&config, sizeof(config));
+        return false;
+    }
+
+    const bool sent = provider_helper_supervisor_send_server_auth_config(
+        &m->provider_helper, &config, revision);
+    secure_memzero(&config, sizeof(config));
+    if (!sent)
+    {
+        msg(M_WARN, "IKEv2 helper server auth config handoff failed");
+        return false;
+    }
+
+    m->provider_helper_server_auth_next_revision = next_revision;
+    return true;
+#endif
+}
+
+static bool
 multi_send_ikev2_helper_server_auth_config(struct multi_context *m)
 {
     if (!m || m->provider_helper_server_auth_config_sent
@@ -744,29 +1137,100 @@ multi_send_ikev2_helper_server_auth_config(struct multi_context *m)
         return true;
     }
 
-#ifndef ENABLE_CRYPTO_OPENSSL
-    msg(M_WARN, "IKEv2 helper server auth requires the OpenSSL TLS backend");
-    return false;
-#else
-    struct provider_helper_server_auth_config config;
-    if (!multi_ikev2_helper_build_server_auth_config(m, &config))
+    uint64_t revision = 0;
+    if (!multi_ikev2_helper_next_server_auth_revision(m, &revision)
+        || !multi_send_ikev2_helper_server_auth_config_revision(m,
+                                                                revision))
     {
-        secure_memzero(&config, sizeof(config));
-        return false;
-    }
-
-    const bool sent = provider_helper_supervisor_send_server_auth_config(
-        &m->provider_helper, &config, config.config_revision);
-    secure_memzero(&config, sizeof(config));
-    if (!sent)
-    {
-        msg(M_WARN, "IKEv2 helper server auth config handoff failed");
         return false;
     }
 
     m->provider_helper_server_auth_config_sent = true;
     msg(M_INFO, "IKEv2 helper server auth config handed off");
     return true;
+}
+
+static bool
+multi_ikev2_helper_client_trust_refresh_failure(
+    const struct provider_helper_client_trust_refresh_request *request,
+    const char *reason,
+    struct provider_helper_client_trust_refresh_response *response)
+{
+    if (!request || !reason || !response)
+    {
+        return false;
+    }
+    CLEAR(*response);
+    response->request_id = request->request_id;
+    response->config_revision = request->config_revision;
+    response->status = PROVIDER_HELPER_CLIENT_TRUST_REFRESH_FAILED;
+    const size_t reason_len = strlen(reason);
+    if (!reason_len || reason_len >= sizeof(response->reason))
+    {
+        return false;
+    }
+    memcpy(response->reason, reason, reason_len);
+    response->reason_len = (uint32_t)reason_len;
+    return provider_helper_client_trust_refresh_response_valid(response, NULL,
+                                                               0);
+}
+
+static bool
+multi_ikev2_helper_client_trust_refresh_request(
+    void *arg,
+    const struct provider_helper_client_trust_refresh_request *request,
+    struct provider_helper_client_trust_refresh_response *response)
+{
+    struct multi_context *m = arg;
+    if (!m || !request || !response
+        || !provider_helper_client_trust_refresh_request_valid(request, NULL,
+                                                               0))
+    {
+        return false;
+    }
+
+    const uint64_t acknowledged =
+        m->provider_helper.server_auth_config_ack_revision;
+    const uint64_t pending =
+        m->provider_helper.server_auth_config_pending_revision;
+    if (request->config_revision != acknowledged
+        && request->config_revision != pending)
+    {
+        return multi_ikev2_helper_client_trust_refresh_failure(
+            request, "client trust refresh requested from a stale revision",
+            response);
+    }
+
+#ifndef ENABLE_CRYPTO_OPENSSL
+    return multi_ikev2_helper_client_trust_refresh_failure(
+        request, "client trust refresh requires OpenSSL", response);
+#else
+    char reason[PROVIDER_HELPER_CLIENT_TRUST_REFRESH_REASON_SIZE];
+    CLEAR(reason);
+    if (!multi_ikev2_helper_refresh_client_trust(m, reason, sizeof(reason)))
+    {
+        msg(M_WARN, "IKEv2 helper client trust refresh failed: %s", reason);
+        return multi_ikev2_helper_client_trust_refresh_failure(
+            request, reason[0] ? reason : "client trust refresh failed",
+            response);
+    }
+
+    uint64_t revision = 0;
+    if (!multi_ikev2_helper_next_server_auth_revision(m, &revision)
+        || revision <= request->config_revision
+        || !multi_send_ikev2_helper_server_auth_config_revision(m,
+                                                                revision))
+    {
+        return multi_ikev2_helper_client_trust_refresh_failure(
+            request, "client trust config handoff failed", response);
+    }
+
+    CLEAR(*response);
+    response->request_id = request->request_id;
+    response->config_revision = revision;
+    response->status = PROVIDER_HELPER_CLIENT_TRUST_REFRESH_OK;
+    return provider_helper_client_trust_refresh_response_valid(response, NULL,
+                                                               0);
 #endif
 }
 
@@ -905,6 +1369,12 @@ multi_ikev2_helper_release_session_address(struct multi_context *m,
                                            struct provider_session *session,
                                            bool hard)
 {
+    if (m && provider_session_table_gateway_must_terminate(&m->provider_sessions))
+    {
+        msg(M_WARN,
+            "IKEv2 helper: refused native VIP release during terminal XFRM reconciliation failure");
+        return;
+    }
     if (m && m->ifconfig_pool && session && session->has_address_pool_handle)
     {
         ifconfig_pool_release(m->ifconfig_pool, session->address_pool_handle,
@@ -924,31 +1394,105 @@ multi_ikev2_helper_state_closes_sessions(enum provider_helper_state state)
            || state == PROVIDER_HELPER_STATE_FAILED;
 }
 
-static size_t
+static void
+multi_ikev2_helper_terminal_failure(struct multi_context *m,
+                                    const char *reason)
+{
+    const size_t quarantined =
+        provider_session_table_quarantine_for_terminal_shutdown(
+            &m->provider_sessions, reason);
+    msg(M_FATAL,
+        "IKEv2 helper: terminal XFRM reconciliation failure: %s; retained %zu native session VIP lease%s and terminating the gateway so its network namespace destroys all unconfirmed kernel XFRM state before any VIP can be reused",
+        reason ? reason : "helper unavailable", quarantined,
+        quarantined == 1 ? "" : "s");
+}
+
+static bool
+multi_ikev2_helper_reconcile_session_xfrm(
+    struct multi_context *m,
+    struct provider_session *session,
+    const char *operation)
+{
+    struct provider_session_xfrm_lease session_lease;
+    char reconciliation_reason[PROVIDER_POLICY_REASON_SIZE];
+    CLEAR(reconciliation_reason);
+
+    if (!m || !session
+        || !provider_session_get_xfrm_lease(session, &session_lease))
+    {
+        snprintf(reconciliation_reason, sizeof(reconciliation_reason),
+                 "native session missing XFRM teardown lease");
+        goto failed;
+    }
+
+    struct provider_helper_xfrm_lease helper_lease;
+    multi_ikev2_helper_copy_xfrm_lease(&helper_lease, &session_lease);
+    uint64_t request_sequence = 0;
+    session->xfrm_delete_pending = true;
+    if (!provider_helper_supervisor_send_xfrm_lease_delete_tracked(
+            &m->provider_helper, &helper_lease, session_lease.lease_id,
+            &request_sequence)
+        || !provider_helper_supervisor_wait_xfrm_lease_delete_ack(
+            &m->provider_helper, request_sequence,
+            PROVIDER_HELPER_XFRM_DELETE_ACK_TIMEOUT_MS,
+            reconciliation_reason, sizeof(reconciliation_reason)))
+    {
+        session->xfrm_delete_pending = false;
+        goto failed;
+    }
+    session->xfrm_delete_pending = false;
+    return true;
+
+failed:
+    msg(D_MULTI_ERRORS,
+        "IKEv2 helper: session %" PRIu64 " XFRM reconciliation failed during %s: %s",
+        session ? session->id : 0, operation ? operation : "teardown",
+        reconciliation_reason[0] ? reconciliation_reason
+                                 : "XFRM delete request failed");
+    multi_ikev2_helper_terminal_failure(
+        m, reconciliation_reason[0] ? reconciliation_reason
+                                    : "XFRM delete request failed");
+    return false;
+}
+
+static bool
+multi_ikev2_helper_reconcile_session_xfrm_cb(
+    void *arg,
+    struct provider_session *session,
+    const char *operation)
+{
+    return multi_ikev2_helper_reconcile_session_xfrm(arg, session, operation);
+}
+
+static void
+multi_ikev2_helper_release_session_address_cb(
+    void *arg,
+    struct provider_session *session)
+{
+    multi_ikev2_helper_release_session_address(arg, session, true);
+}
+
+static bool
 multi_ikev2_helper_close_provider_sessions(struct multi_context *m,
                                            const char *reason)
 {
-    if (!m || !provider_session_table_count(&m->provider_sessions))
+    if (!m)
     {
-        return 0;
+        return false;
     }
-
     size_t closed = 0;
-    for (struct provider_session *session = m->provider_sessions.head;
-         session;
-         )
+    if (!provider_session_table_drain_reconciled(
+            &m->provider_sessions, reason ? reason : "server shutdown",
+            multi_ikev2_helper_reconcile_session_xfrm_cb,
+            multi_ikev2_helper_release_session_address_cb, m, &closed))
     {
-        struct provider_session *next = session->next;
-        if (!session->halt)
+        if (!provider_session_table_gateway_must_terminate(
+                &m->provider_sessions))
         {
-            multi_ikev2_helper_release_session_address(m, session, true);
-            if (provider_session_kill_by_cid(&m->provider_sessions,
-                                             session->management_cid, reason))
-            {
-                ++closed;
-            }
+            multi_ikev2_helper_terminal_failure(
+                m, "native session teardown ordering failed");
         }
-        session = next;
+        return false;
     }
 
     if (closed)
@@ -957,7 +1501,7 @@ multi_ikev2_helper_close_provider_sessions(struct multi_context *m,
             closed, closed == 1 ? "" : "s",
             reason ? reason : "session closed");
     }
-    return closed;
+    return true;
 }
 
 static bool
@@ -992,7 +1536,28 @@ multi_ikev2_helper_session_close(
     CLEAR(reason);
     memcpy(reason, session_close->reason, session_close->reason_len);
 
+    if (session->xfrm_delete_pending)
+    {
+        msg(M_INFO,
+            "IKEv2 helper: deferred provider session close for session %" PRIu64 " until correlated XFRM delete ACK",
+            session_close->provider_session_id);
+        return true;
+    }
+    if (session->xfrm_delete_reconciliation_failed)
+    {
+        msg(M_WARN,
+            "IKEv2 helper: ignored provider session close for quarantined session %" PRIu64,
+            session_close->provider_session_id);
+        return true;
+    }
+
     multi_ikev2_helper_release_session_address(m, session, true);
+    if (session->has_address_pool_handle)
+    {
+        multi_ikev2_helper_terminal_failure(
+            m, "provider session close could not release its VIP after XFRM teardown");
+        return false;
+    }
     if (!provider_session_kill_by_cid(&m->provider_sessions,
                                       session->management_cid, reason))
     {
@@ -1141,8 +1706,8 @@ multi_ikev2_helper_build_xfrm_lease(
     {
         const size_t dns_count =
             artifacts->dns_server_count < PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX
-            ? artifacts->dns_server_count
-            : PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX;
+                ? artifacts->dns_server_count
+                : PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX;
         for (size_t i = 0; i < dns_count; ++i)
         {
             struct in_addr addr;
@@ -1186,6 +1751,14 @@ multi_ikev2_helper_authorize_session(
         || !cert_serial || !cert_issuer || !policy_revision || !response)
     {
         return false;
+    }
+
+    if (provider_session_table_is_draining(&m->provider_sessions))
+    {
+        multi_ikev2_helper_auth_deny(
+            response, request->request_id,
+            "provider session admission is draining");
+        return true;
     }
 
     if (!multi_ikev2_helper_max_clients_available(m))
@@ -1309,12 +1882,9 @@ multi_ikev2_helper_authorize_session(
     if (!provider_helper_supervisor_send_xfrm_lease(
             &m->provider_helper, &helper_lease, session_lease.lease_id))
     {
-        multi_ikev2_helper_release_session_address(m, session, true);
-        provider_session_delete(&m->provider_sessions, session);
-        multi_ikev2_helper_auth_deny(
-            response, request->request_id,
-            "provider session XFRM lease handoff failed");
-        return true;
+        multi_ikev2_helper_terminal_failure(
+            m, "provider session XFRM install handoff failed before proof");
+        return false;
     }
 
     const struct provider_session_update update = {
@@ -1365,6 +1935,14 @@ multi_ikev2_helper_auth_request(void *arg,
         multi_ikev2_helper_auth_deny(
             response, request->request_id,
             "provider auth credential metadata is invalid");
+        return true;
+    }
+    if (!provider_policy_principal_canonicalize(
+            principal, principal, sizeof(principal)))
+    {
+        multi_ikev2_helper_auth_deny(
+            response, request->request_id,
+            "provider auth principal is invalid");
         return true;
     }
 
@@ -1434,6 +2012,9 @@ multi_spawn_ikev2_helper(struct context *t, bool fatal)
         &m->provider_helper, multi_ikev2_helper_session_update, m);
     provider_helper_supervisor_set_server_sign_callback(
         &m->provider_helper, multi_ikev2_helper_server_sign_request, m);
+    provider_helper_supervisor_set_client_trust_refresh_callback(
+        &m->provider_helper,
+        multi_ikev2_helper_client_trust_refresh_request, m);
     if (t->options.ikev2_helper_apply_xfrm)
     {
         m->provider_helper.runtime_config.flags |= PROVIDER_HELPER_CONFIG_APPLY_XFRM;
@@ -1476,7 +2057,9 @@ multi_start_ikev2_helper(struct context *t)
 static bool
 multi_restart_ikev2_helper_ready(struct multi_context *m)
 {
-    if (!m->top.options.ikev2_helper_path)
+    if (!m->top.options.ikev2_helper_path
+        || provider_session_table_gateway_must_terminate(
+            &m->provider_sessions))
     {
         return false;
     }
@@ -1509,27 +2092,67 @@ multi_init(struct context *t)
     CLEAR(*m);
     multi_ikev2_helper_listener_fds_init(m);
     provider_helper_supervisor_init(&m->provider_helper);
+    m->provider_helper_server_auth_next_revision =
+        MULTI_IKEV2_HELPER_SERVER_AUTH_CONFIG_REVISION;
     provider_session_table_init(&m->provider_sessions);
     m->provider_policy_revision =
         MULTI_IKEV2_HELPER_INITIAL_POLICY_REVISION;
+    if (t->options.provider_effective_policy_state_file)
+    {
+        char reason[256];
+        enum provider_effective_policy_result result =
+            provider_effective_policy_init(
+                &m->provider_effective_policy,
+                t->options.provider_effective_policy_state_file,
+                reason, sizeof(reason));
+        if (result != PROVIDER_EFFECTIVE_POLICY_OK)
+        {
+            msg(M_FATAL,
+                "Effective provider policy state initialization failed: %s",
+                reason);
+        }
+        m->provider_effective_policy_initialized = true;
+        result = provider_effective_policy_load(
+            &m->provider_effective_policy, reason, sizeof(reason));
+        if (result != PROVIDER_EFFECTIVE_POLICY_OK)
+        {
+            provider_effective_policy_free(&m->provider_effective_policy);
+            m->provider_effective_policy_initialized = false;
+            msg(M_FATAL,
+                "Effective provider policy state load failed: %s", reason);
+        }
+        msg(M_INFO,
+            "Effective provider policy loaded %zu user snapshot%s and %zu child binding%s",
+            m->provider_effective_policy.snapshot_count,
+            m->provider_effective_policy.snapshot_count == 1 ? "" : "s",
+            m->provider_effective_policy.binding_count,
+            m->provider_effective_policy.binding_count == 1 ? "" : "s");
+    }
     if (!provider_policy_fingerprint_list_copy_runtime(
             &m->provider_allowed_fingerprints,
             &t->options.ikev2_helper_allowed_fingerprints))
     {
-        msg(M_FATAL, "IKEv2 helper allowlist initialization failed");
+        msg(M_FATAL, "Provider policy allowlist initialization failed");
     }
     if (t->options.ikev2_helper_allow_file)
     {
         char reason[PROVIDER_POLICY_REASON_SIZE];
         size_t loaded_count = 0;
-        if (!provider_policy_fingerprint_list_load_named_runtime(
-                &m->provider_allowed_fingerprints,
-                t->options.ikev2_helper_allow_file,
-                "allow fingerprint file", reason, sizeof(reason),
-                &loaded_count))
+        const bool loaded = t->options.provider_policy_openvpn
+                                ? provider_policy_fingerprint_list_load_named_runtime_required(
+                                      &m->provider_allowed_fingerprints,
+                                      t->options.ikev2_helper_allow_file,
+                                      "allow fingerprint file", reason,
+                                      sizeof(reason), &loaded_count)
+                                : provider_policy_fingerprint_list_load_named_runtime(
+                                      &m->provider_allowed_fingerprints,
+                                      t->options.ikev2_helper_allow_file,
+                                      "allow fingerprint file", reason,
+                                      sizeof(reason), &loaded_count);
+        if (!loaded)
         {
             msg(M_FATAL,
-                "IKEv2 helper allow fingerprint file load failed: %s",
+                "Provider policy allow fingerprint file load failed: %s",
                 reason);
         }
         if (UINT64_MAX - m->provider_policy_revision < loaded_count)
@@ -1541,7 +2164,7 @@ multi_init(struct context *t)
             m->provider_policy_revision += loaded_count;
         }
         msg(M_INFO,
-            "IKEv2 helper loaded %zu allowed credential fingerprint%s from %s, policy revision %" PRIu64,
+            "Provider policy loaded %zu allowed credential fingerprint%s from %s, policy revision %" PRIu64,
             loaded_count, loaded_count == 1 ? "" : "s",
             t->options.ikev2_helper_allow_file,
             m->provider_policy_revision);
@@ -1550,13 +2173,20 @@ multi_init(struct context *t)
     {
         char reason[PROVIDER_POLICY_REASON_SIZE];
         size_t loaded_count = 0;
-        if (!provider_policy_fingerprint_list_load_runtime(
-                &m->provider_revoked_fingerprints,
-                t->options.ikev2_helper_revocation_file,
-                reason, sizeof(reason), &loaded_count))
+        const bool loaded = t->options.provider_policy_openvpn
+                                ? provider_policy_fingerprint_list_load_named_runtime_required(
+                                      &m->provider_revoked_fingerprints,
+                                      t->options.ikev2_helper_revocation_file,
+                                      "revocation file", reason,
+                                      sizeof(reason), &loaded_count)
+                                : provider_policy_fingerprint_list_load_runtime(
+                                      &m->provider_revoked_fingerprints,
+                                      t->options.ikev2_helper_revocation_file,
+                                      reason, sizeof(reason), &loaded_count);
+        if (!loaded)
         {
             msg(M_FATAL,
-                "IKEv2 helper revocation file load failed: %s", reason);
+                "Provider policy revocation file load failed: %s", reason);
         }
         if (UINT64_MAX - m->provider_policy_revision < loaded_count)
         {
@@ -1567,7 +2197,7 @@ multi_init(struct context *t)
             m->provider_policy_revision += loaded_count;
         }
         msg(M_INFO,
-            "IKEv2 helper loaded %zu revoked credential fingerprint%s from %s, policy revision %" PRIu64,
+            "Provider policy loaded %zu revoked credential fingerprint%s from %s, policy revision %" PRIu64,
             loaded_count, loaded_count == 1 ? "" : "s",
             t->options.ikev2_helper_revocation_file,
             m->provider_policy_revision);
@@ -1576,13 +2206,19 @@ multi_init(struct context *t)
     {
         char reason[PROVIDER_POLICY_REASON_SIZE];
         size_t loaded_count = 0;
-        if (!provider_policy_principal_list_load_runtime(
-                &m->provider_revoked_principals,
-                t->options.ikev2_helper_principal_revocation_file,
-                reason, sizeof(reason), &loaded_count))
+        const bool loaded = t->options.provider_policy_openvpn
+                                ? provider_policy_principal_list_load_runtime_required(
+                                      &m->provider_revoked_principals,
+                                      t->options.ikev2_helper_principal_revocation_file,
+                                      reason, sizeof(reason), &loaded_count)
+                                : provider_policy_principal_list_load_runtime(
+                                      &m->provider_revoked_principals,
+                                      t->options.ikev2_helper_principal_revocation_file,
+                                      reason, sizeof(reason), &loaded_count);
+        if (!loaded)
         {
             msg(M_FATAL,
-                "IKEv2 helper principal revocation file load failed: %s",
+                "Provider policy principal revocation file load failed: %s",
                 reason);
         }
         if (UINT64_MAX - m->provider_policy_revision < loaded_count)
@@ -1594,7 +2230,7 @@ multi_init(struct context *t)
             m->provider_policy_revision += loaded_count;
         }
         msg(M_INFO,
-            "IKEv2 helper loaded %zu revoked principal%s from %s, policy revision %" PRIu64,
+            "Provider policy loaded %zu revoked principal%s from %s, policy revision %" PRIu64,
             loaded_count, loaded_count == 1 ? "" : "s",
             t->options.ikev2_helper_principal_revocation_file,
             m->provider_policy_revision);
@@ -1603,13 +2239,19 @@ multi_init(struct context *t)
     {
         char reason[PROVIDER_POLICY_REASON_SIZE];
         size_t loaded_count = 0;
-        if (!provider_policy_cert_list_load_runtime(
-                &m->provider_revoked_certs,
-                t->options.ikev2_helper_cert_revocation_file,
-                reason, sizeof(reason), &loaded_count))
+        const bool loaded = t->options.provider_policy_openvpn
+                                ? provider_policy_cert_list_load_runtime_required(
+                                      &m->provider_revoked_certs,
+                                      t->options.ikev2_helper_cert_revocation_file,
+                                      reason, sizeof(reason), &loaded_count)
+                                : provider_policy_cert_list_load_runtime(
+                                      &m->provider_revoked_certs,
+                                      t->options.ikev2_helper_cert_revocation_file,
+                                      reason, sizeof(reason), &loaded_count);
+        if (!loaded)
         {
             msg(M_FATAL,
-                "IKEv2 helper certificate revocation file load failed: %s",
+                "Provider policy certificate revocation file load failed: %s",
                 reason);
         }
         if (UINT64_MAX - m->provider_policy_revision < loaded_count)
@@ -1621,7 +2263,7 @@ multi_init(struct context *t)
             m->provider_policy_revision += loaded_count;
         }
         msg(M_INFO,
-            "IKEv2 helper loaded %zu revoked certificate identit%s from %s, policy revision %" PRIu64,
+            "Provider policy loaded %zu revoked certificate identit%s from %s, policy revision %" PRIu64,
             loaded_count, loaded_count == 1 ? "y" : "ies",
             t->options.ikev2_helper_cert_revocation_file,
             m->provider_policy_revision);
@@ -2018,7 +2660,17 @@ multi_uninit(struct multi_context *m)
 
         multi_reap_all(m);
 
-        multi_ikev2_helper_close_provider_sessions(m, "server shutdown");
+        /*
+         * SIGINT/SIGTERM exits and SIGUSR1/SIGHUP in-process restarts all
+         * converge here.  Do not stop the helper, release the session table,
+         * or permit restart until every native XFRM delete has a correlated
+         * ACK.  The failure path retains all unproved VIP leases and M_FATAL
+         * terminates the gateway/netns.
+         */
+        if (!multi_ikev2_helper_close_provider_sessions(m, "server shutdown"))
+        {
+            return;
+        }
         provider_helper_supervisor_free(&m->provider_helper);
         multi_ikev2_helper_listener_fds_close(m);
         provider_policy_fingerprint_list_free_runtime(
@@ -2028,6 +2680,11 @@ multi_uninit(struct multi_context *m)
         provider_policy_principal_list_free_runtime(
             &m->provider_revoked_principals);
         provider_policy_cert_list_free_runtime(&m->provider_revoked_certs);
+        if (m->provider_effective_policy_initialized)
+        {
+            provider_effective_policy_free(&m->provider_effective_policy);
+            m->provider_effective_policy_initialized = false;
+        }
         provider_session_table_free(&m->provider_sessions);
 
         hash_free(m->hash);
@@ -3926,6 +4583,105 @@ static const multi_client_connect_handler client_connect_handlers[] = {
     NULL,
 };
 
+static bool
+multi_provider_policy_authorize_openvpn(struct multi_context *m,
+                                        struct multi_instance *mi)
+{
+    if (!m->top.options.provider_policy_openvpn)
+    {
+        return true;
+    }
+
+    CLEAR(mi->provider_policy_identity);
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    struct tls_multi *tls_multi = mi->context.c2.tls_multi;
+    SSL *ssl = tls_multi
+                   ? tls_multi->session[TM_ACTIVE].key[KS_PRIMARY].ks_ssl.ssl
+                   : NULL;
+    X509 *cert = ssl ? SSL_get_peer_certificate(ssl) : NULL;
+    struct provider_client_auth_metadata metadata;
+    char principal[PROVIDER_POLICY_PRINCIPAL_SIZE];
+    char metadata_reason[PROVIDER_POLICY_REASON_SIZE];
+    CLEAR(principal);
+    CLEAR(metadata_reason);
+    if (!cert || !provider_client_auth_metadata_from_x509(cert, &metadata, metadata_reason, sizeof(metadata_reason)))
+    {
+        msg(D_MULTI_ERRORS,
+            "MULTI: ordinary OpenVPN provider policy denied client: %s",
+            cert ? metadata_reason : "verified peer certificate is unavailable");
+        X509_free(cert);
+        return false;
+    }
+    if (!provider_client_auth_leaf_principal(
+            cert, principal, sizeof(principal), NULL, metadata_reason,
+            sizeof(metadata_reason)))
+    {
+        msg(D_MULTI_ERRORS,
+            "MULTI: ordinary OpenVPN provider policy denied client: %s",
+            metadata_reason);
+        X509_free(cert);
+        return false;
+    }
+    char canonical_principal[PROVIDER_POLICY_PRINCIPAL_SIZE];
+    CLEAR(canonical_principal);
+    if (!provider_policy_principal_canonicalize(
+            principal, canonical_principal, sizeof(canonical_principal)))
+    {
+        msg(D_MULTI_ERRORS,
+            "MULTI: ordinary OpenVPN provider policy denied client: verified leaf certificate principal is invalid");
+        X509_free(cert);
+        return false;
+    }
+
+    const char *digest_env =
+        env_set_get(mi->context.c2.es, "tls_digest_sha256_0");
+    digest_env = digest_env ? strchr(digest_env, '=') : NULL;
+    char normalized_digest[PROVIDER_POLICY_FINGERPRINT_SIZE];
+    if (!digest_env
+        || !provider_client_auth_normalize_sha256_fingerprint(
+            digest_env + 1, normalized_digest, sizeof(normalized_digest))
+        || strcmp(normalized_digest, metadata.credential_fingerprint) != 0)
+    {
+        msg(D_MULTI_ERRORS,
+            "MULTI: ordinary OpenVPN provider policy denied client: certificate fingerprint metadata mismatch");
+        X509_free(cert);
+        return false;
+    }
+    X509_free(cert);
+
+    const struct provider_policy_auth_context context = {
+        .profile_mode = PROVIDER_POLICY_PROFILE_OPENVPN_TLS,
+        .principal = canonical_principal,
+        .credential_fingerprint = metadata.credential_fingerprint,
+        .cert_serial = metadata.cert_serial,
+        .cert_issuer = metadata.cert_issuer,
+        .allowed_fingerprints = &m->provider_allowed_fingerprints,
+        .revoked_fingerprints = &m->provider_revoked_fingerprints,
+        .revoked_principals = &m->provider_revoked_principals,
+        .revoked_certs = &m->provider_revoked_certs,
+        .policy_revision = m->provider_policy_revision,
+    };
+    struct provider_policy_auth_result result;
+    if (!provider_policy_identity_authorize(
+            &context, &mi->provider_policy_identity, &result))
+    {
+        msg(D_MULTI_ERRORS,
+            "MULTI: ordinary OpenVPN provider policy denied client '%s': %s",
+            principal, result.reason);
+        return false;
+    }
+
+    msg(M_INFO,
+        "MULTI: ordinary OpenVPN provider policy authorized client '%s' at revision %" PRIu64,
+        principal, mi->provider_policy_identity.policy_revision);
+    return true;
+#else
+    msg(D_MULTI_ERRORS,
+        "MULTI: ordinary OpenVPN provider policy requires OpenSSL");
+    return false;
+#endif
+}
+
 /**
  * Overrides the locked username with the username of --override-username
  * @param mi the multi instance that should be modified.
@@ -4013,6 +4769,7 @@ multi_connection_established(struct multi_context *m, struct multi_instance *mi)
 
     int *cur_handler_index = &mi->client_connect_defer_state.cur_handler_index;
     uint64_t *option_types_found = &mi->client_connect_defer_state.option_types_found;
+    bool cc_succeeded = true;
 
     /* We are called for the first time */
     if (!from_deferred)
@@ -4022,10 +4779,12 @@ multi_connection_established(struct multi_context *m, struct multi_instance *mi)
         /* Initially we have no handler that has returned a result */
         mi->context.c2.tls_multi->multi_state = CAS_PENDING_DEFERRED;
 
-        multi_client_connect_early_setup(m, mi);
+        cc_succeeded = multi_provider_policy_authorize_openvpn(m, mi);
+        if (cc_succeeded)
+        {
+            multi_client_connect_early_setup(m, mi);
+        }
     }
-
-    bool cc_succeeded = true;
 
     while (cc_succeeded && client_connect_handlers[*cur_handler_index] != NULL)
     {
@@ -4085,7 +4844,7 @@ multi_connection_established(struct multi_context *m, struct multi_instance *mi)
         (*cur_handler_index)++;
     }
 
-    if (mi->context.options.override_username)
+    if (cc_succeeded && mi->context.options.override_username)
     {
         if (!override_locked_username(mi))
         {
@@ -4094,14 +4853,16 @@ multi_connection_established(struct multi_context *m, struct multi_instance *mi)
     }
 
     /* Check if we have forbidding options in the current mode */
-    if (dco_enabled(&mi->context.options)
+    if (cc_succeeded && dco_enabled(&mi->context.options)
         && !dco_check_option(D_MULTI_ERRORS, &mi->context.options))
     {
         msg(D_MULTI_ERRORS, "MULTI: client has been rejected due to incompatible DCO options");
         cc_succeeded = false;
     }
 
-    if (!check_compression_settings_valid(&mi->context.options.comp, D_MULTI_ERRORS))
+    if (cc_succeeded
+        && !check_compression_settings_valid(&mi->context.options.comp,
+                                             D_MULTI_ERRORS))
     {
         msg(D_MULTI_ERRORS, "MULTI: client has been rejected due to invalid compression options");
         cc_succeeded = false;
@@ -5126,8 +5887,11 @@ multi_process_per_second_timers_dowork(struct multi_context *m)
         provider_helper_process_event(&m->provider_helper);
         if (multi_ikev2_helper_state_closes_sessions(m->provider_helper.state))
         {
-            multi_ikev2_helper_close_provider_sessions(
-                m, "IKEv2 helper unavailable");
+            if (provider_session_table_count(&m->provider_sessions))
+            {
+                multi_ikev2_helper_terminal_failure(
+                    m, "helper unavailable with active native sessions");
+            }
         }
         if (multi_restart_ikev2_helper_ready(m))
         {
@@ -5136,8 +5900,22 @@ multi_process_per_second_timers_dowork(struct multi_context *m)
         (void)multi_send_ikev2_helper_listener_fds(m);
         if (provider_helper_stats_trigger(m))
         {
-            (void)provider_helper_supervisor_send_stats_request(
-                &m->provider_helper, (uint64_t)now);
+            if (provider_helper_supervisor_send_heartbeat(&m->provider_helper))
+            {
+                if (!provider_helper_supervisor_send_stats_request(
+                        &m->provider_helper, (uint64_t)now)
+                    && provider_session_table_count(&m->provider_sessions))
+                {
+                    multi_ikev2_helper_terminal_failure(
+                        m,
+                        "helper statistics request failed with active native sessions");
+                }
+            }
+            else if (provider_session_table_count(&m->provider_sessions))
+            {
+                multi_ikev2_helper_terminal_failure(
+                    m, "helper heartbeat send failed with active native sessions");
+            }
         }
     }
 
@@ -5348,6 +6126,13 @@ management_kill_provider_session_by_cid(struct multi_context *m,
                                         const unsigned long cid,
                                         const char *kill_msg)
 {
+    if (!m
+        || provider_session_table_gateway_must_terminate(
+            &m->provider_sessions))
+    {
+        return false;
+    }
+
     struct provider_session *session =
         provider_session_lookup_by_cid(&m->provider_sessions, cid);
     if (!session)
@@ -5355,22 +6140,19 @@ management_kill_provider_session_by_cid(struct multi_context *m,
         return false;
     }
 
-    struct provider_session_xfrm_lease session_lease;
-    if (provider_session_get_xfrm_lease(session, &session_lease))
+    if (!multi_ikev2_helper_reconcile_session_xfrm(
+            m, session, "management session termination"))
     {
-        struct provider_helper_xfrm_lease helper_lease;
-        multi_ikev2_helper_copy_xfrm_lease(&helper_lease, &session_lease);
-        if (!provider_helper_supervisor_send_xfrm_lease_delete(
-                &m->provider_helper, &helper_lease, session_lease.lease_id))
-        {
-            msg(D_MULTI_ERRORS,
-                "MANAGEMENT: provider session CID %lu XFRM lease delete failed",
-                cid);
-            return false;
-        }
+        return false;
     }
 
     multi_ikev2_helper_release_session_address(m, session, true);
+    if (session->has_address_pool_handle)
+    {
+        multi_ikev2_helper_terminal_failure(
+            m, "management session termination could not release its VIP after XFRM teardown");
+        return false;
+    }
     return provider_session_kill_by_cid(&m->provider_sessions, cid, kill_msg);
 }
 
@@ -5389,6 +6171,65 @@ management_kill_by_cid(void *arg, const unsigned long cid, const char *kill_msg)
     return management_kill_provider_session_by_cid(m, cid, kill_msg);
 }
 
+static unsigned int
+management_kill_openvpn_by_fingerprint(
+    struct multi_context *m,
+    const char *credential_fingerprint)
+{
+    unsigned int killed = 0;
+    for (uint32_t i = 0; i <= m->max_peerid; ++i)
+    {
+        struct multi_instance *mi = m->instances[i];
+        if (mi && !mi->halt
+            && provider_policy_identity_matches_fingerprint(
+                &mi->provider_policy_identity, credential_fingerprint))
+        {
+            multi_close_instance(m, mi, false);
+            ++killed;
+        }
+    }
+    return killed;
+}
+
+static unsigned int
+management_kill_openvpn_by_principal(struct multi_context *m,
+                                     const char *principal)
+{
+    unsigned int killed = 0;
+    for (uint32_t i = 0; i <= m->max_peerid; ++i)
+    {
+        struct multi_instance *mi = m->instances[i];
+        if (mi && !mi->halt
+            && provider_policy_identity_matches_principal(
+                &mi->provider_policy_identity, principal))
+        {
+            multi_close_instance(m, mi, false);
+            ++killed;
+        }
+    }
+    return killed;
+}
+
+static unsigned int
+management_kill_openvpn_by_cert(struct multi_context *m,
+                                const char *serial,
+                                const char *issuer)
+{
+    unsigned int killed = 0;
+    for (uint32_t i = 0; i <= m->max_peerid; ++i)
+    {
+        struct multi_instance *mi = m->instances[i];
+        if (mi && !mi->halt
+            && provider_policy_identity_matches_cert(
+                &mi->provider_policy_identity, serial, issuer))
+        {
+            multi_close_instance(m, mi, false);
+            ++killed;
+        }
+    }
+    return killed;
+}
+
 static bool
 management_provider_revoke_fingerprint(void *arg,
                                        const char *credential_fingerprint,
@@ -5399,56 +6240,57 @@ management_provider_revoke_fingerprint(void *arg,
     {
         return false;
     }
-
-    const bool already_revoked =
-        provider_policy_fingerprint_list_contains(
-            &m->provider_revoked_fingerprints, credential_fingerprint);
-    if (!already_revoked
-        && m->top.options.ikev2_helper_revocation_file)
+    char policy_reason[PROVIDER_POLICY_REASON_SIZE];
+    if (!provider_policy_revoke_fingerprint(
+            &m->provider_revoked_fingerprints,
+            m->top.options.ikev2_helper_revocation_file,
+            credential_fingerprint, &m->provider_policy_revision,
+            policy_reason, sizeof(policy_reason)))
     {
-        char file_reason[PROVIDER_POLICY_REASON_SIZE];
-        if (!provider_policy_fingerprint_list_append_file(
-                m->top.options.ikev2_helper_revocation_file,
-                credential_fingerprint, file_reason, sizeof(file_reason)))
-        {
-            msg(M_WARN,
-                "MANAGEMENT: provider credential fingerprint revocation was not persisted: %s",
-                file_reason);
-            return false;
-        }
-    }
-
-    if (!provider_policy_fingerprint_list_add_runtime(
-            &m->provider_revoked_fingerprints, credential_fingerprint))
-    {
+        msg(M_WARN,
+            "MANAGEMENT: provider credential fingerprint revocation failed: %s",
+            policy_reason);
         return false;
-    }
-    if (!already_revoked && m->provider_policy_revision < UINT64_MAX)
-    {
-        ++m->provider_policy_revision;
     }
 
     const char *revoke_reason =
         reason && *reason ? reason : "provider credential revoked";
-    unsigned int killed = 0;
+    unsigned int provider_killed = 0;
+    bool provider_reconciled = true;
     for (struct provider_session *session = m->provider_sessions.head; session;)
     {
         struct provider_session *next = session->next;
         const unsigned long cid = session->management_cid;
         if (session->credential_fingerprint
             && strcasecmp(session->credential_fingerprint,
-                          credential_fingerprint) == 0
-            && management_kill_provider_session_by_cid(m, cid, revoke_reason))
+                          credential_fingerprint)
+                   == 0)
         {
-            ++killed;
+            if (management_kill_provider_session_by_cid(
+                    m, cid, revoke_reason))
+            {
+                ++provider_killed;
+            }
+            else
+            {
+                provider_reconciled = false;
+            }
         }
         session = next;
     }
+    const unsigned int openvpn_killed =
+        management_kill_openvpn_by_fingerprint(m, credential_fingerprint);
 
     msg(M_INFO,
-        "MANAGEMENT: provider credential fingerprint revoked, killed %u active provider session%s, policy revision %" PRIu64,
-        killed, killed == 1 ? "" : "s", m->provider_policy_revision);
-    return true;
+        "MANAGEMENT: provider credential fingerprint revoked, killed %u provider and %u ordinary OpenVPN session%s, policy revision %" PRIu64,
+        provider_killed, openvpn_killed,
+        openvpn_killed == 1 ? "" : "s", m->provider_policy_revision);
+    if (!provider_reconciled)
+    {
+        msg(D_MULTI_ERRORS,
+            "MANAGEMENT: provider credential revocation persisted but active native XFRM reconciliation failed");
+    }
+    return provider_reconciled;
 }
 
 static bool
@@ -5461,39 +6303,18 @@ management_provider_allow_fingerprint(void *arg,
     {
         return false;
     }
-    if (provider_policy_fingerprint_list_contains(
-            &m->provider_revoked_fingerprints, credential_fingerprint))
+    char policy_reason[PROVIDER_POLICY_REASON_SIZE];
+    if (!provider_policy_allow_fingerprint(
+            &m->provider_allowed_fingerprints,
+            &m->provider_revoked_fingerprints,
+            m->top.options.ikev2_helper_allow_file,
+            credential_fingerprint, &m->provider_policy_revision,
+            policy_reason, sizeof(policy_reason)))
     {
         msg(M_WARN,
-            "MANAGEMENT: provider credential fingerprint allow rejected because the fingerprint is revoked");
+            "MANAGEMENT: provider credential fingerprint allow failed: %s",
+            policy_reason);
         return false;
-    }
-
-    const bool already_allowed =
-        provider_policy_fingerprint_list_contains(
-            &m->provider_allowed_fingerprints, credential_fingerprint);
-    if (!already_allowed && m->top.options.ikev2_helper_allow_file)
-    {
-        char file_reason[PROVIDER_POLICY_REASON_SIZE];
-        if (!provider_policy_fingerprint_list_append_named_file(
-                m->top.options.ikev2_helper_allow_file,
-                credential_fingerprint, "allow fingerprint file",
-                file_reason, sizeof(file_reason)))
-        {
-            msg(M_WARN,
-                "MANAGEMENT: provider credential fingerprint allow was not persisted: %s",
-                file_reason);
-            return false;
-        }
-    }
-    if (!provider_policy_fingerprint_list_add_runtime(
-            &m->provider_allowed_fingerprints, credential_fingerprint))
-    {
-        return false;
-    }
-    if (!already_allowed && m->provider_policy_revision < UINT64_MAX)
-    {
-        ++m->provider_policy_revision;
     }
 
     if (reason && *reason)
@@ -5516,58 +6337,61 @@ management_provider_revoke_principal(void *arg, const char *principal,
                                      const char *reason)
 {
     struct multi_context *m = (struct multi_context *)arg;
-    if (!provider_policy_principal_valid(principal))
+    char canonical_principal[PROVIDER_POLICY_PRINCIPAL_SIZE];
+    if (!provider_policy_principal_canonicalize(
+            principal, canonical_principal, sizeof(canonical_principal)))
     {
         return false;
     }
 
-    const bool already_revoked =
-        provider_policy_principal_list_contains(&m->provider_revoked_principals,
-                                                principal);
-    if (!already_revoked
-        && m->top.options.ikev2_helper_principal_revocation_file)
+    char policy_reason[PROVIDER_POLICY_REASON_SIZE];
+    if (!provider_policy_revoke_principal(
+            &m->provider_revoked_principals,
+            m->top.options.ikev2_helper_principal_revocation_file,
+            canonical_principal, &m->provider_policy_revision, policy_reason,
+            sizeof(policy_reason)))
     {
-        char file_reason[PROVIDER_POLICY_REASON_SIZE];
-        if (!provider_policy_principal_list_append_file(
-                m->top.options.ikev2_helper_principal_revocation_file,
-                principal, file_reason, sizeof(file_reason)))
-        {
-            msg(M_WARN,
-                "MANAGEMENT: provider principal revocation was not persisted: %s",
-                file_reason);
-            return false;
-        }
-    }
-
-    if (!provider_policy_principal_list_add_runtime(
-            &m->provider_revoked_principals, principal))
-    {
+        msg(M_WARN, "MANAGEMENT: provider principal revocation failed: %s",
+            policy_reason);
         return false;
-    }
-    if (!already_revoked && m->provider_policy_revision < UINT64_MAX)
-    {
-        ++m->provider_policy_revision;
     }
 
     const char *revoke_reason =
         reason && *reason ? reason : "provider principal revoked";
-    unsigned int killed = 0;
+    unsigned int provider_killed = 0;
+    bool provider_reconciled = true;
     for (struct provider_session *session = m->provider_sessions.head; session;)
     {
         struct provider_session *next = session->next;
         const unsigned long cid = session->management_cid;
-        if (session->principal && strcmp(session->principal, principal) == 0
-            && management_kill_provider_session_by_cid(m, cid, revoke_reason))
+        if (session->principal
+            && strcmp(session->principal, canonical_principal) == 0)
         {
-            ++killed;
+            if (management_kill_provider_session_by_cid(
+                    m, cid, revoke_reason))
+            {
+                ++provider_killed;
+            }
+            else
+            {
+                provider_reconciled = false;
+            }
         }
         session = next;
     }
+    const unsigned int openvpn_killed =
+        management_kill_openvpn_by_principal(m, canonical_principal);
 
     msg(M_INFO,
-        "MANAGEMENT: provider principal revoked, killed %u active provider session%s, policy revision %" PRIu64,
-        killed, killed == 1 ? "" : "s", m->provider_policy_revision);
-    return true;
+        "MANAGEMENT: provider principal revoked, killed %u provider and %u ordinary OpenVPN session%s, policy revision %" PRIu64,
+        provider_killed, openvpn_killed,
+        openvpn_killed == 1 ? "" : "s", m->provider_policy_revision);
+    if (!provider_reconciled)
+    {
+        msg(D_MULTI_ERRORS,
+            "MANAGEMENT: provider principal revocation persisted but active native XFRM reconciliation failed");
+    }
+    return provider_reconciled;
 }
 
 static bool
@@ -5582,55 +6406,56 @@ management_provider_revoke_cert_identity(void *arg, const char *serial,
         return false;
     }
 
-    const bool already_revoked =
-        provider_policy_cert_list_contains(&m->provider_revoked_certs,
-                                           serial, issuer);
-    if (!already_revoked
-        && m->top.options.ikev2_helper_cert_revocation_file)
+    char policy_reason[PROVIDER_POLICY_REASON_SIZE];
+    if (!provider_policy_revoke_cert(
+            &m->provider_revoked_certs,
+            m->top.options.ikev2_helper_cert_revocation_file,
+            serial, issuer, &m->provider_policy_revision, policy_reason,
+            sizeof(policy_reason)))
     {
-        char file_reason[PROVIDER_POLICY_REASON_SIZE];
-        if (!provider_policy_cert_list_append_file(
-                m->top.options.ikev2_helper_cert_revocation_file,
-                serial, issuer, file_reason, sizeof(file_reason)))
-        {
-            msg(M_WARN,
-                "MANAGEMENT: provider certificate identity revocation was not persisted: %s",
-                file_reason);
-            return false;
-        }
-    }
-
-    if (!provider_policy_cert_list_add_runtime(&m->provider_revoked_certs,
-                                               serial, issuer))
-    {
+        msg(M_WARN,
+            "MANAGEMENT: provider certificate identity revocation failed: %s",
+            policy_reason);
         return false;
-    }
-    if (!already_revoked && m->provider_policy_revision < UINT64_MAX)
-    {
-        ++m->provider_policy_revision;
     }
 
     const char *revoke_reason =
         reason && *reason ? reason : "provider certificate identity revoked";
-    unsigned int killed = 0;
+    unsigned int provider_killed = 0;
+    bool provider_reconciled = true;
     for (struct provider_session *session = m->provider_sessions.head; session;)
     {
         struct provider_session *next = session->next;
         const unsigned long cid = session->management_cid;
         if (session->cert_serial && session->cert_issuer
             && strcasecmp(session->cert_serial, serial) == 0
-            && strcmp(session->cert_issuer, issuer) == 0
-            && management_kill_provider_session_by_cid(m, cid, revoke_reason))
+            && strcmp(session->cert_issuer, issuer) == 0)
         {
-            ++killed;
+            if (management_kill_provider_session_by_cid(
+                    m, cid, revoke_reason))
+            {
+                ++provider_killed;
+            }
+            else
+            {
+                provider_reconciled = false;
+            }
         }
         session = next;
     }
+    const unsigned int openvpn_killed =
+        management_kill_openvpn_by_cert(m, serial, issuer);
 
     msg(M_INFO,
-        "MANAGEMENT: provider certificate identity revoked, killed %u active provider session%s, policy revision %" PRIu64,
-        killed, killed == 1 ? "" : "s", m->provider_policy_revision);
-    return true;
+        "MANAGEMENT: provider certificate identity revoked, killed %u provider and %u ordinary OpenVPN session%s, policy revision %" PRIu64,
+        provider_killed, openvpn_killed,
+        openvpn_killed == 1 ? "" : "s", m->provider_policy_revision);
+    if (!provider_reconciled)
+    {
+        msg(D_MULTI_ERRORS,
+            "MANAGEMENT: provider certificate revocation persisted but active native XFRM reconciliation failed");
+    }
+    return provider_reconciled;
 }
 
 static bool
@@ -5640,9 +6465,19 @@ management_provider_revoke_cert_by_cid(void *arg, const unsigned long cid,
     struct multi_context *m = (struct multi_context *)arg;
     struct provider_session *session =
         provider_session_lookup_by_cid(&m->provider_sessions, cid);
-    if (!session
-        || !provider_policy_cert_serial_valid(session->cert_serial)
-        || !provider_policy_cert_issuer_valid(session->cert_issuer))
+    const char *source_serial = session ? session->cert_serial : NULL;
+    const char *source_issuer = session ? session->cert_issuer : NULL;
+    if (!session)
+    {
+        struct multi_instance *mi = lookup_by_cid(m, cid);
+        if (mi && mi->provider_policy_identity.ready)
+        {
+            source_serial = mi->provider_policy_identity.cert_serial;
+            source_issuer = mi->provider_policy_identity.cert_issuer;
+        }
+    }
+    if (!provider_policy_cert_serial_valid(source_serial)
+        || !provider_policy_cert_issuer_valid(source_issuer))
     {
         return false;
     }
@@ -5650,9 +6485,9 @@ management_provider_revoke_cert_by_cid(void *arg, const unsigned long cid,
     char serial[PROVIDER_POLICY_CERT_SERIAL_SIZE];
     char issuer[PROVIDER_POLICY_CERT_ISSUER_SIZE];
     const int serial_len = snprintf(serial, sizeof(serial), "%s",
-                                    session->cert_serial);
+                                    source_serial);
     const int issuer_len = snprintf(issuer, sizeof(issuer), "%s",
-                                    session->cert_issuer);
+                                    source_issuer);
     if (serial_len < 0 || issuer_len < 0
         || (size_t)serial_len >= sizeof(serial)
         || (size_t)issuer_len >= sizeof(issuer))
@@ -5675,8 +6510,18 @@ management_provider_revoke_by_cid(void *arg, const unsigned long cid,
     struct multi_context *m = (struct multi_context *)arg;
     struct provider_session *session =
         provider_session_lookup_by_cid(&m->provider_sessions, cid);
-    if (!session
-        || !provider_policy_fingerprint_valid(session->credential_fingerprint))
+    const char *source_fingerprint =
+        session ? session->credential_fingerprint : NULL;
+    if (!session)
+    {
+        struct multi_instance *mi = lookup_by_cid(m, cid);
+        if (mi && mi->provider_policy_identity.ready)
+        {
+            source_fingerprint =
+                mi->provider_policy_identity.credential_fingerprint;
+        }
+    }
+    if (!provider_policy_fingerprint_valid(source_fingerprint))
     {
         return false;
     }
@@ -5684,7 +6529,7 @@ management_provider_revoke_by_cid(void *arg, const unsigned long cid,
     char credential_fingerprint[PROVIDER_POLICY_FINGERPRINT_SIZE];
     const int fp_len =
         snprintf(credential_fingerprint, sizeof(credential_fingerprint), "%s",
-                 session->credential_fingerprint);
+                 source_fingerprint);
     if (fp_len < 0 || (size_t)fp_len >= sizeof(credential_fingerprint))
     {
         return false;
@@ -5696,6 +6541,230 @@ management_provider_revoke_by_cid(void *arg, const unsigned long cid,
     return management_provider_revoke_fingerprint(
         arg, credential_fingerprint,
         reason && *reason ? reason : "provider credential revoked");
+}
+
+static struct provider_effective_policy_store *
+management_provider_effective_policy_store(struct multi_context *m,
+                                           const char *operation)
+{
+    if (!m || !m->provider_effective_policy_initialized)
+    {
+        msg(M_WARN,
+            "MANAGEMENT: %s requires --experimental-provider-effective-policy-state",
+            operation);
+        return NULL;
+    }
+    return &m->provider_effective_policy;
+}
+
+static enum provider_effective_policy_result
+management_provider_effective_policy_result(
+    const char *operation, enum provider_effective_policy_result result,
+    const char *reason)
+{
+    if (result == PROVIDER_EFFECTIVE_POLICY_OK
+        || result == PROVIDER_EFFECTIVE_POLICY_IDEMPOTENT)
+    {
+        msg(M_INFO, "MANAGEMENT: effective policy %s: %s", operation,
+            provider_effective_policy_result_name(result));
+        return result;
+    }
+    msg(M_WARN, "MANAGEMENT: effective policy %s failed (%s): %s",
+        operation, provider_effective_policy_result_name(result),
+        reason && *reason ? reason : "no reason supplied");
+    return result;
+}
+
+static enum provider_effective_policy_result
+management_provider_effective_policy_bind_child(
+    void *arg, const char *credential_fingerprint,
+    const char *registered_user_id, const char *device_id,
+    uint64_t credential_generation)
+{
+    struct multi_context *m = (struct multi_context *)arg;
+    struct provider_effective_policy_store *store =
+        management_provider_effective_policy_store(m, "child bind");
+    if (!store)
+    {
+        return PROVIDER_EFFECTIVE_POLICY_NOT_FOUND;
+    }
+
+    char reason[256];
+    const enum provider_effective_policy_result result =
+        provider_effective_policy_bind_child(
+            store, credential_fingerprint, registered_user_id, device_id,
+            credential_generation, reason, sizeof(reason));
+    return management_provider_effective_policy_result(
+        "child bind", result, reason);
+}
+
+static enum provider_effective_policy_result
+management_provider_effective_policy_unbind_child(
+    void *arg, const char *credential_fingerprint)
+{
+    struct multi_context *m = (struct multi_context *)arg;
+    struct provider_effective_policy_store *store =
+        management_provider_effective_policy_store(m, "child unbind");
+    if (!store)
+    {
+        return PROVIDER_EFFECTIVE_POLICY_NOT_FOUND;
+    }
+
+    char reason[256];
+    const enum provider_effective_policy_result result =
+        provider_effective_policy_unbind_child(
+            store, credential_fingerprint, reason, sizeof(reason));
+    return management_provider_effective_policy_result(
+        "child unbind", result, reason);
+}
+
+static enum provider_effective_policy_result
+management_provider_effective_policy_accept_snapshot(
+    void *arg, const char *registered_user_id, uint64_t source_revision,
+    const char *sha256_digest, const char *object_id)
+{
+    struct multi_context *m = (struct multi_context *)arg;
+    struct provider_effective_policy_store *store =
+        management_provider_effective_policy_store(m, "snapshot accept");
+    if (!store)
+    {
+        return PROVIDER_EFFECTIVE_POLICY_NOT_FOUND;
+    }
+
+    char reason[256];
+    const enum provider_effective_policy_result result =
+        provider_effective_policy_accept_snapshot(
+            store, registered_user_id, source_revision, sha256_digest,
+            object_id, reason, sizeof(reason));
+    return management_provider_effective_policy_result(
+        "snapshot accept", result, reason);
+}
+
+static enum provider_effective_policy_result
+management_provider_effective_policy_mark_projection(
+    void *arg, const char *credential_fingerprint, uint64_t source_revision,
+    bool applied)
+{
+    struct multi_context *m = (struct multi_context *)arg;
+    struct provider_effective_policy_store *store =
+        management_provider_effective_policy_store(m, "projection result");
+    if (!store)
+    {
+        return PROVIDER_EFFECTIVE_POLICY_NOT_FOUND;
+    }
+
+    char reason[256];
+    enum provider_effective_policy_result result;
+    if (applied)
+    {
+        result = provider_effective_policy_mark_projection_applied(
+            store, credential_fingerprint, source_revision, reason,
+            sizeof(reason));
+    }
+    else
+    {
+        result = provider_effective_policy_mark_projection_error(
+            store, credential_fingerprint, source_revision, reason,
+            sizeof(reason));
+    }
+    return management_provider_effective_policy_result(
+        applied ? "projection applied" : "projection error", result,
+        reason);
+}
+
+static void
+management_provider_effective_policy_output_snapshot(
+    const struct provider_effective_policy_snapshot *snapshot)
+{
+    msg(M_CLIENT,
+        "PROVIDER_EFFECTIVE_POLICY USER registered_user_id=%s source_revision=%" PRIu64 " sha256=%s object_id=%s",
+        snapshot->registered_user_id, snapshot->source_revision,
+        snapshot->sha256_digest, snapshot->object_id);
+}
+
+static void
+management_provider_effective_policy_output_binding(
+    const struct provider_effective_policy_binding *binding)
+{
+    msg(M_CLIENT,
+        "PROVIDER_EFFECTIVE_POLICY BINDING credential=%s registered_user_id=%s device_id=%s credential_generation=%" PRIu64 " active=%d desired_revision=%" PRIu64 " applied_revision=%" PRIu64 " projection=%s",
+        binding->credential_fingerprint, binding->registered_user_id,
+        binding->device_id, binding->credential_generation,
+        binding->active ? 1 : 0, binding->desired_revision,
+        binding->applied_revision,
+        provider_effective_policy_projection_state_name(
+            binding->projection_state));
+}
+
+static enum provider_effective_policy_result
+management_provider_effective_policy_status(void *arg, const char *scope,
+                                            const char *key)
+{
+    struct multi_context *m = (struct multi_context *)arg;
+    struct provider_effective_policy_store *store =
+        management_provider_effective_policy_store(m, "status");
+    if (!store)
+    {
+        return PROVIDER_EFFECTIVE_POLICY_NOT_FOUND;
+    }
+
+    if (!scope && !key)
+    {
+        for (size_t i = 0; i < store->snapshot_count; ++i)
+        {
+            management_provider_effective_policy_output_snapshot(
+                &store->snapshots[i]);
+        }
+        for (size_t i = 0; i < store->binding_count; ++i)
+        {
+            management_provider_effective_policy_output_binding(
+                &store->bindings[i]);
+        }
+        if (!store->snapshot_count && !store->binding_count)
+        {
+            msg(M_CLIENT, "PROVIDER_EFFECTIVE_POLICY EMPTY");
+        }
+        return PROVIDER_EFFECTIVE_POLICY_OK;
+    }
+
+    if (!scope || !key)
+    {
+        return PROVIDER_EFFECTIVE_POLICY_INVALID;
+    }
+    if (strcmp(scope, "credential") == 0)
+    {
+        struct provider_effective_policy_binding binding;
+        if (!provider_effective_policy_binding_status(store, key, &binding))
+        {
+            return PROVIDER_EFFECTIVE_POLICY_NOT_FOUND;
+        }
+        management_provider_effective_policy_output_binding(&binding);
+        return PROVIDER_EFFECTIVE_POLICY_OK;
+    }
+    if (strcmp(scope, "user") != 0)
+    {
+        return PROVIDER_EFFECTIVE_POLICY_INVALID;
+    }
+
+    bool found = false;
+    struct provider_effective_policy_snapshot snapshot;
+    if (provider_effective_policy_snapshot_status(store, key, &snapshot))
+    {
+        management_provider_effective_policy_output_snapshot(&snapshot);
+        found = true;
+    }
+    const size_t count = provider_effective_policy_binding_enumerate(
+        store, key, false, 0, NULL);
+    for (size_t i = 0; i < count; ++i)
+    {
+        struct provider_effective_policy_binding binding;
+        (void)provider_effective_policy_binding_enumerate(
+            store, key, false, i, &binding);
+        management_provider_effective_policy_output_binding(&binding);
+        found = true;
+    }
+    return found ? PROVIDER_EFFECTIVE_POLICY_OK
+                 : PROVIDER_EFFECTIVE_POLICY_NOT_FOUND;
 }
 
 static bool
@@ -5812,6 +6881,16 @@ init_management_callback_multi(struct multi_context *m)
         cb.provider_revoke_by_fingerprint =
             management_provider_revoke_fingerprint;
         cb.provider_revoke_by_principal = management_provider_revoke_principal;
+        cb.provider_effective_policy_bind_child =
+            management_provider_effective_policy_bind_child;
+        cb.provider_effective_policy_unbind_child =
+            management_provider_effective_policy_unbind_child;
+        cb.provider_effective_policy_accept_snapshot =
+            management_provider_effective_policy_accept_snapshot;
+        cb.provider_effective_policy_mark_projection =
+            management_provider_effective_policy_mark_projection;
+        cb.provider_effective_policy_status =
+            management_provider_effective_policy_status;
         cb.client_auth = management_client_auth;
         cb.client_pending_auth = management_client_pending_auth;
         cb.get_peer_info = management_get_peer_info;

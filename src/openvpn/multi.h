@@ -39,12 +39,13 @@
 #include "mtcp.h"
 #include "multi_io.h"
 #include "provider_helper.h"
+#include "provider_effective_policy.h"
 #include "provider_policy.h"
 #include "provider_session.h"
 #include "vlan.h"
 #include "reflect_filter.h"
 
-#define MULTI_PREFIX_MAX_LENGTH 256
+#define MULTI_PREFIX_MAX_LENGTH           256
 #define MULTI_IKEV2_HELPER_LISTENER_COUNT 2
 
 /*
@@ -145,6 +146,7 @@ struct multi_instance
 
     struct context context; /**< The context structure storing state
                              *   for this VPN tunnel. */
+    struct provider_policy_identity provider_policy_identity;
     struct client_connect_defer_state client_connect_defer_state;
 #ifdef ENABLE_ASYNC_PUSH
     int inotify_watch; /* watch descriptor for acf */
@@ -197,12 +199,15 @@ struct multi_context
     size_t provider_helper_listener_count;
     bool provider_helper_listener_fds_sent;
     bool provider_helper_server_auth_config_sent;
+    uint64_t provider_helper_server_auth_next_revision;
     struct provider_session_table provider_sessions;
     struct provider_policy_fingerprint_list provider_allowed_fingerprints;
     struct provider_policy_fingerprint_list provider_revoked_fingerprints;
     struct provider_policy_principal_list provider_revoked_principals;
     struct provider_policy_cert_list provider_revoked_certs;
     uint64_t provider_policy_revision;
+    struct provider_effective_policy_store provider_effective_policy;
+    bool provider_effective_policy_initialized;
 
 #ifdef ENABLE_MANAGEMENT
     struct hash *cid_hash;

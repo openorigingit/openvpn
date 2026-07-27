@@ -485,6 +485,8 @@ struct options
     int ikev2_helper_dpd_retry_seconds;
     bool ikev2_helper_apply_xfrm;
     bool ikev2_helper_full_tunnel;
+    bool provider_policy_openvpn;
+    const char *provider_effective_policy_state_file;
     struct provider_policy_fingerprint_list ikev2_helper_allowed_fingerprints;
 
     bool server_bridge_proxy_dhcp;

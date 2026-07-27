@@ -26,9 +26,9 @@
 #include "buffer.h"
 #include "event.h"
 
-#define PROVIDER_HELPER_IPC_MAGIC          0x4f565048u /* OVPH */
+#define PROVIDER_HELPER_IPC_MAGIC         0x4f565048u /* OVPH */
 #define PROVIDER_HELPER_IPC_VERSION_MAJOR 1
-#define PROVIDER_HELPER_IPC_VERSION_MINOR 0
+#define PROVIDER_HELPER_IPC_VERSION_MINOR 1
 #define PROVIDER_HELPER_IPC_HEADER_SIZE   40
 #define PROVIDER_HELPER_IPC_MAX_MESSAGE   (64 * 1024)
 #define PROVIDER_HELPER_FEATURE_SET_SIZE  16
@@ -48,140 +48,156 @@
 #endif
 #define PROVIDER_HELPER_XFRM_LEASE_SIZE \
     (104 + 4 + (PROVIDER_HELPER_XFRM_LEASE_DNS4_MAX * 4))
-#define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE 256
-#define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE 128
-#define PROVIDER_HELPER_AUTH_SERIAL_SIZE      128
-#define PROVIDER_HELPER_AUTH_ISSUER_SIZE      256
-#define PROVIDER_HELPER_AUTH_REQUEST_SIZE     824
-#define PROVIDER_HELPER_AUTH_REASON_SIZE    128
-#define PROVIDER_HELPER_AUTH_RESPONSE_SIZE  176
-#define PROVIDER_HELPER_SESSION_CLOSE_REASON_SIZE 128
-#define PROVIDER_HELPER_SESSION_CLOSE_SIZE  168
-#define PROVIDER_HELPER_SESSION_STATE_TEXT_SIZE 32
-#define PROVIDER_HELPER_SESSION_UPDATE_SIZE 144
-#define PROVIDER_HELPER_SERVER_AUTH_ID_SIZE 256
+#define PROVIDER_HELPER_AUTH_PRINCIPAL_SIZE         256
+#define PROVIDER_HELPER_AUTH_FINGERPRINT_SIZE       128
+#define PROVIDER_HELPER_AUTH_SERIAL_SIZE            128
+#define PROVIDER_HELPER_AUTH_ISSUER_SIZE            256
+#define PROVIDER_HELPER_AUTH_REQUEST_SIZE           824
+#define PROVIDER_HELPER_AUTH_REASON_SIZE            128
+#define PROVIDER_HELPER_AUTH_RESPONSE_SIZE          176
+#define PROVIDER_HELPER_SESSION_CLOSE_REASON_SIZE   128
+#define PROVIDER_HELPER_SESSION_CLOSE_SIZE          168
+#define PROVIDER_HELPER_SESSION_STATE_TEXT_SIZE     32
+#define PROVIDER_HELPER_SESSION_UPDATE_SIZE         144
+#define PROVIDER_HELPER_SERVER_AUTH_ID_SIZE         256
 #define PROVIDER_HELPER_SERVER_AUTH_CERT_CHAIN_SIZE (16 * 1024)
-#define PROVIDER_HELPER_SERVER_AUTH_CONFIG_SIZE \
-    (32 + PROVIDER_HELPER_SERVER_AUTH_ID_SIZE \
-     + PROVIDER_HELPER_SERVER_AUTH_CERT_CHAIN_SIZE)
+#define PROVIDER_HELPER_CLIENT_CA_BUNDLE_SIZE       (24 * 1024)
+#define PROVIDER_HELPER_CLIENT_CRL_BUNDLE_SIZE      (16 * 1024)
+#define PROVIDER_HELPER_SERVER_AUTH_CONFIG_SIZE    \
+    (40 + PROVIDER_HELPER_SERVER_AUTH_ID_SIZE      \
+     + PROVIDER_HELPER_SERVER_AUTH_CERT_CHAIN_SIZE \
+     + PROVIDER_HELPER_CLIENT_CA_BUNDLE_SIZE       \
+     + PROVIDER_HELPER_CLIENT_CRL_BUNDLE_SIZE)
 #define PROVIDER_HELPER_SERVER_AUTH_TRANSCRIPT_SIZE (8 * 1024)
 #define PROVIDER_HELPER_SERVER_SIGN_REQUEST_SIZE \
     (56 + PROVIDER_HELPER_SERVER_AUTH_TRANSCRIPT_SIZE)
 #define PROVIDER_HELPER_SERVER_AUTH_SIGNATURE_SIZE 4096
 #define PROVIDER_HELPER_SERVER_SIGN_RESPONSE_SIZE \
     (40 + PROVIDER_HELPER_SERVER_AUTH_SIGNATURE_SIZE)
-#define PROVIDER_HELPER_IKEV2_HEADER_SIZE   28
-#define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE 4
-#define PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE 4
-#define PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE 8
-#define PROVIDER_HELPER_IKEV2_MAX_PAYLOADS  32
-#define PROVIDER_HELPER_IKEV2_MAX_PROPOSALS 16
-#define PROVIDER_HELPER_IKEV2_MAX_TRANSFORMS 32
-#define PROVIDER_HELPER_IKEV2_MAX_TRANSFORM_ATTRS 16
+#define PROVIDER_HELPER_CLIENT_TRUST_REFRESH_REQUEST_SIZE 16
+#define PROVIDER_HELPER_CLIENT_TRUST_REFRESH_REASON_SIZE  128
+#define PROVIDER_HELPER_CLIENT_TRUST_REFRESH_RESPONSE_SIZE \
+    (32 + PROVIDER_HELPER_CLIENT_TRUST_REFRESH_REASON_SIZE)
+#define PROVIDER_HELPER_IKEV2_HEADER_SIZE          28
+#define PROVIDER_HELPER_IKEV2_NATT_MARKER_SIZE     4
+#define PROVIDER_HELPER_IKEV2_PAYLOAD_HEADER_SIZE  4
+#define PROVIDER_HELPER_IKEV2_NOTIFY_HEADER_SIZE   8
+#define PROVIDER_HELPER_IKEV2_MAX_PAYLOADS         32
+#define PROVIDER_HELPER_IKEV2_MAX_PROPOSALS        16
+#define PROVIDER_HELPER_IKEV2_MAX_TRANSFORMS       32
+#define PROVIDER_HELPER_IKEV2_MAX_TRANSFORM_ATTRS  16
 #define PROVIDER_HELPER_IKEV2_SA_PROPOSAL_MIN_SIZE 8
-#define PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE 8
-#define PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE 4
+#define PROVIDER_HELPER_IKEV2_TRANSFORM_MIN_SIZE   8
+#define PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE       4
 #define PROVIDER_HELPER_IKEV2_KE_MIN_BYTES \
     (PROVIDER_HELPER_IKEV2_KE_HEADER_SIZE + 1)
-#define PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES 16
-#define PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES 256
-#define PROVIDER_HELPER_IKEV2_COOKIE_MIN_BYTES 1
-#define PROVIDER_HELPER_IKEV2_COOKIE_MAX_BYTES 64
-#define PROVIDER_HELPER_IKEV2_COOKIE_VERSION 1
+#define PROVIDER_HELPER_IKEV2_NONCE_MIN_BYTES      16
+#define PROVIDER_HELPER_IKEV2_NONCE_MAX_BYTES      256
+#define PROVIDER_HELPER_IKEV2_COOKIE_MIN_BYTES     1
+#define PROVIDER_HELPER_IKEV2_COOKIE_MAX_BYTES     64
+#define PROVIDER_HELPER_IKEV2_COOKIE_VERSION       1
 #define PROVIDER_HELPER_IKEV2_COOKIE_EPOCH_SECONDS 30
-#define PROVIDER_HELPER_IKEV2_COOKIE_TAG_BYTES 16
+#define PROVIDER_HELPER_IKEV2_COOKIE_TAG_BYTES     16
 #define PROVIDER_HELPER_IKEV2_COOKIE_BYTES \
     (1 + 4 + PROVIDER_HELPER_IKEV2_COOKIE_TAG_BYTES)
 #define PROVIDER_HELPER_IKEV2_NAT_DETECTION_HASH_BYTES 20
-#define PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE 4
-#define PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE 7
-#define PROVIDER_HELPER_IKEV2_TS_IPV6_ADDR_RANGE 8
-#define PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE 16
-#define PROVIDER_HELPER_IKEV2_TS_IPV6_SELECTOR_SIZE 40
-#define PROVIDER_HELPER_IKEV2_MAX_TS_SELECTORS 16
-#define PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE 4
-#define PROVIDER_HELPER_IKEV2_MAX_CP_ATTRS 32
+#define PROVIDER_HELPER_IKEV2_TS_HEADER_SIZE           4
+#define PROVIDER_HELPER_IKEV2_TS_IPV4_ADDR_RANGE       7
+#define PROVIDER_HELPER_IKEV2_TS_IPV6_ADDR_RANGE       8
+#define PROVIDER_HELPER_IKEV2_TS_IPV4_SELECTOR_SIZE    16
+#define PROVIDER_HELPER_IKEV2_TS_IPV6_SELECTOR_SIZE    40
+#define PROVIDER_HELPER_IKEV2_MAX_TS_SELECTORS         16
+#define PROVIDER_HELPER_IKEV2_CP_HEADER_SIZE           4
+#define PROVIDER_HELPER_IKEV2_MAX_CP_ATTRS             32
 
-#define PROVIDER_HELPER_CONFIG_FORCE_NATT (1u << 0)
-#define PROVIDER_HELPER_CONFIG_IPV4_ONLY  (1u << 1)
-#define PROVIDER_HELPER_CONFIG_APPLY_XFRM (1u << 2)
+#define PROVIDER_HELPER_CONFIG_FORCE_NATT               (1u << 0)
+#define PROVIDER_HELPER_CONFIG_IPV4_ONLY                (1u << 1)
+#define PROVIDER_HELPER_CONFIG_APPLY_XFRM               (1u << 2)
 /* Internal test scaffold only; do not expose as an OpenVPN option. */
-#define PROVIDER_HELPER_CONFIG_TEST_AUTH_CONTINUATION (1u << 3)
+#define PROVIDER_HELPER_CONFIG_TEST_AUTH_CONTINUATION   (1u << 3)
+/* Internal fault injection only; do not expose as an OpenVPN option. */
+#define PROVIDER_HELPER_CONFIG_TEST_XFRM_DELETE_FAILURE (1u << 4)
 
-#define PROVIDER_HELPER_LISTENER_FD_IKE   (1u << 0)
-#define PROVIDER_HELPER_LISTENER_FD_NATT  (1u << 1)
+#define PROVIDER_HELPER_LISTENER_FD_IKE  (1u << 0)
+#define PROVIDER_HELPER_LISTENER_FD_NATT (1u << 1)
 
-#define PROVIDER_HELPER_XFRM_LEASE_IPV4   (1u << 0)
-#define PROVIDER_HELPER_XFRM_LEASE_IPV6   (1u << 1)
+#define PROVIDER_HELPER_XFRM_LEASE_IPV4 (1u << 0)
+#define PROVIDER_HELPER_XFRM_LEASE_IPV6 (1u << 1)
 
-#define PROVIDER_HELPER_SERVER_AUTH_SIGALG_RSA_PSS_SHA256   (1u << 0)
+#define PROVIDER_HELPER_SERVER_AUTH_SIGALG_RSA_PSS_SHA256    (1u << 0)
 #define PROVIDER_HELPER_SERVER_AUTH_SIGALG_ECDSA_P256_SHA256 (1u << 1)
-#define PROVIDER_HELPER_SERVER_AUTH_SIGALG_SUPPORTED \
+#define PROVIDER_HELPER_SERVER_AUTH_SIGALG_SUPPORTED   \
     (PROVIDER_HELPER_SERVER_AUTH_SIGALG_RSA_PSS_SHA256 \
      | PROVIDER_HELPER_SERVER_AUTH_SIGALG_ECDSA_P256_SHA256)
+#define PROVIDER_HELPER_SERVER_AUTH_CLIENT_CRL_REQUIRED (1u << 0)
+#define PROVIDER_HELPER_SERVER_AUTH_FLAGS_SUPPORTED \
+    PROVIDER_HELPER_SERVER_AUTH_CLIENT_CRL_REQUIRED
 
 #define PROVIDER_HELPER_FEATURE_IKEV2_BASE (1ull << 0)
 
-#define PROVIDER_HELPER_IKEV2_MAJOR_VERSION 2
-#define PROVIDER_HELPER_IKEV2_MINOR_VERSION 0
-#define PROVIDER_HELPER_IKEV2_FLAG_INITIATOR 0x08
-#define PROVIDER_HELPER_IKEV2_FLAG_VERSION   0x10
-#define PROVIDER_HELPER_IKEV2_FLAG_RESPONSE  0x20
-#define PROVIDER_HELPER_IKEV2_PROPOSAL_MORE  2
-#define PROVIDER_HELPER_IKEV2_TRANSFORM_MORE 3
-#define PROVIDER_HELPER_IKEV2_PROTOCOL_IKE   1
-#define PROVIDER_HELPER_IKEV2_PROTOCOL_ESP   3
-#define PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR 1
-#define PROVIDER_HELPER_IKEV2_TRANSFORM_PRF  2
-#define PROVIDER_HELPER_IKEV2_TRANSFORM_INTEG 3
-#define PROVIDER_HELPER_IKEV2_TRANSFORM_DH   4
-#define PROVIDER_HELPER_IKEV2_TRANSFORM_ESN  5
-#define PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16 20
-#define PROVIDER_HELPER_IKEV2_PRF_HMAC_SHA2_256 5
-#define PROVIDER_HELPER_IKEV2_DH_ECP_256 19
-#define PROVIDER_HELPER_IKEV2_ESN_NO_EXTENDED 0
-#define PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH 14
-#define PROVIDER_HELPER_IKEV2_CFG_REQUEST 1
-#define PROVIDER_HELPER_IKEV2_CFG_REPLY   2
+#define PROVIDER_HELPER_IKEV2_MAJOR_VERSION                 2
+#define PROVIDER_HELPER_IKEV2_MINOR_VERSION                 0
+#define PROVIDER_HELPER_IKEV2_FLAG_INITIATOR                0x08
+#define PROVIDER_HELPER_IKEV2_FLAG_VERSION                  0x10
+#define PROVIDER_HELPER_IKEV2_FLAG_RESPONSE                 0x20
+#define PROVIDER_HELPER_IKEV2_PROPOSAL_MORE                 2
+#define PROVIDER_HELPER_IKEV2_TRANSFORM_MORE                3
+#define PROVIDER_HELPER_IKEV2_PROTOCOL_IKE                  1
+#define PROVIDER_HELPER_IKEV2_PROTOCOL_ESP                  3
+#define PROVIDER_HELPER_IKEV2_TRANSFORM_ENCR                1
+#define PROVIDER_HELPER_IKEV2_TRANSFORM_PRF                 2
+#define PROVIDER_HELPER_IKEV2_TRANSFORM_INTEG               3
+#define PROVIDER_HELPER_IKEV2_TRANSFORM_DH                  4
+#define PROVIDER_HELPER_IKEV2_TRANSFORM_ESN                 5
+#define PROVIDER_HELPER_IKEV2_ENCR_AES_GCM_16               20
+#define PROVIDER_HELPER_IKEV2_PRF_HMAC_SHA2_256             5
+#define PROVIDER_HELPER_IKEV2_DH_ECP_256                    19
+#define PROVIDER_HELPER_IKEV2_ESN_NO_EXTENDED               0
+#define PROVIDER_HELPER_IKEV2_ATTR_KEY_LENGTH               14
+#define PROVIDER_HELPER_IKEV2_CFG_REQUEST                   1
+#define PROVIDER_HELPER_IKEV2_CFG_REPLY                     2
 #define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_ADDRESS 1
 #define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_NETMASK 2
-#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_DNS 3
-#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_NBNS 4
-#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_DHCP 6
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_DNS     3
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_NBNS    4
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_DHCP    6
 #define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_ADDRESS 8
-#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_DNS 10
-#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_NBNS 11
-#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_DHCP 12
-#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_SUBNET 13
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_DNS     10
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_NBNS    11
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_DHCP    12
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP4_SUBNET  13
 #define PROVIDER_HELPER_IKEV2_CFG_ATTR_SUPPORTED_ATTRIBUTES 14
-#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_SUBNET 15
-#define PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES 64
-#define PROVIDER_HELPER_IKEV2_ID_IPV4_ADDR  1
-#define PROVIDER_HELPER_IKEV2_ID_FQDN       2
-#define PROVIDER_HELPER_IKEV2_ID_RFC822     3
+#define PROVIDER_HELPER_IKEV2_CFG_ATTR_INTERNAL_IP6_SUBNET  15
+#define PROVIDER_HELPER_IKEV2_ECP_256_PUBLIC_BYTES          64
+#define PROVIDER_HELPER_IKEV2_ID_IPV4_ADDR                  1
+#define PROVIDER_HELPER_IKEV2_ID_FQDN                       2
+#define PROVIDER_HELPER_IKEV2_ID_RFC822                     3
 
-#define PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_SAS 1024
-#define PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_PER_SOURCE 32
-#define PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_PER_PREFIX 128
-#define PROVIDER_HELPER_DEFAULT_COOKIE_THRESHOLD  128
-#define PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE   8192
-#define PROVIDER_HELPER_DEFAULT_MAX_CERT_BYTES    (64 * 1024)
-#define PROVIDER_HELPER_DEFAULT_MAX_CERT_DEPTH    4
-#define PROVIDER_HELPER_DEFAULT_MAX_EAP_TLS_BYTES (64 * 1024)
+#define PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_SAS             1024
+#define PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_PER_SOURCE      32
+#define PROVIDER_HELPER_DEFAULT_MAX_HALF_OPEN_PER_PREFIX      128
+#define PROVIDER_HELPER_DEFAULT_COOKIE_THRESHOLD              128
+#define PROVIDER_HELPER_DEFAULT_MAX_PACKET_SIZE               8192
+#define PROVIDER_HELPER_DEFAULT_MAX_CERT_BYTES                (64 * 1024)
+#define PROVIDER_HELPER_DEFAULT_MAX_CERT_DEPTH                4
+#define PROVIDER_HELPER_DEFAULT_MAX_EAP_TLS_BYTES             (64 * 1024)
 #define PROVIDER_HELPER_DEFAULT_MAX_EAP_TLS_TX_FRAGMENT_BYTES 1200
-#define PROVIDER_HELPER_DEFAULT_RETRANSMIT_LIMIT  5
-#define PROVIDER_HELPER_DEFAULT_WORKER_LIMIT      4
-#define PROVIDER_HELPER_DEFAULT_HALF_OPEN_TIMEOUT 30
-#define PROVIDER_HELPER_DEFAULT_DPD_IDLE_SECONDS  300
-#define PROVIDER_HELPER_DEFAULT_DPD_RETRY_SECONDS 30
+#define PROVIDER_HELPER_DEFAULT_RETRANSMIT_LIMIT              5
+#define PROVIDER_HELPER_DEFAULT_WORKER_LIMIT                  4
+#define PROVIDER_HELPER_DEFAULT_HALF_OPEN_TIMEOUT             30
+#define PROVIDER_HELPER_DEFAULT_DPD_IDLE_SECONDS              300
+#define PROVIDER_HELPER_DEFAULT_DPD_RETRY_SECONDS             30
 #define PROVIDER_HELPER_DEFAULT_MAX_SA_INIT_PER_SECOND        256
 #define PROVIDER_HELPER_DEFAULT_MAX_SA_INIT_PER_SOURCE_SECOND 32
-#define PROVIDER_HELPER_START_TIMEOUT_SECONDS     10
-#define PROVIDER_HELPER_PREFLIGHT_TIMEOUT_SECONDS 10
-#define PROVIDER_HELPER_RESTART_BACKOFF_INITIAL_SECONDS 1
-#define PROVIDER_HELPER_RESTART_BACKOFF_MAX_SECONDS     60
+#define PROVIDER_HELPER_START_TIMEOUT_SECONDS                 10
+#define PROVIDER_HELPER_PREFLIGHT_TIMEOUT_SECONDS             10
+#define PROVIDER_HELPER_HEARTBEAT_TIMEOUT_MS                  10000
+#define PROVIDER_HELPER_XFRM_DELETE_ACK_TIMEOUT_MS            1000
+#define PROVIDER_HELPER_RESTART_BACKOFF_INITIAL_SECONDS       1
+#define PROVIDER_HELPER_RESTART_BACKOFF_MAX_SECONDS           60
 
-enum provider_helper_state {
+enum provider_helper_state
+{
     PROVIDER_HELPER_STATE_DISABLED = 0,
     PROVIDER_HELPER_STATE_CONFIGURED,
     PROVIDER_HELPER_STATE_STARTING,
@@ -194,7 +210,17 @@ enum provider_helper_state {
     PROVIDER_HELPER_STATE_FAILED,
 };
 
-enum provider_helper_msg_type {
+enum provider_helper_xfrm_delete_state
+{
+    PROVIDER_HELPER_XFRM_DELETE_IDLE = 0,
+    PROVIDER_HELPER_XFRM_DELETE_PENDING,
+    PROVIDER_HELPER_XFRM_DELETE_ACKED,
+    PROVIDER_HELPER_XFRM_DELETE_FAILED,
+    PROVIDER_HELPER_XFRM_DELETE_TIMED_OUT,
+};
+
+enum provider_helper_msg_type
+{
     PROVIDER_HELPER_MSG_HELLO = 1,
     PROVIDER_HELPER_MSG_HELLO_REPLY,
     PROVIDER_HELPER_MSG_PING,
@@ -218,16 +244,26 @@ enum provider_helper_msg_type {
     PROVIDER_HELPER_MSG_SERVER_AUTH_CONFIG_ACK,
     PROVIDER_HELPER_MSG_SERVER_SIGN_REQUEST,
     PROVIDER_HELPER_MSG_SERVER_SIGN_RESPONSE,
+    PROVIDER_HELPER_MSG_CLIENT_TRUST_REFRESH_REQUEST,
+    PROVIDER_HELPER_MSG_CLIENT_TRUST_REFRESH_RESPONSE,
 };
 
-enum provider_helper_session_update_state {
+enum provider_helper_client_trust_refresh_status
+{
+    PROVIDER_HELPER_CLIENT_TRUST_REFRESH_OK = 1,
+    PROVIDER_HELPER_CLIENT_TRUST_REFRESH_FAILED = 2,
+};
+
+enum provider_helper_session_update_state
+{
     PROVIDER_HELPER_SESSION_UPDATE_STATE_UNCHANGED = 0,
     PROVIDER_HELPER_SESSION_UPDATE_STATE_AUTH_PENDING = 1,
     PROVIDER_HELPER_SESSION_UPDATE_STATE_ACTIVE = 2,
     PROVIDER_HELPER_SESSION_UPDATE_STATE_DRAINING = 3,
 };
 
-enum provider_helper_ipc_result {
+enum provider_helper_ipc_result
+{
     PROVIDER_HELPER_IPC_OK = 0,
     PROVIDER_HELPER_IPC_SHORT_HEADER,
     PROVIDER_HELPER_IPC_BAD_MAGIC,
@@ -237,14 +273,16 @@ enum provider_helper_ipc_result {
     PROVIDER_HELPER_IPC_SEQUENCE_ROLLBACK,
 };
 
-enum provider_helper_ikev2_exchange_type {
+enum provider_helper_ikev2_exchange_type
+{
     PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_SA_INIT = 34,
     PROVIDER_HELPER_IKEV2_EXCHANGE_IKE_AUTH = 35,
     PROVIDER_HELPER_IKEV2_EXCHANGE_CREATE_CHILD_SA = 36,
     PROVIDER_HELPER_IKEV2_EXCHANGE_INFORMATIONAL = 37,
 };
 
-enum provider_helper_ikev2_payload_type {
+enum provider_helper_ikev2_payload_type
+{
     PROVIDER_HELPER_IKEV2_PAYLOAD_NONE = 0,
     PROVIDER_HELPER_IKEV2_PAYLOAD_SA = 33,
     PROVIDER_HELPER_IKEV2_PAYLOAD_KE = 34,
@@ -265,28 +303,29 @@ enum provider_helper_ikev2_payload_type {
     PROVIDER_HELPER_IKEV2_PAYLOAD_SKF = 53,
 };
 
-#define PROVIDER_HELPER_IKEV2_NOTIFY_NO_PROPOSAL_CHOSEN 14
-#define PROVIDER_HELPER_IKEV2_NOTIFY_INVALID_KE_PAYLOAD 17
-#define PROVIDER_HELPER_IKEV2_NOTIFY_AUTHENTICATION_FAILED 24
-#define PROVIDER_HELPER_IKEV2_NOTIFY_NO_ADDITIONAL_SAS 35
-#define PROVIDER_HELPER_IKEV2_NOTIFY_TS_UNACCEPTABLE 38
-#define PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE 43
-#define PROVIDER_HELPER_IKEV2_NOTIFY_CHILD_SA_NOT_FOUND 44
-#define PROVIDER_HELPER_IKEV2_NOTIFY_NAT_DETECTION_SOURCE_IP 16388
+#define PROVIDER_HELPER_IKEV2_NOTIFY_NO_PROPOSAL_CHOSEN           14
+#define PROVIDER_HELPER_IKEV2_NOTIFY_INVALID_KE_PAYLOAD           17
+#define PROVIDER_HELPER_IKEV2_NOTIFY_AUTHENTICATION_FAILED        24
+#define PROVIDER_HELPER_IKEV2_NOTIFY_NO_ADDITIONAL_SAS            35
+#define PROVIDER_HELPER_IKEV2_NOTIFY_TS_UNACCEPTABLE              38
+#define PROVIDER_HELPER_IKEV2_NOTIFY_TEMPORARY_FAILURE            43
+#define PROVIDER_HELPER_IKEV2_NOTIFY_CHILD_SA_NOT_FOUND           44
+#define PROVIDER_HELPER_IKEV2_NOTIFY_NAT_DETECTION_SOURCE_IP      16388
 #define PROVIDER_HELPER_IKEV2_NOTIFY_NAT_DETECTION_DESTINATION_IP 16389
-#define PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE 16390
-#define PROVIDER_HELPER_IKEV2_NOTIFY_REKEY_SA 16393
-#define PROVIDER_HELPER_IKEV2_NOTIFY_MOBIKE_SUPPORTED 16396
-#define PROVIDER_HELPER_IKEV2_NOTIFY_ADDITIONAL_IP4_ADDRESS 16397
-#define PROVIDER_HELPER_IKEV2_NOTIFY_ADDITIONAL_IP6_ADDRESS 16398
-#define PROVIDER_HELPER_IKEV2_NOTIFY_UPDATE_SA_ADDRESSES 16400
-#define PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE2 16401
-#define PROVIDER_HELPER_IKEV2_NOTIFY_NO_NATS_ALLOWED 16402
-#define PROVIDER_HELPER_IKEV2_NOTIFY_FRAGMENTATION_SUPPORTED 16430
-#define PROVIDER_HELPER_IKEV2_NOTIFY_SIGNATURE_HASH_ALGORITHMS 16431
-#define PROVIDER_HELPER_IKEV2_HASH_ALGORITHM_SHA2_256 2
+#define PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE                       16390
+#define PROVIDER_HELPER_IKEV2_NOTIFY_REKEY_SA                     16393
+#define PROVIDER_HELPER_IKEV2_NOTIFY_MOBIKE_SUPPORTED             16396
+#define PROVIDER_HELPER_IKEV2_NOTIFY_ADDITIONAL_IP4_ADDRESS       16397
+#define PROVIDER_HELPER_IKEV2_NOTIFY_ADDITIONAL_IP6_ADDRESS       16398
+#define PROVIDER_HELPER_IKEV2_NOTIFY_UPDATE_SA_ADDRESSES          16400
+#define PROVIDER_HELPER_IKEV2_NOTIFY_COOKIE2                      16401
+#define PROVIDER_HELPER_IKEV2_NOTIFY_NO_NATS_ALLOWED              16402
+#define PROVIDER_HELPER_IKEV2_NOTIFY_FRAGMENTATION_SUPPORTED      16430
+#define PROVIDER_HELPER_IKEV2_NOTIFY_SIGNATURE_HASH_ALGORITHMS    16431
+#define PROVIDER_HELPER_IKEV2_HASH_ALGORITHM_SHA2_256             2
 
-enum provider_helper_ikev2_parse_result {
+enum provider_helper_ikev2_parse_result
+{
     PROVIDER_HELPER_IKEV2_PARSE_OK = 0,
     PROVIDER_HELPER_IKEV2_PARSE_TOO_SHORT,
     PROVIDER_HELPER_IKEV2_PARSE_OVERSIZE,
@@ -305,32 +344,38 @@ enum provider_helper_ikev2_parse_result {
     PROVIDER_HELPER_IKEV2_PARSE_INVALID_KE_PAYLOAD,
 };
 
-enum provider_helper_auth_profile {
+enum provider_helper_auth_profile
+{
     PROVIDER_HELPER_AUTH_PROFILE_EAP_TLS = 1,
 };
 
-enum provider_helper_auth_decision {
+enum provider_helper_auth_decision
+{
     PROVIDER_HELPER_AUTH_DENY = 1,
     PROVIDER_HELPER_AUTH_ALLOW = 2,
 };
 
-enum provider_helper_server_auth_method {
+enum provider_helper_server_auth_method
+{
     PROVIDER_HELPER_SERVER_AUTH_METHOD_ECDSA_SHA256_P256 = 9,
     PROVIDER_HELPER_SERVER_AUTH_METHOD_DIGITAL_SIGNATURE = 14,
 };
 
-enum provider_helper_server_sign_purpose {
+enum provider_helper_server_sign_purpose
+{
     PROVIDER_HELPER_SERVER_SIGN_PURPOSE_IKE_AUTH = 1,
     PROVIDER_HELPER_SERVER_SIGN_PURPOSE_EAP_TLS_CERTIFICATE_VERIFY = 2,
     PROVIDER_HELPER_SERVER_SIGN_PURPOSE_EAP_TLS12_SERVER_KEY_EXCHANGE = 3,
 };
 
-enum provider_helper_server_sign_status {
+enum provider_helper_server_sign_status
+{
     PROVIDER_HELPER_SERVER_SIGN_OK = 1,
     PROVIDER_HELPER_SERVER_SIGN_FAILED = 2,
 };
 
-struct provider_helper_msg_header {
+struct provider_helper_msg_header
+{
     uint32_t magic;
     uint16_t version_major;
     uint16_t version_minor;
@@ -342,7 +387,8 @@ struct provider_helper_msg_header {
     uint32_t reserved;
 };
 
-struct provider_helper_auth_request {
+struct provider_helper_auth_request
+{
     uint64_t request_id;
     uint64_t initiator_spi;
     uint64_t responder_spi;
@@ -360,7 +406,8 @@ struct provider_helper_auth_request {
     char cert_issuer[PROVIDER_HELPER_AUTH_ISSUER_SIZE];
 };
 
-struct provider_helper_auth_response {
+struct provider_helper_auth_response
+{
     uint64_t request_id;
     uint64_t provider_session_id;
     uint64_t xfrm_lease_id;
@@ -372,7 +419,8 @@ struct provider_helper_auth_response {
     char reason[PROVIDER_HELPER_AUTH_REASON_SIZE];
 };
 
-struct provider_helper_session_close {
+struct provider_helper_session_close
+{
     uint64_t provider_session_id;
     uint64_t xfrm_lease_id;
     uint64_t policy_revision;
@@ -383,7 +431,8 @@ struct provider_helper_session_close {
     char reason[PROVIDER_HELPER_SESSION_CLOSE_REASON_SIZE];
 };
 
-struct provider_helper_session_update {
+struct provider_helper_session_update
+{
     uint64_t provider_session_id;
     uint64_t xfrm_lease_id;
     uint64_t policy_revision;
@@ -401,19 +450,25 @@ struct provider_helper_session_update {
     char child_sa_state[PROVIDER_HELPER_SESSION_STATE_TEXT_SIZE];
 };
 
-struct provider_helper_server_auth_config {
+struct provider_helper_server_auth_config
+{
     uint64_t config_revision;
     uint32_t ikev2_id_type;
     uint32_t server_id_len;
     uint32_t cert_chain_len;
+    uint32_t client_ca_bundle_len;
+    uint32_t client_crl_bundle_len;
     uint32_t allowed_sigalgs;
     uint32_t flags;
     uint32_t reserved;
     char server_id[PROVIDER_HELPER_SERVER_AUTH_ID_SIZE];
     uint8_t cert_chain[PROVIDER_HELPER_SERVER_AUTH_CERT_CHAIN_SIZE];
+    uint8_t client_ca_bundle[PROVIDER_HELPER_CLIENT_CA_BUNDLE_SIZE];
+    uint8_t client_crl_bundle[PROVIDER_HELPER_CLIENT_CRL_BUNDLE_SIZE];
 };
 
-struct provider_helper_server_sign_request {
+struct provider_helper_server_sign_request
+{
     uint64_t request_id;
     uint64_t initiator_spi;
     uint64_t responder_spi;
@@ -427,7 +482,8 @@ struct provider_helper_server_sign_request {
     uint8_t transcript[PROVIDER_HELPER_SERVER_AUTH_TRANSCRIPT_SIZE];
 };
 
-struct provider_helper_server_sign_response {
+struct provider_helper_server_sign_response
+{
     uint64_t request_id;
     uint64_t config_revision;
     uint32_t status;
@@ -439,7 +495,25 @@ struct provider_helper_server_sign_response {
     uint8_t signature[PROVIDER_HELPER_SERVER_AUTH_SIGNATURE_SIZE];
 };
 
-struct provider_helper_feature_set {
+struct provider_helper_client_trust_refresh_request
+{
+    uint64_t request_id;
+    uint64_t config_revision;
+};
+
+struct provider_helper_client_trust_refresh_response
+{
+    uint64_t request_id;
+    uint64_t config_revision;
+    uint32_t status;
+    uint32_t reason_len;
+    uint32_t flags;
+    uint32_t reserved;
+    char reason[PROVIDER_HELPER_CLIENT_TRUST_REFRESH_REASON_SIZE];
+};
+
+struct provider_helper_feature_set
+{
     uint64_t mandatory_features;
     uint64_t optional_features;
 };
@@ -462,7 +536,13 @@ typedef bool (*provider_helper_server_sign_request_cb)(
     const struct provider_helper_server_sign_request *request,
     struct provider_helper_server_sign_response *response);
 
-struct provider_helper_runtime_config {
+typedef bool (*provider_helper_client_trust_refresh_request_cb)(
+    void *arg,
+    const struct provider_helper_client_trust_refresh_request *request,
+    struct provider_helper_client_trust_refresh_response *response);
+
+struct provider_helper_runtime_config
+{
     uint32_t flags;
     uint32_t max_half_open_sas;
     uint32_t cookie_threshold;
@@ -482,7 +562,8 @@ struct provider_helper_runtime_config {
     uint32_t dpd_retry_seconds;
 };
 
-struct provider_helper_listener_fd {
+struct provider_helper_listener_fd
+{
     uint32_t listener_id;
     uint32_t family;
     uint32_t socket_type;
@@ -491,7 +572,8 @@ struct provider_helper_listener_fd {
     uint32_t flags;
 };
 
-struct provider_helper_runtime_stats {
+struct provider_helper_runtime_stats
+{
     uint64_t datagrams_rx;
     uint64_t datagrams_parsed;
     uint64_t datagrams_malformed;
@@ -620,7 +702,8 @@ struct provider_helper_runtime_stats {
     uint64_t ike_child_sa_xfrm_delete_failed;
 };
 
-struct provider_helper_xfrm_lease {
+struct provider_helper_xfrm_lease
+{
     uint64_t lease_id;
     uint64_t provider_session_id;
     uint64_t policy_revision;
@@ -646,7 +729,8 @@ struct provider_helper_xfrm_lease {
     uint32_t reserved;
 };
 
-struct provider_helper_ikev2_header {
+struct provider_helper_ikev2_header
+{
     uint64_t initiator_spi;
     uint64_t responder_spi;
     uint32_t message_id;
@@ -660,7 +744,8 @@ struct provider_helper_ikev2_header {
     size_t header_offset;
 };
 
-struct provider_helper_ikev2_payload_summary {
+struct provider_helper_ikev2_payload_summary
+{
     uint32_t payload_count;
     bool saw_sa;
     bool saw_ke;
@@ -729,7 +814,8 @@ struct provider_helper_ikev2_payload_summary {
     size_t cookie_len;
 };
 
-struct provider_helper_ikev2_eap_tls_fragment {
+struct provider_helper_ikev2_eap_tls_fragment
+{
     bool length_included;
     bool more_fragments;
     uint32_t tls_message_len;
@@ -737,7 +823,8 @@ struct provider_helper_ikev2_eap_tls_fragment {
     size_t fragment_len;
 };
 
-struct provider_helper_ikev2_sa_selection {
+struct provider_helper_ikev2_sa_selection
+{
     bool selected;
     uint8_t proposal_number;
     uint16_t encr_id;
@@ -747,7 +834,8 @@ struct provider_helper_ikev2_sa_selection {
     uint16_t dh_id;
 };
 
-struct provider_helper_ikev2_child_sa_selection {
+struct provider_helper_ikev2_child_sa_selection
+{
     bool selected;
     uint8_t proposal_number;
     uint32_t initiator_spi;
@@ -766,7 +854,12 @@ typedef bool (*provider_helper_ikev2_cookie_mac_fn)(
     uint8_t *tag,
     size_t tag_len);
 
-struct provider_helper_supervisor {
+typedef bool (*provider_helper_monotonic_ms_fn)(void *arg, uint64_t *now_ms);
+typedef int (*provider_helper_wait_readable_fn)(void *arg, int fd,
+                                                int timeout_ms);
+
+struct provider_helper_supervisor
+{
     enum provider_helper_state state;
     int ipc_fd;
 #ifndef _WIN32
@@ -774,6 +867,18 @@ struct provider_helper_supervisor {
 #endif
     uint64_t next_tx_sequence;
     uint64_t last_rx_sequence;
+    uint64_t server_auth_config_pending_correlation_id;
+    uint64_t server_auth_config_ack_correlation_id;
+    uint64_t server_auth_config_pending_revision;
+    uint64_t server_auth_config_ack_revision;
+    enum provider_helper_xfrm_delete_state xfrm_delete_state;
+    uint64_t xfrm_delete_pending_sequence;
+    uint64_t xfrm_delete_ack_sequence;
+    uint64_t xfrm_delete_stale_acks;
+    uint64_t heartbeat_pending_sequence;
+    uint64_t heartbeat_ack_sequence;
+    uint64_t heartbeat_deadline_ms;
+    uint64_t heartbeat_stale_acks;
     uint32_t max_message_size;
     uint64_t supported_features;
     uint64_t negotiated_features;
@@ -794,6 +899,9 @@ struct provider_helper_supervisor {
     uint8_t payload_buf[PROVIDER_HELPER_IPC_MAX_MESSAGE];
     size_t payload_len;
     size_t payload_received;
+    provider_helper_monotonic_ms_fn monotonic_ms_fn;
+    provider_helper_wait_readable_fn wait_readable_fn;
+    void *time_wait_arg;
     provider_helper_auth_request_cb auth_request_cb;
     void *auth_request_arg;
     provider_helper_session_close_cb session_close_cb;
@@ -802,6 +910,9 @@ struct provider_helper_supervisor {
     void *session_update_arg;
     provider_helper_server_sign_request_cb server_sign_request_cb;
     void *server_sign_request_arg;
+    provider_helper_client_trust_refresh_request_cb
+        client_trust_refresh_request_cb;
+    void *client_trust_refresh_request_arg;
 };
 
 struct status_output;
@@ -810,6 +921,7 @@ const char *provider_helper_state_name(enum provider_helper_state state);
 const char *provider_helper_ipc_result_name(enum provider_helper_ipc_result result);
 const char *provider_helper_ikev2_parse_result_name(
     enum provider_helper_ikev2_parse_result result);
+bool provider_helper_revision_next(uint64_t current, uint64_t *next);
 
 void provider_helper_supervisor_init(struct provider_helper_supervisor *supervisor);
 void provider_helper_supervisor_free(struct provider_helper_supervisor *supervisor);
@@ -830,6 +942,10 @@ void provider_helper_supervisor_set_session_update_callback(
 void provider_helper_supervisor_set_server_sign_callback(
     struct provider_helper_supervisor *supervisor,
     provider_helper_server_sign_request_cb cb,
+    void *arg);
+void provider_helper_supervisor_set_client_trust_refresh_callback(
+    struct provider_helper_supervisor *supervisor,
+    provider_helper_client_trust_refresh_request_cb cb,
     void *arg);
 void provider_helper_runtime_config_default(struct provider_helper_runtime_config *config);
 bool provider_helper_runtime_config_valid(const struct provider_helper_runtime_config *config,
@@ -950,6 +1066,12 @@ bool provider_helper_ipc_write_server_sign_request(
 bool provider_helper_ipc_write_server_sign_response(
     struct buffer *buf,
     const struct provider_helper_server_sign_response *response);
+bool provider_helper_ipc_write_client_trust_refresh_request(
+    struct buffer *buf,
+    const struct provider_helper_client_trust_refresh_request *request);
+bool provider_helper_ipc_write_client_trust_refresh_response(
+    struct buffer *buf,
+    const struct provider_helper_client_trust_refresh_response *response);
 bool provider_helper_ipc_encode_runtime_config(uint8_t *dst, size_t dst_len,
                                                const struct provider_helper_runtime_config *config);
 bool provider_helper_ipc_decode_runtime_config(const uint8_t *src, size_t src_len,
@@ -1022,6 +1144,30 @@ bool provider_helper_ipc_decode_server_sign_response(
     const uint8_t *src,
     size_t src_len,
     struct provider_helper_server_sign_response *response);
+bool provider_helper_client_trust_refresh_request_valid(
+    const struct provider_helper_client_trust_refresh_request *request,
+    char *reason,
+    size_t reason_size);
+bool provider_helper_client_trust_refresh_response_valid(
+    const struct provider_helper_client_trust_refresh_response *response,
+    char *reason,
+    size_t reason_size);
+bool provider_helper_ipc_encode_client_trust_refresh_request(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_client_trust_refresh_request *request);
+bool provider_helper_ipc_decode_client_trust_refresh_request(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_client_trust_refresh_request *request);
+bool provider_helper_ipc_encode_client_trust_refresh_response(
+    uint8_t *dst,
+    size_t dst_len,
+    const struct provider_helper_client_trust_refresh_response *response);
+bool provider_helper_ipc_decode_client_trust_refresh_response(
+    const uint8_t *src,
+    size_t src_len,
+    struct provider_helper_client_trust_refresh_response *response);
 enum provider_helper_ikev2_parse_result
 provider_helper_ikev2_parse_header(const uint8_t *packet,
                                    size_t packet_len,
@@ -1163,6 +1309,17 @@ bool provider_helper_supervisor_send_xfrm_lease_delete(
     struct provider_helper_supervisor *supervisor,
     const struct provider_helper_xfrm_lease *lease,
     uint64_t correlation_id);
+bool provider_helper_supervisor_send_xfrm_lease_delete_tracked(
+    struct provider_helper_supervisor *supervisor,
+    const struct provider_helper_xfrm_lease *lease,
+    uint64_t correlation_id,
+    uint64_t *request_sequence);
+bool provider_helper_supervisor_wait_xfrm_lease_delete_ack(
+    struct provider_helper_supervisor *supervisor,
+    uint64_t request_sequence,
+    unsigned int timeout_ms,
+    char *reason,
+    size_t reason_size);
 #endif
 bool provider_helper_supervisor_send_server_auth_config(
     struct provider_helper_supervisor *supervisor,
@@ -1171,6 +1328,8 @@ bool provider_helper_supervisor_send_server_auth_config(
 bool provider_helper_supervisor_send_stats_request(
     struct provider_helper_supervisor *supervisor,
     uint64_t correlation_id);
+bool provider_helper_supervisor_send_heartbeat(
+    struct provider_helper_supervisor *supervisor);
 void provider_helper_supervisor_stop(struct provider_helper_supervisor *supervisor);
 void provider_helper_event_set(struct provider_helper_supervisor *supervisor,
                                struct event_set *es,

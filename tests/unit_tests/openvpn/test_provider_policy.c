@@ -27,6 +27,7 @@
 #include "plugin.h"
 #include "provider_policy.h"
 #include "pushlist.h"
+#include "ssl_common.h"
 #include "test_common.h"
 
 static const char test_revocation_fingerprint[] =
@@ -46,7 +47,7 @@ static const char test_revocation_cert_issuer[] = "CN=Example CA,O=OpenVPN Test"
 static struct push_entry
 push_entry(const char *option)
 {
-    return (struct push_entry) {
+    return (struct push_entry){
         .enable = true,
         .option = option,
     };
@@ -77,6 +78,52 @@ test_provider_policy_accepts_empty_policy(void **state)
     assert_true(provider_policy_preflight(&options, NULL, &result));
     assert_int_equal(result.status, PROVIDER_POLICY_PREFLIGHT_OK);
     assert_string_equal(result.reason, "ok");
+}
+
+static void
+test_provider_policy_openvpn_gate_config(void **state)
+{
+    (void)state;
+
+    struct options options;
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    CLEAR(options);
+    assert_true(provider_policy_openvpn_config_valid(
+        &options, reason, sizeof(reason)));
+
+    options.provider_policy_openvpn = true;
+    assert_false(provider_policy_openvpn_config_valid(
+        &options, reason, sizeof(reason)));
+#if defined(ENABLE_CRYPTO_OPENSSL)
+    assert_non_null(strstr(reason, "allow fingerprint file"));
+    options.ikev2_helper_allow_file = "/tmp/allow";
+    assert_false(provider_policy_openvpn_config_valid(
+        &options, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "fingerprint revocation file"));
+    options.ikev2_helper_revocation_file = "/tmp/revoked-fingerprints";
+    assert_false(provider_policy_openvpn_config_valid(
+        &options, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "principal revocation file"));
+    options.ikev2_helper_principal_revocation_file =
+        "/tmp/revoked-principals";
+    assert_false(provider_policy_openvpn_config_valid(
+        &options, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "certificate revocation file"));
+    options.ikev2_helper_cert_revocation_file = "/tmp/revoked-certs";
+    options.ssl_flags = SSLF_CLIENT_CERT_OPTIONAL;
+    assert_false(provider_policy_openvpn_config_valid(
+        &options, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "requires client certificates"));
+    options.ssl_flags = 0;
+    assert_true(provider_policy_openvpn_config_valid(
+        &options, reason, sizeof(reason)));
+    options.ssl_flags = SSLF_USERNAME_AS_COMMON_NAME;
+    assert_false(provider_policy_openvpn_config_valid(
+        &options, reason, sizeof(reason)));
+    assert_non_null(strstr(reason, "username-as-common-name"));
+#else
+    assert_non_null(strstr(reason, "OpenSSL"));
+#endif
 }
 
 static void
@@ -150,16 +197,20 @@ test_provider_policy_validates_push_options(void **state)
 
     struct provider_policy_preflight result;
     struct push_entry route = push_entry("route 10.0.0.0 255.255.255.0");
-    struct push_entry dns = push_entry("dhcp-option DNS 10.0.0.53");
+    struct push_entry dns = push_entry("dhcp-option DNS 10.189.0.1");
     struct push_entry route_gateway = push_entry("route-gateway 10.0.0.1");
     struct push_entry topology = push_entry("topology subnet");
+    struct push_entry ping = push_entry("ping 10");
+    struct push_entry ping_restart = push_entry("ping-restart 60");
     route.next = &dns;
     dns.next = &route_gateway;
     route_gateway.next = &topology;
+    topology.next = &ping;
+    ping.next = &ping_restart;
 
     struct push_list allowed = {
         .head = &route,
-        .tail = &topology,
+        .tail = &ping_restart,
     };
 
     assert_true(provider_policy_validate_push_list(&allowed, &result));
@@ -175,6 +226,30 @@ test_provider_policy_validates_push_options(void **state)
     assert_int_equal(result.status,
                      PROVIDER_POLICY_PREFLIGHT_UNSUPPORTED_PUSH_OPTION);
     assert_non_null(strstr(result.reason, "compress stub-v2"));
+
+    const char *invalid_liveness_options[] = {
+        "ping 0",
+        "ping -1",
+        "ping ten",
+        "ping 999999999999999999999999",
+        "ping 10 extra",
+        "ping-restart 0",
+        "ping-exit 60",
+    };
+    for (size_t i = 0; i < SIZE(invalid_liveness_options); ++i)
+    {
+        struct push_entry invalid = push_entry(invalid_liveness_options[i]);
+        struct push_list invalid_liveness = {
+            .head = &invalid,
+            .tail = &invalid,
+        };
+
+        assert_false(provider_policy_push_option_supported(invalid.option));
+        assert_false(provider_policy_validate_push_list(&invalid_liveness, &result));
+        assert_int_equal(result.status,
+                         PROVIDER_POLICY_PREFLIGHT_UNSUPPORTED_PUSH_OPTION);
+        assert_non_null(strstr(result.reason, invalid.option));
+    }
 }
 
 static void
@@ -187,15 +262,21 @@ test_provider_policy_builds_no_artifacts_for_openvpn_client_hints(void **state)
 
     struct push_entry route_gateway = push_entry("route-gateway 10.0.0.1");
     struct push_entry topology = push_entry("topology subnet");
+    struct push_entry ping = push_entry("ping 10");
+    struct push_entry ping_restart = push_entry("ping-restart 60");
     route_gateway.next = &topology;
+    topology.next = &ping;
+    ping.next = &ping_restart;
 
     struct push_list list = {
         .head = &route_gateway,
-        .tail = &topology,
+        .tail = &ping_restart,
     };
 
     assert_true(provider_policy_push_option_supported(route_gateway.option));
     assert_true(provider_policy_push_option_supported(topology.option));
+    assert_true(provider_policy_push_option_supported(ping.option));
+    assert_true(provider_policy_push_option_supported(ping_restart.option));
     assert_true(provider_policy_build_artifacts(&list, &artifacts, &result));
     assert_int_equal(result.status, PROVIDER_POLICY_PREFLIGHT_OK);
     assert_int_equal(artifacts.selector_count, 0);
@@ -211,12 +292,16 @@ test_provider_policy_builds_route_dns_artifacts(void **state)
     struct provider_policy_preflight result;
 
     struct push_entry route = push_entry("route 10.0.0.0 255.255.255.0");
-    struct push_entry dns = push_entry("dhcp-option DNS 10.0.0.53");
+    struct push_entry dns = push_entry("dhcp-option DNS 10.189.0.1");
+    struct push_entry ping = push_entry("ping 10");
+    struct push_entry ping_restart = push_entry("ping-restart 60");
     route.next = &dns;
+    dns.next = &ping;
+    ping.next = &ping_restart;
 
     struct push_list list = {
         .head = &route,
-        .tail = &dns,
+        .tail = &ping_restart,
     };
 
     assert_true(provider_policy_build_artifacts(&list, &artifacts, &result));
@@ -224,7 +309,7 @@ test_provider_policy_builds_route_dns_artifacts(void **state)
     assert_int_equal(artifacts.selector_count, 1);
     assert_string_equal(artifacts.selectors[0], "10.0.0.0/24");
     assert_int_equal(artifacts.dns_server_count, 1);
-    assert_string_equal(artifacts.dns_servers[0], "10.0.0.53");
+    assert_string_equal(artifacts.dns_servers[0], "10.189.0.1");
 }
 
 static void
@@ -411,7 +496,8 @@ test_provider_policy_revocation_file_load(void **state)
                         "%s\n"
                         "%s\n",
                         test_revocation_fingerprint,
-                        test_fingerprint_a_upper, test_fingerprint_a) > 0);
+                        test_fingerprint_a_upper, test_fingerprint_a)
+                > 0);
     assert_int_equal(fclose(fp), 0);
 
     struct provider_policy_fingerprint_list list = { 0 };
@@ -449,6 +535,9 @@ test_provider_policy_revocation_file_rejects_invalid(void **state)
         &list, path, reason, sizeof(reason), NULL));
     assert_non_null(strstr(reason, "invalid fingerprint"));
     assert_false(provider_policy_fingerprint_list_defined(&list));
+    assert_false(provider_policy_fingerprint_list_load_named_runtime_required(
+        &list, path, "allow fingerprint file", reason, sizeof(reason), NULL));
+    assert_non_null(strstr(reason, "invalid fingerprint"));
 
     assert_int_equal(unlink(path), 0);
 }
@@ -567,8 +656,15 @@ test_provider_policy_principal_revocation_list(void **state)
     (void)state;
 
     assert_true(provider_policy_principal_valid(test_revocation_principal));
+    assert_true(provider_policy_principal_valid("Alice@Example.Test"));
     assert_false(provider_policy_principal_valid(""));
     assert_false(provider_policy_principal_valid("alice example.test"));
+    assert_false(provider_policy_principal_valid("alice#example.test"));
+
+    char canonical[PROVIDER_POLICY_PRINCIPAL_SIZE];
+    assert_true(provider_policy_principal_canonicalize(
+        "Alice@Example.Test", canonical, sizeof(canonical)));
+    assert_string_equal(canonical, test_revocation_principal);
 
     struct provider_policy_principal_list list = { 0 };
     assert_false(provider_policy_principal_list_defined(&list));
@@ -578,7 +674,7 @@ test_provider_policy_principal_revocation_list(void **state)
     assert_int_equal(list.count, 1);
     assert_true(provider_policy_principal_list_contains(
         &list, test_revocation_principal));
-    assert_false(provider_policy_principal_list_contains(
+    assert_true(provider_policy_principal_list_contains(
         &list, "Alice@example.test"));
 
     assert_true(provider_policy_principal_list_add_runtime(
@@ -605,11 +701,11 @@ test_provider_policy_principal_revocation_file_load(void **state)
     assert_true(fprintf(fp,
                         "# comment\n"
                         "\n"
-                        "  %s  # inline comment\n"
+                        "  Alice@Example.Test  \n"
                         "bob@example.test\n"
                         "%s\n",
-                        test_revocation_principal,
-                        test_revocation_principal) > 0);
+                        test_revocation_principal)
+                > 0);
     assert_int_equal(fclose(fp), 0);
 
     struct provider_policy_principal_list list = { 0 };
@@ -647,6 +743,17 @@ test_provider_policy_principal_revocation_file_rejects_invalid(void **state)
         &list, path, reason, sizeof(reason), NULL));
     assert_non_null(strstr(reason, "invalid principal"));
     assert_false(provider_policy_principal_list_defined(&list));
+    assert_false(provider_policy_principal_list_load_runtime_required(
+        &list, path, reason, sizeof(reason), NULL));
+    assert_non_null(strstr(reason, "invalid principal"));
+
+    fp = fopen(path, "w");
+    assert_non_null(fp);
+    assert_true(fprintf(fp, "alice#example.test\n") > 0);
+    assert_int_equal(fclose(fp), 0);
+    assert_false(provider_policy_principal_list_load_runtime_required(
+        &list, path, reason, sizeof(reason), NULL));
+    assert_non_null(strstr(reason, "invalid principal"));
 
     assert_int_equal(unlink(path), 0);
 }
@@ -663,8 +770,17 @@ test_provider_policy_principal_revocation_file_append(void **state)
 
     char reason[PROVIDER_POLICY_REASON_SIZE];
     assert_true(provider_policy_principal_list_append_file(
-        path, test_revocation_principal, reason, sizeof(reason)));
+        path, "Alice@Example.Test", reason, sizeof(reason)));
     assert_string_equal(reason, "ok");
+    assert_false(provider_policy_principal_list_append_file(
+        path, "alice#example.test", reason, sizeof(reason)));
+
+    FILE *fp = fopen(path, "r");
+    assert_non_null(fp);
+    char persisted[PROVIDER_POLICY_PRINCIPAL_SIZE + 2];
+    assert_non_null(fgets(persisted, sizeof(persisted), fp));
+    assert_string_equal(persisted, "alice@example.test\n");
+    assert_int_equal(fclose(fp), 0);
 
     struct provider_policy_principal_list list = { 0 };
     size_t loaded_count = 0;
@@ -673,6 +789,8 @@ test_provider_policy_principal_revocation_file_append(void **state)
     assert_int_equal(loaded_count, 1);
     assert_true(provider_policy_principal_list_contains(
         &list, test_revocation_principal));
+    assert_true(provider_policy_principal_list_contains(
+        &list, "ALICE@EXAMPLE.TEST"));
 
     provider_policy_principal_list_free_runtime(&list);
     assert_int_equal(unlink(path), 0);
@@ -731,7 +849,8 @@ test_provider_policy_cert_revocation_file_load(void **state)
                         test_revocation_cert_serial,
                         test_revocation_cert_issuer,
                         test_revocation_cert_serial,
-                        test_revocation_cert_issuer) > 0);
+                        test_revocation_cert_issuer)
+                > 0);
     assert_int_equal(fclose(fp), 0);
 
     struct provider_policy_cert_list list = { 0 };
@@ -769,6 +888,9 @@ test_provider_policy_cert_revocation_file_rejects_invalid(void **state)
         &list, path, reason, sizeof(reason), NULL));
     assert_non_null(strstr(reason, "missing issuer"));
     assert_false(provider_policy_cert_list_defined(&list));
+    assert_false(provider_policy_cert_list_load_runtime_required(
+        &list, path, reason, sizeof(reason), NULL));
+    assert_non_null(strstr(reason, "missing issuer"));
 
     assert_int_equal(unlink(path), 0);
 }
@@ -899,7 +1021,7 @@ test_provider_policy_authorize_rejects_revoked_principal(void **state)
     };
     struct provider_policy_auth_context context = {
         .profile_mode = PROVIDER_POLICY_PROFILE_EAP_TLS,
-        .principal = test_revocation_principal,
+        .principal = "Alice@Example.Test",
         .credential_fingerprint = test_fingerprint_a_upper,
         .cert_serial = "1234",
         .cert_issuer = "CN=Example CA",
@@ -985,11 +1107,165 @@ test_provider_policy_authorize_allowlisted_fingerprint(void **state)
     assert_string_equal(result.reason, "authorized");
 }
 
+static void
+test_provider_policy_required_allow_file_empty_bootstrap(void **state)
+{
+    (void)state;
+
+    char path[] = "provider-policy-empty-allow-XXXXXX";
+    const int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    close(fd);
+
+    struct provider_policy_fingerprint_list allowed = { 0 };
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    size_t loaded_count = 99;
+    assert_true(provider_policy_fingerprint_list_load_named_runtime_required(
+        &allowed, path, "allow fingerprint file", reason, sizeof(reason),
+        &loaded_count));
+    assert_int_equal(loaded_count, 0);
+    assert_false(provider_policy_fingerprint_list_defined(&allowed));
+
+    struct provider_policy_auth_context context = {
+        .profile_mode = PROVIDER_POLICY_PROFILE_OPENVPN_TLS,
+        .principal = "Alice@Example.Test",
+        .credential_fingerprint = test_fingerprint_a,
+        .cert_serial = test_revocation_cert_serial,
+        .cert_issuer = test_revocation_cert_issuer,
+        .allowed_fingerprints = &allowed,
+        .policy_revision = 7,
+    };
+    struct provider_policy_identity identity;
+    struct provider_policy_auth_result result;
+    assert_false(provider_policy_identity_authorize(&context, &identity,
+                                                    &result));
+    assert_false(identity.ready);
+    assert_non_null(strstr(result.reason, "not allowed"));
+
+    uint64_t revision = 7;
+    assert_true(provider_policy_allow_fingerprint(
+        &allowed, NULL, path, test_fingerprint_a, &revision, reason,
+        sizeof(reason)));
+    assert_int_equal(revision, 8);
+    context.policy_revision = revision;
+    assert_true(provider_policy_identity_authorize(&context, &identity,
+                                                   &result));
+    assert_true(identity.ready);
+    assert_string_equal(identity.principal, test_revocation_principal);
+    assert_true(provider_policy_identity_matches_fingerprint(
+        &identity, test_fingerprint_a_upper));
+    assert_true(provider_policy_identity_matches_principal(
+        &identity, "ALICE@EXAMPLE.TEST"));
+    assert_true(provider_policy_identity_matches_cert(
+        &identity, "01ab", test_revocation_cert_issuer));
+
+    struct provider_policy_fingerprint_list revoked = { 0 };
+    assert_true(provider_policy_revoke_fingerprint(
+        &revoked, NULL, test_fingerprint_a, &revision, reason,
+        sizeof(reason)));
+    context.revoked_fingerprints = &revoked;
+    context.policy_revision = revision;
+    assert_false(provider_policy_identity_authorize(&context, &identity,
+                                                    &result));
+    assert_false(identity.ready);
+    assert_non_null(strstr(result.reason, "revoked"));
+
+    struct provider_policy_fingerprint_list reloaded = { 0 };
+    loaded_count = 0;
+    assert_true(provider_policy_fingerprint_list_load_named_runtime_required(
+        &reloaded, path, "allow fingerprint file", reason, sizeof(reason),
+        &loaded_count));
+    assert_int_equal(loaded_count, 1);
+    assert_true(provider_policy_fingerprint_list_contains(
+        &reloaded, test_fingerprint_a));
+
+    provider_policy_fingerprint_list_free_runtime(&reloaded);
+    provider_policy_fingerprint_list_free_runtime(&revoked);
+    provider_policy_fingerprint_list_free_runtime(&allowed);
+    assert_int_equal(unlink(path), 0);
+}
+
+static void
+test_provider_policy_required_sources_reject_missing(void **state)
+{
+    (void)state;
+
+    char path[] = "provider-policy-required-missing-XXXXXX";
+    const int fd = mkstemp(path);
+    assert_true(fd >= 0);
+    close(fd);
+    assert_int_equal(unlink(path), 0);
+
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    struct provider_policy_fingerprint_list fingerprints = { 0 };
+    struct provider_policy_principal_list principals = { 0 };
+    struct provider_policy_cert_list certs = { 0 };
+    assert_false(provider_policy_fingerprint_list_load_named_runtime_required(
+        &fingerprints, path, "allow fingerprint file", reason,
+        sizeof(reason), NULL));
+    assert_non_null(strstr(reason, "could not open"));
+    assert_false(provider_policy_principal_list_load_runtime_required(
+        &principals, path, reason, sizeof(reason), NULL));
+    assert_non_null(strstr(reason, "could not open"));
+    assert_false(provider_policy_cert_list_load_runtime_required(
+        &certs, path, reason, sizeof(reason), NULL));
+    assert_non_null(strstr(reason, "could not open"));
+
+    char directory[] = "provider-policy-required-unreadable-XXXXXX";
+    assert_non_null(mkdtemp(directory));
+    assert_false(provider_policy_fingerprint_list_load_named_runtime_required(
+        &fingerprints, directory, "allow fingerprint file", reason,
+        sizeof(reason), NULL));
+    assert_false(provider_policy_principal_list_load_runtime_required(
+        &principals, directory, reason, sizeof(reason), NULL));
+    assert_false(provider_policy_cert_list_load_runtime_required(
+        &certs, directory, reason, sizeof(reason), NULL));
+    assert_int_equal(rmdir(directory), 0);
+}
+
+static void
+test_provider_policy_persistence_failure_is_retryable(void **state)
+{
+    (void)state;
+
+    char parent[] = "provider-policy-retry-XXXXXX";
+    assert_non_null(mkdtemp(parent));
+    char child[PATH_MAX];
+    char path[PATH_MAX];
+    assert_true(snprintf(child, sizeof(child), "%s/policy", parent)
+                < (int)sizeof(child));
+    assert_true(snprintf(path, sizeof(path), "%s/allow", child)
+                < (int)sizeof(path));
+
+    struct provider_policy_fingerprint_list allowed = { 0 };
+    char reason[PROVIDER_POLICY_REASON_SIZE];
+    uint64_t revision = 11;
+    assert_false(provider_policy_allow_fingerprint(
+        &allowed, NULL, path, test_fingerprint_a, &revision, reason,
+        sizeof(reason)));
+    assert_int_equal(revision, 11);
+    assert_false(provider_policy_fingerprint_list_defined(&allowed));
+
+    assert_int_equal(mkdir(child, 0700), 0);
+    assert_true(provider_policy_allow_fingerprint(
+        &allowed, NULL, path, test_fingerprint_a, &revision, reason,
+        sizeof(reason)));
+    assert_int_equal(revision, 12);
+    assert_true(provider_policy_fingerprint_list_contains(
+        &allowed, test_fingerprint_a));
+
+    provider_policy_fingerprint_list_free_runtime(&allowed);
+    assert_int_equal(unlink(path), 0);
+    assert_int_equal(rmdir(child), 0);
+    assert_int_equal(rmdir(parent), 0);
+}
+
 int
 main(void)
 {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_provider_policy_accepts_empty_policy),
+        cmocka_unit_test(test_provider_policy_openvpn_gate_config),
         cmocka_unit_test(test_provider_policy_rejects_tls_verify_plugin),
         cmocka_unit_test(test_provider_policy_rejects_tls_coupled_auth_hooks),
         cmocka_unit_test(test_provider_policy_rejects_unsupported_ccd),
@@ -1027,6 +1303,11 @@ main(void)
         cmocka_unit_test(test_provider_policy_authorize_rejects_revoked_principal),
         cmocka_unit_test(test_provider_policy_authorize_rejects_revoked_fingerprint),
         cmocka_unit_test(test_provider_policy_authorize_allowlisted_fingerprint),
+        cmocka_unit_test(
+            test_provider_policy_required_allow_file_empty_bootstrap),
+        cmocka_unit_test(test_provider_policy_required_sources_reject_missing),
+        cmocka_unit_test(
+            test_provider_policy_persistence_failure_is_retryable),
     };
 
     return cmocka_run_group_tests_name("provider_policy", tests, NULL, NULL);

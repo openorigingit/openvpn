@@ -24,11 +24,12 @@
 #include "platform.h"
 #include "provider_policy.h"
 #include "pushlist.h"
+#include "ssl_common.h"
 
-#define PROVIDER_POLICY_MAX_PUSH_TOKENS 4
-#define PROVIDER_POLICY_STATIC_POLICY_REVISION 1
+#define PROVIDER_POLICY_MAX_PUSH_TOKENS           4
+#define PROVIDER_POLICY_STATIC_POLICY_REVISION    1
 #define PROVIDER_POLICY_SHA256_FINGERPRINT_PREFIX "sha256:"
-#define PROVIDER_POLICY_SHA256_HEX_LEN 64
+#define PROVIDER_POLICY_SHA256_HEX_LEN            64
 
 static bool
 provider_policy_hex_digest_char(char ch)
@@ -94,6 +95,32 @@ provider_policy_parse_ipv4(const char *str, struct in_addr *addr)
 }
 
 static bool
+provider_policy_parse_positive_int(const char *str)
+{
+    if (!str || !*str)
+    {
+        return false;
+    }
+
+    unsigned int value = 0;
+    for (const unsigned char *cursor = (const unsigned char *)str; *cursor;
+         ++cursor)
+    {
+        if (*cursor < '0' || *cursor > '9')
+        {
+            return false;
+        }
+        const unsigned int digit = *cursor - '0';
+        if (value > ((unsigned int)INT_MAX - digit) / 10u)
+        {
+            return false;
+        }
+        value = value * 10u + digit;
+    }
+    return value > 0;
+}
+
+static bool
 provider_policy_push_option_noop(char *tokens[], int n_tokens)
 {
     if (n_tokens == 2 && strcmp(tokens[0], "route-gateway") == 0)
@@ -107,6 +134,20 @@ provider_policy_push_option_noop(char *tokens[], int n_tokens)
         return strcmp(tokens[1], "subnet") == 0
                || strcmp(tokens[1], "net30") == 0
                || strcmp(tokens[1], "p2p") == 0;
+    }
+
+    /*
+     * --keepalive expands into these OpenVPN transport-liveness hints.  They
+     * have no configuration-payload or traffic-selector artifact for a native
+     * provider session; the IKEv2 helper enforces its own authenticated DPD
+     * lifecycle instead.  Accept only the exact positive-integer forms that
+     * OpenVPN itself pushes, and continue to fail closed on other directives.
+     */
+    if (n_tokens == 2
+        && (strcmp(tokens[0], "ping") == 0
+            || strcmp(tokens[0], "ping-restart") == 0))
+    {
+        return provider_policy_parse_positive_int(tokens[1]);
     }
 
     return false;
@@ -210,7 +251,8 @@ provider_policy_fingerprint_valid(const char *fingerprint)
     }
 
     if (strncasecmp(fingerprint, PROVIDER_POLICY_SHA256_FINGERPRINT_PREFIX,
-                    prefix_len) != 0)
+                    prefix_len)
+        != 0)
     {
         return false;
     }
@@ -249,7 +291,8 @@ provider_policy_fingerprint_list_contains(
     {
         if (entry->credential_fingerprint
             && strcasecmp(entry->credential_fingerprint,
-                          credential_fingerprint) == 0)
+                          credential_fingerprint)
+                   == 0)
         {
             return true;
         }
@@ -399,14 +442,15 @@ provider_policy_fingerprint_file_label(const char *file_label)
     return file_label && *file_label ? file_label : "fingerprint file";
 }
 
-bool
-provider_policy_fingerprint_list_load_named_runtime(
+static bool
+provider_policy_fingerprint_list_load_named_runtime_internal(
     struct provider_policy_fingerprint_list *list,
     const char *path,
     const char *file_label,
     char *reason,
     size_t reason_size,
-    size_t *loaded_count)
+    size_t *loaded_count,
+    bool missing_ok)
 {
     if (loaded_count)
     {
@@ -426,7 +470,7 @@ provider_policy_fingerprint_list_load_named_runtime(
     if (!fp)
     {
         const int open_errno = errno;
-        if (open_errno == ENOENT)
+        if (open_errno == ENOENT && missing_ok)
         {
             return true;
         }
@@ -537,6 +581,32 @@ provider_policy_fingerprint_list_load_named_runtime(
     }
     provider_policy_fingerprint_list_free_runtime(&loaded);
     return true;
+}
+
+bool
+provider_policy_fingerprint_list_load_named_runtime(
+    struct provider_policy_fingerprint_list *list,
+    const char *path,
+    const char *file_label,
+    char *reason,
+    size_t reason_size,
+    size_t *loaded_count)
+{
+    return provider_policy_fingerprint_list_load_named_runtime_internal(
+        list, path, file_label, reason, reason_size, loaded_count, true);
+}
+
+bool
+provider_policy_fingerprint_list_load_named_runtime_required(
+    struct provider_policy_fingerprint_list *list,
+    const char *path,
+    const char *file_label,
+    char *reason,
+    size_t reason_size,
+    size_t *loaded_count)
+{
+    return provider_policy_fingerprint_list_load_named_runtime_internal(
+        list, path, file_label, reason, reason_size, loaded_count, false);
 }
 
 bool
@@ -665,28 +735,43 @@ provider_policy_fingerprint_list_append_file(
 }
 
 bool
-provider_policy_principal_valid(const char *principal)
+provider_policy_principal_canonicalize(const char *principal,
+                                       char *canonical,
+                                       size_t canonical_size)
 {
-    if (!principal || !*principal)
+    if (!principal || !*principal || !canonical || !canonical_size)
     {
         return false;
     }
 
     const size_t len = strlen(principal);
-    if (len >= PROVIDER_POLICY_PRINCIPAL_SIZE)
+    if (len >= PROVIDER_POLICY_PRINCIPAL_SIZE || len >= canonical_size)
     {
         return false;
     }
 
-    for (const char *pos = principal; *pos; ++pos)
+    for (size_t i = 0; i < len; ++i)
     {
-        const unsigned char ch = (unsigned char)*pos;
-        if (ch <= ' ' || ch >= 0x7f)
+        const unsigned char ch = (unsigned char)principal[i];
+        if (ch <= ' ' || ch >= 0x7f || ch == '#')
         {
+            canonical[0] = '\0';
             return false;
         }
+        canonical[i] = ch >= 'A' && ch <= 'Z'
+                           ? (char)(ch + ('a' - 'A'))
+                           : (char)ch;
     }
+    canonical[len] = '\0';
     return true;
+}
+
+bool
+provider_policy_principal_valid(const char *principal)
+{
+    char canonical[PROVIDER_POLICY_PRINCIPAL_SIZE];
+    return provider_policy_principal_canonicalize(
+        principal, canonical, sizeof(canonical));
 }
 
 bool
@@ -701,7 +786,9 @@ provider_policy_principal_list_contains(
     const struct provider_policy_principal_list *list,
     const char *principal)
 {
-    if (!provider_policy_principal_valid(principal))
+    char canonical[PROVIDER_POLICY_PRINCIPAL_SIZE];
+    if (!provider_policy_principal_canonicalize(
+            principal, canonical, sizeof(canonical)))
     {
         return false;
     }
@@ -711,7 +798,7 @@ provider_policy_principal_list_contains(
          entry;
          entry = entry->next)
     {
-        if (entry->principal && strcmp(entry->principal, principal) == 0)
+        if (entry->principal && strcmp(entry->principal, canonical) == 0)
         {
             return true;
         }
@@ -724,19 +811,22 @@ provider_policy_principal_list_add_runtime(
     struct provider_policy_principal_list *list,
     const char *principal)
 {
-    if (!list || !provider_policy_principal_valid(principal))
+    char canonical[PROVIDER_POLICY_PRINCIPAL_SIZE];
+    if (!list
+        || !provider_policy_principal_canonicalize(
+            principal, canonical, sizeof(canonical)))
     {
         return false;
     }
 
-    if (provider_policy_principal_list_contains(list, principal))
+    if (provider_policy_principal_list_contains(list, canonical))
     {
         return true;
     }
 
     struct provider_policy_principal_entry *entry;
     ALLOC_OBJ_CLEAR(entry, struct provider_policy_principal_entry);
-    entry->principal = string_alloc(principal, NULL);
+    entry->principal = string_alloc(canonical, NULL);
     if (!entry->principal)
     {
         free(entry);
@@ -754,6 +844,31 @@ provider_policy_principal_list_add_runtime(
     list->tail = entry;
     ++list->count;
     return true;
+}
+
+static char *
+provider_policy_trim_principal_line(char *line)
+{
+    char *start = line;
+    while (*start == ' ' || *start == '\t')
+    {
+        ++start;
+    }
+    if (*start == '#')
+    {
+        *start = '\0';
+        return start;
+    }
+
+    char *end = start + strlen(start);
+    while (end > start
+           && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r'
+               || end[-1] == '\n'))
+    {
+        --end;
+    }
+    *end = '\0';
+    return start;
 }
 
 void
@@ -776,13 +891,14 @@ provider_policy_principal_list_free_runtime(
     CLEAR(*list);
 }
 
-bool
-provider_policy_principal_list_load_runtime(
+static bool
+provider_policy_principal_list_load_runtime_internal(
     struct provider_policy_principal_list *list,
     const char *path,
     char *reason,
     size_t reason_size,
-    size_t *loaded_count)
+    size_t *loaded_count,
+    bool missing_ok)
 {
     if (loaded_count)
     {
@@ -801,7 +917,7 @@ provider_policy_principal_list_load_runtime(
     if (!fp)
     {
         const int open_errno = errno;
-        if (open_errno == ENOENT)
+        if (open_errno == ENOENT && missing_ok)
         {
             return true;
         }
@@ -831,7 +947,7 @@ provider_policy_principal_list_load_runtime(
             return false;
         }
 
-        const char *principal = provider_policy_trim_revocation_line(line);
+        const char *principal = provider_policy_trim_principal_line(line);
         if (!*principal)
         {
             continue;
@@ -908,6 +1024,30 @@ provider_policy_principal_list_load_runtime(
 }
 
 bool
+provider_policy_principal_list_load_runtime(
+    struct provider_policy_principal_list *list,
+    const char *path,
+    char *reason,
+    size_t reason_size,
+    size_t *loaded_count)
+{
+    return provider_policy_principal_list_load_runtime_internal(
+        list, path, reason, reason_size, loaded_count, true);
+}
+
+bool
+provider_policy_principal_list_load_runtime_required(
+    struct provider_policy_principal_list *list,
+    const char *path,
+    char *reason,
+    size_t reason_size,
+    size_t *loaded_count)
+{
+    return provider_policy_principal_list_load_runtime_internal(
+        list, path, reason, reason_size, loaded_count, false);
+}
+
+bool
 provider_policy_principal_list_append_file(const char *path,
                                            const char *principal,
                                            char *reason,
@@ -920,7 +1060,9 @@ provider_policy_principal_list_append_file(const char *path,
                                    "missing principal revocation file path");
         return false;
     }
-    if (!provider_policy_principal_valid(principal))
+    char canonical[PROVIDER_POLICY_PRINCIPAL_SIZE];
+    if (!provider_policy_principal_canonicalize(
+            principal, canonical, sizeof(canonical)))
     {
         provider_policy_set_reason(reason, reason_size,
                                    "invalid provider principal");
@@ -964,7 +1106,7 @@ provider_policy_principal_list_append_file(const char *path,
     }
 #endif
 
-    if (fprintf(fp, "%s\n", principal) < 0 || fflush(fp) != 0)
+    if (fprintf(fp, "%s\n", canonical) < 0 || fflush(fp) != 0)
     {
         const int write_errno = errno;
         fclose(fp);
@@ -1169,12 +1311,14 @@ provider_policy_trim_cert_revocation_line(char *line)
     return start;
 }
 
-bool
-provider_policy_cert_list_load_runtime(struct provider_policy_cert_list *list,
-                                       const char *path,
-                                       char *reason,
-                                       size_t reason_size,
-                                       size_t *loaded_count)
+static bool
+provider_policy_cert_list_load_runtime_internal(
+    struct provider_policy_cert_list *list,
+    const char *path,
+    char *reason,
+    size_t reason_size,
+    size_t *loaded_count,
+    bool missing_ok)
 {
     if (loaded_count)
     {
@@ -1193,7 +1337,7 @@ provider_policy_cert_list_load_runtime(struct provider_policy_cert_list *list,
     if (!fp)
     {
         const int open_errno = errno;
-        if (open_errno == ENOENT)
+        if (open_errno == ENOENT && missing_ok)
         {
             return true;
         }
@@ -1314,6 +1458,29 @@ provider_policy_cert_list_load_runtime(struct provider_policy_cert_list *list,
 }
 
 bool
+provider_policy_cert_list_load_runtime(struct provider_policy_cert_list *list,
+                                       const char *path,
+                                       char *reason,
+                                       size_t reason_size,
+                                       size_t *loaded_count)
+{
+    return provider_policy_cert_list_load_runtime_internal(
+        list, path, reason, reason_size, loaded_count, true);
+}
+
+bool
+provider_policy_cert_list_load_runtime_required(
+    struct provider_policy_cert_list *list,
+    const char *path,
+    char *reason,
+    size_t reason_size,
+    size_t *loaded_count)
+{
+    return provider_policy_cert_list_load_runtime_internal(
+        list, path, reason, reason_size, loaded_count, false);
+}
+
+bool
 provider_policy_cert_list_append_file(const char *path,
                                       const char *serial,
                                       const char *issuer,
@@ -1408,6 +1575,188 @@ provider_policy_cert_list_append_file(const char *path,
     return true;
 }
 
+static void
+provider_policy_revision_increment(uint64_t *policy_revision)
+{
+    if (policy_revision && *policy_revision < UINT64_MAX)
+    {
+        ++*policy_revision;
+    }
+}
+
+bool
+provider_policy_allow_fingerprint(
+    struct provider_policy_fingerprint_list *allowed,
+    const struct provider_policy_fingerprint_list *revoked,
+    const char *path,
+    const char *credential_fingerprint,
+    uint64_t *policy_revision,
+    char *reason,
+    size_t reason_size)
+{
+    provider_policy_set_reason(reason, reason_size, "ok");
+    if (!allowed || !policy_revision
+        || !provider_policy_fingerprint_valid(credential_fingerprint))
+    {
+        provider_policy_set_reason(reason, reason_size,
+                                   "invalid provider credential fingerprint");
+        return false;
+    }
+    if (provider_policy_fingerprint_list_contains(revoked,
+                                                  credential_fingerprint))
+    {
+        provider_policy_set_reason(reason, reason_size,
+                                   "provider credential fingerprint is revoked");
+        return false;
+    }
+
+    const bool already_allowed =
+        provider_policy_fingerprint_list_contains(allowed,
+                                                  credential_fingerprint);
+    if (!already_allowed && path
+        && !provider_policy_fingerprint_list_append_named_file(
+            path, credential_fingerprint, "allow fingerprint file", reason,
+            reason_size))
+    {
+        return false;
+    }
+    if (!provider_policy_fingerprint_list_add_runtime(
+            allowed, credential_fingerprint))
+    {
+        provider_policy_set_reason(reason, reason_size,
+                                   "provider allowlist update failed");
+        return false;
+    }
+    if (!already_allowed)
+    {
+        provider_policy_revision_increment(policy_revision);
+    }
+    return true;
+}
+
+bool
+provider_policy_revoke_fingerprint(
+    struct provider_policy_fingerprint_list *revoked,
+    const char *path,
+    const char *credential_fingerprint,
+    uint64_t *policy_revision,
+    char *reason,
+    size_t reason_size)
+{
+    provider_policy_set_reason(reason, reason_size, "ok");
+    if (!revoked || !policy_revision
+        || !provider_policy_fingerprint_valid(credential_fingerprint))
+    {
+        provider_policy_set_reason(reason, reason_size,
+                                   "invalid provider credential fingerprint");
+        return false;
+    }
+
+    const bool already_revoked =
+        provider_policy_fingerprint_list_contains(revoked,
+                                                  credential_fingerprint);
+    if (!already_revoked && path
+        && !provider_policy_fingerprint_list_append_file(
+            path, credential_fingerprint, reason, reason_size))
+    {
+        return false;
+    }
+    if (!provider_policy_fingerprint_list_add_runtime(
+            revoked, credential_fingerprint))
+    {
+        provider_policy_set_reason(reason, reason_size,
+                                   "provider fingerprint revocation update failed");
+        return false;
+    }
+    if (!already_revoked)
+    {
+        provider_policy_revision_increment(policy_revision);
+    }
+    return true;
+}
+
+bool
+provider_policy_revoke_principal(
+    struct provider_policy_principal_list *revoked,
+    const char *path,
+    const char *principal,
+    uint64_t *policy_revision,
+    char *reason,
+    size_t reason_size)
+{
+    provider_policy_set_reason(reason, reason_size, "ok");
+    char canonical[PROVIDER_POLICY_PRINCIPAL_SIZE];
+    if (!revoked || !policy_revision
+        || !provider_policy_principal_canonicalize(
+            principal, canonical, sizeof(canonical)))
+    {
+        provider_policy_set_reason(reason, reason_size,
+                                   "invalid provider principal");
+        return false;
+    }
+
+    const bool already_revoked =
+        provider_policy_principal_list_contains(revoked, canonical);
+    if (!already_revoked && path
+        && !provider_policy_principal_list_append_file(
+            path, canonical, reason, reason_size))
+    {
+        return false;
+    }
+    if (!provider_policy_principal_list_add_runtime(revoked, canonical))
+    {
+        provider_policy_set_reason(reason, reason_size,
+                                   "provider principal revocation update failed");
+        return false;
+    }
+    if (!already_revoked)
+    {
+        provider_policy_revision_increment(policy_revision);
+    }
+    return true;
+}
+
+bool
+provider_policy_revoke_cert(
+    struct provider_policy_cert_list *revoked,
+    const char *path,
+    const char *serial,
+    const char *issuer,
+    uint64_t *policy_revision,
+    char *reason,
+    size_t reason_size)
+{
+    provider_policy_set_reason(reason, reason_size, "ok");
+    if (!revoked || !policy_revision
+        || !provider_policy_cert_serial_valid(serial)
+        || !provider_policy_cert_issuer_valid(issuer))
+    {
+        provider_policy_set_reason(reason, reason_size,
+                                   "invalid provider certificate identity");
+        return false;
+    }
+
+    const bool already_revoked =
+        provider_policy_cert_list_contains(revoked, serial, issuer);
+    if (!already_revoked && path
+        && !provider_policy_cert_list_append_file(
+            path, serial, issuer, reason, reason_size))
+    {
+        return false;
+    }
+    if (!provider_policy_cert_list_add_runtime(revoked, serial, issuer))
+    {
+        provider_policy_set_reason(reason, reason_size,
+                                   "provider certificate revocation update failed");
+        return false;
+    }
+    if (!already_revoked)
+    {
+        provider_policy_revision_increment(policy_revision);
+    }
+    return true;
+}
+
 const char *
 provider_policy_preflight_status_name(enum provider_policy_preflight_status status)
 {
@@ -1464,6 +1813,71 @@ provider_policy_auth_result_init(struct provider_policy_auth_result *result)
 {
     provider_policy_set_auth_result(result, PROVIDER_POLICY_AUTH_DENIED,
                                     "provider auth not evaluated");
+}
+
+bool
+provider_policy_openvpn_config_valid(const struct options *options,
+                                     char *reason,
+                                     size_t reason_size)
+{
+    provider_policy_set_reason(reason, reason_size, "ok");
+    if (!options || !options->provider_policy_openvpn)
+    {
+        return true;
+    }
+#if !defined(ENABLE_CRYPTO_OPENSSL)
+    provider_policy_set_reason(reason, reason_size,
+                               "ordinary OpenVPN provider policy requires OpenSSL");
+    return false;
+#endif
+    if (!options->ikev2_helper_allow_file
+        || !*options->ikev2_helper_allow_file)
+    {
+        provider_policy_set_reason(
+            reason, reason_size,
+            "ordinary OpenVPN provider policy requires an allow fingerprint file");
+        return false;
+    }
+    if (!options->ikev2_helper_revocation_file
+        || !*options->ikev2_helper_revocation_file)
+    {
+        provider_policy_set_reason(
+            reason, reason_size,
+            "ordinary OpenVPN provider policy requires a fingerprint revocation file");
+        return false;
+    }
+    if (!options->ikev2_helper_principal_revocation_file
+        || !*options->ikev2_helper_principal_revocation_file)
+    {
+        provider_policy_set_reason(
+            reason, reason_size,
+            "ordinary OpenVPN provider policy requires a principal revocation file");
+        return false;
+    }
+    if (!options->ikev2_helper_cert_revocation_file
+        || !*options->ikev2_helper_cert_revocation_file)
+    {
+        provider_policy_set_reason(
+            reason, reason_size,
+            "ordinary OpenVPN provider policy requires a certificate revocation file");
+        return false;
+    }
+    if (options->ssl_flags
+        & (SSLF_CLIENT_CERT_NOT_REQUIRED | SSLF_CLIENT_CERT_OPTIONAL))
+    {
+        provider_policy_set_reason(
+            reason, reason_size,
+            "ordinary OpenVPN provider policy requires client certificates");
+        return false;
+    }
+    if (options->ssl_flags & SSLF_USERNAME_AS_COMMON_NAME)
+    {
+        provider_policy_set_reason(
+            reason, reason_size,
+            "ordinary OpenVPN provider policy forbids username-as-common-name");
+        return false;
+    }
+    return true;
 }
 
 bool
@@ -1781,20 +2195,24 @@ provider_policy_authorize(const struct provider_policy_auth_context *context,
                                         "provider auth context is missing");
         return false;
     }
-    if (context->profile_mode != PROVIDER_POLICY_PROFILE_EAP_TLS)
+    if (context->profile_mode != PROVIDER_POLICY_PROFILE_EAP_TLS
+        && context->profile_mode != PROVIDER_POLICY_PROFILE_OPENVPN_TLS)
     {
         provider_policy_set_auth_result(result, PROVIDER_POLICY_AUTH_DENIED,
                                         "unsupported provider auth profile");
         return false;
     }
-    if (!context->principal || !*context->principal)
+    char canonical_principal[PROVIDER_POLICY_PRINCIPAL_SIZE];
+    if (!provider_policy_principal_canonicalize(
+            context->principal, canonical_principal,
+            sizeof(canonical_principal)))
     {
         provider_policy_set_auth_result(result, PROVIDER_POLICY_AUTH_DENIED,
-                                        "provider principal is missing");
+                                        "provider principal is invalid");
         return false;
     }
     if (provider_policy_principal_list_contains(context->revoked_principals,
-                                                context->principal))
+                                                canonical_principal))
     {
         provider_policy_set_auth_result(result, PROVIDER_POLICY_AUTH_DENIED,
                                         "provider principal is revoked");
@@ -1850,8 +2268,89 @@ provider_policy_authorize(const struct provider_policy_auth_context *context,
     if (result)
     {
         result->policy_revision = context->policy_revision
-                                  ? context->policy_revision
-                                  : PROVIDER_POLICY_STATIC_POLICY_REVISION;
+                                      ? context->policy_revision
+                                      : PROVIDER_POLICY_STATIC_POLICY_REVISION;
     }
     return true;
+}
+
+bool
+provider_policy_identity_authorize(
+    const struct provider_policy_auth_context *context,
+    struct provider_policy_identity *identity,
+    struct provider_policy_auth_result *result)
+{
+    if (identity)
+    {
+        CLEAR(*identity);
+    }
+    if (!identity || !provider_policy_authorize(context, result))
+    {
+        return false;
+    }
+
+    if (!provider_policy_principal_canonicalize(
+            context->principal, identity->principal,
+            sizeof(identity->principal))
+        || !provider_policy_copy_string(identity->credential_fingerprint,
+                                        sizeof(identity->credential_fingerprint),
+                                        context->credential_fingerprint)
+        || !provider_policy_copy_string(identity->cert_serial,
+                                        sizeof(identity->cert_serial),
+                                        context->cert_serial)
+        || !provider_policy_copy_string(identity->cert_issuer,
+                                        sizeof(identity->cert_issuer),
+                                        context->cert_issuer))
+    {
+        provider_policy_set_auth_result(result, PROVIDER_POLICY_AUTH_DENIED,
+                                        "provider credential identity is invalid");
+        CLEAR(*identity);
+        return false;
+    }
+
+    identity->policy_revision =
+        result && result->policy_revision
+            ? result->policy_revision
+            : (context->policy_revision
+                   ? context->policy_revision
+                   : PROVIDER_POLICY_STATIC_POLICY_REVISION);
+    identity->ready = true;
+    return true;
+}
+
+bool
+provider_policy_identity_matches_fingerprint(
+    const struct provider_policy_identity *identity,
+    const char *credential_fingerprint)
+{
+    return identity && identity->ready
+           && provider_policy_fingerprint_valid(credential_fingerprint)
+           && strcasecmp(identity->credential_fingerprint,
+                         credential_fingerprint)
+                  == 0;
+}
+
+bool
+provider_policy_identity_matches_principal(
+    const struct provider_policy_identity *identity,
+    const char *principal)
+{
+    char canonical[PROVIDER_POLICY_PRINCIPAL_SIZE];
+    return identity && identity->ready
+           && provider_policy_principal_canonicalize(
+               principal, canonical, sizeof(canonical))
+           && strcmp(identity->principal, canonical) == 0;
+}
+
+bool
+provider_policy_identity_matches_cert(
+    const struct provider_policy_identity *identity,
+    const char *serial,
+    const char *issuer)
+{
+    return identity && identity->ready
+           && provider_policy_cert_serial_valid(serial)
+           && provider_policy_cert_issuer_valid(issuer)
+           && strcasecmp(identity->cert_serial, serial) == 0
+           && strcmp(identity->cert_issuer, issuer) == 0;
 }
